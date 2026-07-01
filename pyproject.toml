@@ -1,0 +1,11 @@
+[project]
+name = 'skabm'
+dynamic = ["version"]
+dependencies = [
+    "eurostat>=1.1.1",
+    "httpx>=0.28.1",
+    "ipython>=9.15.0",
+    "numpy>=2.4.6",
+    "polars>=1.42.1",
+    "polars-random>=0.4.0",
+]
