@@ -9,3 +9,14 @@ dependencies = [
     "polars>=1.42.1",
     "polars-random>=0.4.0",
 ]
+
+[tool.setuptools]
+py-modules = ["calibration", "eurostat_loader"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

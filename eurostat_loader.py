@@ -188,8 +188,6 @@ def fetch_firm_demographics(geo: str = "AT", year: int = 2010) -> pl.DataFrame:
     io_df = fetch_io_components(geo, year)
     bd_raw = _fetch_bd_raw(geo)
 
-    year_cols = sorted([c for c in bd_raw.columns if c.isdigit()], key=int)
-
     rows: list[dict] = []
     for industry in io_df["industry"].to_list():
         nace_codes = _cpa_to_nace(industry)
