@@ -30,8 +30,8 @@ import pytest
 import polars as pl
 import polars_random as pr
 
-from calibration import make_agents, make_agents_ga, weighted_enum
-from eurostat_loader import build_firm_io_df
+from skabm.calibration import GeneticConstraintCalibration, make_dataset, weighted_enum
+from skabm.datasets import build_firm_io_df
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ def firm_samplers(io_df) -> dict:
 # ---------------------------------------------------------------------------
 
 def test_firm_marginals(firm_samplers):
-    firms = make_agents(samplers=firm_samplers, n_agents=500, seed=0)
+    firms = make_dataset(samplers=firm_samplers, n_agents=500, seed=0)
 
     assert firms.columns[0] == "id"
     assert firms["id"].to_list() == list(range(500))
@@ -131,7 +131,7 @@ def test_household_marginals():
     status_enum = pl.Enum(["active", "inactive"])
     wage_enum   = pl.Enum(["Q1", "Q2", "Q3", "Q4"])
 
-    households = make_agents(
+    households = make_dataset(
         samplers={
             "status":     weighted_enum(status_enum, [H_ACTIVE, H_INACTIVE]),
             "wage_class": weighted_enum(wage_enum,   [0.325, 0.325, 0.175, 0.175]),
@@ -164,7 +164,7 @@ def test_government_entities(io_df):
     industries    = io_df["industry"]
     industry_enum = pl.Enum(industries.to_list())
 
-    gov_entities = make_agents(
+    gov_entities = make_dataset(
         samplers={
             # Each government entity purchases from one sector, weighted by output share.
             "purchase_sector": weighted_enum(industry_enum, io_df["output"]),
@@ -191,7 +191,7 @@ def test_government_entities(io_df):
 # ---------------------------------------------------------------------------
 
 def test_banks():
-    banks = make_agents(
+    banks = make_dataset(
         samplers={
             # Capital ratio calibrated around Basel III minimum ζ = 0.03.
             "capital_ratio": pr.normal(0.08, 0.02).clip(BANKING["capital_ratio"], 0.30),
@@ -223,7 +223,7 @@ def test_foreign_firms(io_df):
 
     industries    = io_df["industry"]
     industry_enum = pl.Enum(industries.to_list())
-    foreign_firms = make_agents(
+    foreign_firms = make_dataset(
         samplers={
             "source_industry": weighted_enum(industry_enum, io_df["output"]),
             "demand_size":     pr.normal(2.5, 1.0).exp().cast(pl.Int64).clip(1, None),
@@ -263,20 +263,24 @@ def test_firm_sector_size_ga(io_df):
         ind: ("manuf" if ind.startswith("CPA_C") else "service")
         for ind in industries.to_list()
     }
-    firms = make_agents_ga(
-        samplers={
-            "industry": weighted_enum(industry_enum, n_firms),
-            "size":     pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None),
-            "sector":   pl.col("industry").replace_strict(sector_map, return_dtype=pl.String),
-        },
+    samplers = {
+        "industry": weighted_enum(industry_enum, n_firms),
+        "size":     pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None),
+        "sector":   pl.col("industry").replace_strict(sector_map, return_dtype=pl.String),
+    }
+    population = make_dataset(samplers=samplers, n_agents=300, seed=5)
+    cal = GeneticConstraintCalibration(
         constraints=SECTOR_CONSTRAINTS,
-        n_agents=300,
         population_size=40,
         n_generations=150,
         seed=5,
-    )
+    ).fit(population)
+    firms = cal.transform(population)
 
     assert firms.columns[0] == "id"
+
+    # GeneticConstraintCalibration.score() returns -energy; a less-negative value = better fit.
+    assert cal.score(firms) >= cal.score(population)
 
     # Directly evaluate each constraint's metric and target and check convergence.
     for metric_expr, target_expr in SECTOR_CONSTRAINTS:
@@ -290,12 +294,12 @@ def test_firm_sector_size_ga(io_df):
 # ---------------------------------------------------------------------------
 
 def test_single_column_constraint_rejected():
-    with pytest.raises(ValueError, match="Single-column facts belong in `samplers`"):
-        make_agents(
+    with pytest.raises(ValueError, match="Single-column marginal facts belong in `samplers`"):
+        population = make_dataset(
             samplers={"size": pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None)},
-            constraints=[(pl.col("size").mean(), 20.0)],
             n_agents=50,
         )
+        GeneticConstraintCalibration(constraints=[(pl.col("size").mean(), 20.0)]).fit(population)
 
 
 # ---------------------------------------------------------------------------
@@ -306,8 +310,8 @@ def test_full_poledna_calibration(firm_samplers):
     status_enum = pl.Enum(["active", "inactive"])
     wage_enum   = pl.Enum(["Q1", "Q2", "Q3", "Q4"])
 
-    firms = make_agents(samplers=firm_samplers, n_agents=1_000, seed=10)
-    households = make_agents(
+    firms = make_dataset(samplers=firm_samplers, n_agents=1_000, seed=10)
+    households = make_dataset(
         samplers={
             "status":     weighted_enum(status_enum, [H_ACTIVE, H_INACTIVE]),
             "wage_class": weighted_enum(wage_enum,   [0.325, 0.325, 0.175, 0.175]),

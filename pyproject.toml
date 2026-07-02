@@ -4,17 +4,22 @@ dynamic = ["version"]
 dependencies = [
     "eurostat>=1.1.1",
     "httpx>=0.28.1",
-    "ipython>=9.15.0",
     "numpy>=2.4.6",
     "polars>=1.42.1",
     "polars-random>=0.4.0",
+    "pyarrow>=20.0.0",
+    "scikit-learn>=1.6.0",
 ]
 
-[tool.setuptools]
-py-modules = ["calibration", "eurostat_loader"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["skabm*"]
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["tests"]
+
+[tool.uv]
+package = true
 
 [dependency-groups]
 dev = [
