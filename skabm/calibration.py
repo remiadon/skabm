@@ -13,9 +13,9 @@ There is no training set, no label, and no generalisation error — the goal is
 internal consistency of a simulated economy, not predictive accuracy on held-out
 data.
 
-The two concepts share the sklearn estimator interface (fit / transform / score)
-purely for interoperability with pipelines, cross-validation scaffolding, and
-parameter search.  score() returns -energy (higher = better fit to constraints),
+The two concepts share the sklearn estimator interface purely for
+interoperability with pipelines, parameter search, and cross-validation
+scaffolding.  score() returns -energy (higher = better fit to constraints),
 which gives a meaningful optimisation signal even though it is not a
 classification or regression metric.
 
@@ -24,58 +24,61 @@ Public API
     make_dataset(samplers, n_agents, seed)
         Draw a synthetic population from marginal distributions.
         Returns a polars DataFrame with a leading `id` column.
-        This is the ABM equivalent of sklearn.datasets.make_*; no constraints
-        are applied here.
-
-    MetropolisHastingsConstraintCalibration(samplers, constraints, ...)
-        Fits by mutating individual cell values (Metropolis-Hastings /
-        simulated annealing).  Needs `samplers` for the proposal distribution.
+        ABM equivalent of sklearn.datasets.make_*; no inter-column constraints.
 
     GeneticConstraintCalibration(constraints, ...)
         Fits by permuting rows of the population (OX1 crossover).
-        Does not need `samplers`; the gene pool is the population itself.
+        Learns samplers_ — the optimal per-column value pools (including anchor).
+
+    MetropolisHastingsConstraintCalibration(constraints, ...)
+        Fits by mutating individual cell values (MH / simulated annealing).
+        Proposals are drawn from the empirical distribution of X seen at fit.
 
     weighted_enum(enum, weights) -> pl.Expr
-        Convenience sampler: CDF-inversion of a pl.Enum with given weights.
+        CDF-inversion sampler for a pl.Enum with given weights.
 
     energy(df, constraints) -> float
         Total MSE energy of df against all (metric_expr, target) constraints.
 
-Samplers
---------
-    dict[str, pl.Series | pl.Expr]
+Fitted attributes (both calibrators)
+-------------------------------------
+    samplers_ : dict[str, pl.Series]
+        Optimal per-column value pools, including the anchor column.
+        Passing samplers_ to make_dataset() generates new populations that
+        reflect the learned marginal distributions (joint structure is
+        approximate; use transform() for exact conditional structure).
 
-    Every entry is a pool from which n_agents rows are drawn with replacement:
-    - pl.Series            → sampled directly.
-    - context-free pl.Expr → pl.select() gives a non-empty Series.
-    - row-context pl.Expr  → pl.select() returns 0 rows (polars-random,
-                             weighted_enum); materialised via a _POOL_SIZE-row
-                             dummy frame.
-    Column-context Expr (those referencing other sampler columns via
-    replace_strict etc.) are detected via .meta.root_names() and resolved in
-    insertion order after all other columns.
+    anchor_col_ : str
+        The first column of X passed to fit() — kept from X in transform().
+
+    best_energy_ : float
+        Energy achieved at the end of optimisation.
+
+transform() semantics
+---------------------
+    transform(X_new) keeps the anchor column from X_new unchanged and
+    conditionally resamples each free column from samplers_: for each unique
+    anchor value v, free-column values are drawn (with replacement) from the
+    subset of the learned pool where anchor == v.  Works for any X size.
 
 Constraints
 -----------
     Sequence[tuple[pl.Expr, float | pl.Expr]]
 
-    Each entry is (metric_expr, target).  metric_expr must reference ≥ 2
-    sampler columns (single-column marginal facts belong in `samplers`).
-    Energy contribution = MSE(metric - target).
+    Single-column constraints are accepted with a UserWarning (may erode the
+    marginal distribution set by make_dataset).  Multi-column constraints are
+    the primary use case: GA preserves per-column multisets exactly; MH
+    preserves per-column distributions approximately.
 
 sklearn compatibility note
 --------------------------
-    polars Expr objects are not guaranteed to be hashable or deepcopy-able by
-    Python's standard mechanisms, which can trip up sklearn's clone() utility.
-    Both calibrators therefore store constraints in serialised form internally
-    (pl.Expr.meta.serialize / pl.Expr.deserialize) and expose them transparently
-    via get_params / set_params.  From the caller's perspective the API is
-    unchanged: pass plain pl.Expr, get pl.Expr back.
+    pl.Expr objects are serialised internally via pl.Expr.meta.serialize /
+    pl.Expr.deserialize so that get_params() / clone() work correctly.
 """
 
 from __future__ import annotations
 
-from collections import Counter
+import warnings
 from typing import Sequence
 
 import numpy as np
@@ -88,7 +91,7 @@ _POOL_SIZE = 10_000
 
 
 # ---------------------------------------------------------------------------
-# Serialisation helpers — make pl.Expr safe for sklearn clone / get_params
+# Expr serialisation — sklearn clone / pickle safety
 # ---------------------------------------------------------------------------
 
 def _ser(v) -> bytes | float:
@@ -157,8 +160,7 @@ def _split(samplers: dict) -> tuple[dict, list]:
 def energy(df: pl.DataFrame, constraints: Sequence[tuple]) -> float:
     """Total MSE energy of df against all (metric_expr, target) constraints.
 
-    Constraints may contain raw pl.Expr or serialised bytes (auto-detected).
-    Returns 0.0 when constraints is empty.  Higher energy = worse fit.
+    Accepts raw pl.Expr or serialised bytes.  Returns 0.0 when empty.
     """
     if not constraints:
         return 0.0
@@ -175,18 +177,88 @@ def energy(df: pl.DataFrame, constraints: Sequence[tuple]) -> float:
     return total
 
 
-def _validate_constraints(constraints: Sequence[tuple]) -> None:
+def _warn_single_col_constraints(constraints: Sequence[tuple]) -> None:
     for i, (metric_expr, _) in enumerate(_de_constraints(constraints)):
         roots = metric_expr.meta.root_names()
         if len(roots) < 2:
-            raise ValueError(
-                f"Constraint {i} metric references only {roots}. "
-                "Single-column marginal facts belong in `samplers`, not `constraints`."
+            warnings.warn(
+                f"Constraint {i} references only {roots}.  Optimising a "
+                "single-column constraint may shift that column's global "
+                "distribution away from what make_dataset established.  "
+                "Consider encoding single-column facts in samplers instead.",
+                UserWarning,
+                stacklevel=3,
             )
 
 
 # ---------------------------------------------------------------------------
-# make_dataset — pure ABM population sampler, no constraints
+# Conditional transform helper — shared by both calibrators
+# ---------------------------------------------------------------------------
+
+def _anchor_cols(df: pl.DataFrame) -> list[str]:
+    """Return columns whose dtype is Enum, Categorical, or Boolean."""
+    return [
+        c for c in df.columns
+        if isinstance(df[c].dtype, (pl.Enum, pl.Categorical)) or df[c].dtype == pl.Boolean
+    ]
+
+
+def _conditional_transform(
+    X: pl.DataFrame,
+    samplers_: dict[str, pl.Series],
+    anchor_cols: list[str],
+    seed: int,
+) -> pl.DataFrame:
+    """Conditionally resample free columns of X from learned pools.
+
+    Groups X by every anchor column (enum/categorical/boolean).  For each
+    unique combination of anchor values, draws free-column values (with
+    replacement) from the rows of samplers_ that share the same combination.
+
+    Uses polars concat_str composite keys + arg_true() + pl.Series.sample() —
+    no numpy random generators.
+    """
+    working = X.drop("id") if "id" in X.columns else X
+    free_cols = [c for c in working.columns if c not in set(anchor_cols)]
+
+    if not anchor_cols:
+        pool_size = next(iter(samplers_.values())).len()
+        indices = pl.int_range(pool_size, eager=True).sample(working.height, with_replacement=True, seed=seed)
+        return pl.DataFrame(
+            {col: samplers_[col].gather(indices) for col in working.columns}
+        ).with_row_index("id")
+
+    _SEP = "\x00"
+    pool_keys = (
+        pl.DataFrame({col: samplers_[col] for col in anchor_cols})
+        .select(pl.concat_str(anchor_cols, separator=_SEP).alias("_k"))["_k"]
+    )
+
+    chunks = []
+    for group_key, group in working.with_row_index("_orig").group_by(anchor_cols):
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+        key_str = _SEP.join("" if v is None else str(v) for v in group_key)
+        fitted_indices = (pool_keys == key_str).arg_true()
+        if fitted_indices.len() == 0:
+            fitted_indices = pl.int_range(pool_keys.len(), eager=True)
+        sampled = fitted_indices.sample(group.height, with_replacement=True, seed=seed)
+        chunks.append(
+            group.select(["_orig"] + anchor_cols).with_columns(
+                pl.Series(col, samplers_[col].gather(sampled)) for col in free_cols
+            )
+        )
+    return (
+        pl.concat(chunks)
+        .sort("_orig")
+        .drop("_orig")
+        .select(working.columns)
+        .with_row_index("id")
+    )
+
+
+# ---------------------------------------------------------------------------
+# make_dataset — pure marginal sampler, no inter-column constraints
 # ---------------------------------------------------------------------------
 
 def make_dataset(
@@ -196,20 +268,24 @@ def make_dataset(
 ) -> pl.DataFrame:
     """Draw a synthetic agent population from marginal samplers.
 
-    This is the ABM equivalent of sklearn.datasets.make_*: it samples each
-    column independently from its pool and resolves derived columns (those
-    referencing other sampler columns) in insertion order.  No inter-column
-    constraints are applied; pass the result to a calibrator to enforce joint
-    facts.
+    Samples each column independently from its pool and resolves derived
+    columns (those referencing other sampler columns) in insertion order.
+    No inter-column constraints — pass the result to a calibrator.
+
+    Can be called with a fitted calibrator's samplers_ to generate new
+    populations reflecting the learned distributions:
+
+        new_pop = make_dataset(calibrator.samplers_, n_agents=1_000)
 
     Parameters
     ----------
     samplers : dict[str, pl.Series | pl.Expr]
-        Column name → pool.  See module docstring for pool types.
+        Column name → pool.  pl.Series and context-free pl.Expr are sampled
+        with replacement.  Row-context pl.Expr (polars-random, weighted_enum)
+        are materialised via a dummy frame.  Column-context Expr are resolved
+        last, in insertion order.
     n_agents : int
-        Population size.
     seed : int
-        Seed for reproducible pool sampling.
 
     Returns
     -------
@@ -228,166 +304,22 @@ def make_dataset(
 
 
 # ---------------------------------------------------------------------------
-# MetropolisHastingsConstraintCalibration
-# ---------------------------------------------------------------------------
-
-class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
-    """Constraint calibrator using Metropolis-Hastings / simulated annealing.
-
-    Mutates individual cell values in the population by drawing proposals from
-    the sampler pools, accepting or rejecting each proposal according to the
-    Boltzmann criterion.  Requires `samplers` to define the proposal distribution.
-
-    ABM context: used to enforce aggregate stylized facts (e.g. mean firm size
-    per industry matches IO-table coefficients) on a population already drawn by
-    make_dataset().
-
-    Parameters
-    ----------
-    samplers : dict[str, pl.Series | pl.Expr]
-        Proposal pools — same dict passed to make_dataset().
-    constraints : Sequence[tuple[pl.Expr, float | pl.Expr]]
-        (metric_expr, target) pairs; metric_expr must reference ≥ 2 columns.
-        Stored in serialised form internally for sklearn compatibility.
-    n_steps, t0, cooling, seed, verbose : see module docstring.
-    """
-
-    def __init__(
-        self,
-        samplers: dict,
-        constraints: Sequence[tuple] = (),
-        n_steps: int = 20_000,
-        t0: float = 2.0,
-        cooling: float = 0.9995,
-        seed: int = 0,
-        verbose: bool = False,
-    ):
-        self.samplers = samplers
-        self.constraints = _ser_constraints(constraints)
-        self.n_steps = n_steps
-        self.t0 = t0
-        self.cooling = cooling
-        self.seed = seed
-        self.verbose = verbose
-
-    def get_params(self, deep: bool = True) -> dict:
-        return {
-            "samplers":    self.samplers,
-            "constraints": self.constraints,   # bytes — safe for clone / pickle
-            "n_steps":     self.n_steps,
-            "t0":          self.t0,
-            "cooling":     self.cooling,
-            "seed":        self.seed,
-            "verbose":     self.verbose,
-        }
-
-    def fit(self, X: pl.DataFrame, y=None) -> "MetropolisHastingsConstraintCalibration":
-        """Run MH optimisation on population X."""
-        constraints = _de_constraints(self.constraints)
-        _validate_constraints(constraints)
-        mutable, derived = _split(self.samplers)
-        mutable_cols = list(mutable.keys())
-        n_agents = X.height
-
-        working = X.drop("id") if "id" in X.columns else X
-        schema = pl.Schema({col: working[col].dtype for col in mutable_cols})
-
-        def to_df(d: dict) -> pl.DataFrame:
-            df = pl.DataFrame(d, schema=schema)
-            for col, expr in derived:
-                df = df.with_columns(expr.alias(col))
-            for col in working.columns:
-                if col not in df.columns:
-                    df = df.with_columns(working[col].alias(col))
-            return df.select(working.columns)
-
-        data = {col: working[col].to_list() for col in mutable_cols}
-
-        if not constraints:
-            self.best_df_ = X
-            self.best_energy_ = 0.0
-            return self
-
-        rng = np.random.default_rng(self.seed)
-        row_idx = rng.integers(0, n_agents, size=self.n_steps)
-        col_idx = rng.integers(0, len(mutable_cols), size=self.n_steps)
-        log_u = np.log(rng.random(self.n_steps))
-
-        col_hit_counts = Counter(col_idx.tolist())
-        proposal_queues = {
-            mutable_cols[j]: iter(
-                _pool(mutable[mutable_cols[j]]).sample(count, with_replacement=True).to_list()
-            )
-            for j, count in col_hit_counts.items()
-        }
-
-        current_energy = energy(to_df(data), constraints)
-        best_data = {k: list(v) for k, v in data.items()}
-        best_energy_val = current_energy
-        T = self.t0
-        EPS = 1e-9
-
-        for step in range(self.n_steps):
-            if best_energy_val <= EPS:
-                break
-            i = int(row_idx[step])
-            col = mutable_cols[int(col_idx[step])]
-            new_val = next(proposal_queues[col])
-            old_val = data[col][i]
-            if new_val == old_val:
-                continue
-            data[col][i] = new_val
-            trial = energy(to_df(data), constraints)
-            delta = trial - current_energy
-            if delta <= 0 or log_u[step] < -delta / max(T, 1e-9):
-                current_energy = trial
-                if trial < best_energy_val:
-                    best_energy_val = trial
-                    best_data = {k: list(v) for k, v in data.items()}
-            else:
-                data[col][i] = old_val
-            T *= self.cooling
-            if self.verbose and step % 1_000 == 0:
-                print(f"step {step:6d}  T={T:.4f}  energy={current_energy:.4f}  best={best_energy_val:.4f}")
-
-        if best_energy_val > EPS:
-            print(f"[MH] warning: energy {best_energy_val:.4f} after {self.n_steps} steps.")
-
-        best = to_df(best_data)
-        self.best_df_ = best.with_row_index("id") if "id" not in best.columns else best
-        self.best_energy_ = best_energy_val
-        return self
-
-    def transform(self, X: pl.DataFrame) -> pl.DataFrame:  # noqa: ARG002
-        check_is_fitted(self, "best_df_")
-        return self.best_df_
-
-    def score(self, X: pl.DataFrame, y=None) -> float:
-        """-energy(X, constraints); higher is better (sklearn sign convention)."""
-        return -energy(X, self.constraints)
-
-
-# ---------------------------------------------------------------------------
 # GeneticConstraintCalibration
 # ---------------------------------------------------------------------------
 
 class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
     """Constraint calibrator using a genetic algorithm over row permutations.
 
-    Optimises by rearranging existing rows of the population via OX1 crossover
-    and swap mutation.  Does not need `samplers`; the gene pool is the
-    population X passed to fit().
-
-    ABM context: enforces inter-column joint facts (e.g. larger firms
-    concentrated in capital-intensive industries) on a population whose
-    marginals were already set by make_dataset().
+    Learns samplers_ by permuting rows of the input population to minimise
+    constraint energy.  Permutation leaves per-column value multisets exactly
+    intact, so global marginal distributions are perfectly preserved.
 
     Parameters
     ----------
     constraints : Sequence[tuple[pl.Expr, float | pl.Expr]]
-        Stored in serialised form internally for sklearn compatibility.
+        Stored in serialised form for sklearn clone() / pickle safety.
     population_size, n_generations, mutation_rate, elite_frac,
-    tournament_size, seed, verbose : see module docstring.
+    tournament_size, seed, verbose : optimisation hyper-parameters.
     """
 
     def __init__(
@@ -412,23 +344,27 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
 
     def get_params(self, deep: bool = True) -> dict:
         return {
-            "constraints":    self.constraints,
+            "constraints":     self.constraints,
             "population_size": self.population_size,
-            "n_generations":  self.n_generations,
-            "mutation_rate":  self.mutation_rate,
-            "elite_frac":     self.elite_frac,
+            "n_generations":   self.n_generations,
+            "mutation_rate":   self.mutation_rate,
+            "elite_frac":      self.elite_frac,
             "tournament_size": self.tournament_size,
-            "seed":           self.seed,
-            "verbose":        self.verbose,
+            "seed":            self.seed,
+            "verbose":         self.verbose,
         }
 
     def fit(self, X: pl.DataFrame, y=None) -> "GeneticConstraintCalibration":
-        """Run GA optimisation, permuting rows of X to minimise constraint energy."""
+        """Permute rows of X to minimise constraint energy.  Populates samplers_."""
         constraints = _de_constraints(self.constraints)
-        _validate_constraints(constraints)
+        _warn_single_col_constraints(constraints)
+
         base_df = X.drop("id") if "id" in X.columns else X
-        free_cols = base_df.columns[1:]
+        anchors = _anchor_cols(base_df)
+        free_cols = [c for c in base_df.columns if c not in set(anchors)]
         n_agents = base_df.height
+        n_elite = max(1, int(np.ceil(self.elite_frac * self.population_size)))
+        n_swaps = max(1, int(np.ceil(self.mutation_rate * n_agents)))
 
         def apply_genome(genome: dict) -> pl.DataFrame:
             if not free_cols:
@@ -437,15 +373,40 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
                 pl.col(c).gather(pl.Series(genome[c])) for c in free_cols
             )
 
-        rng = np.random.default_rng(self.seed)
-        n_elite = max(1, int(np.ceil(self.elite_frac * self.population_size)))
-        n_swaps = max(1, int(np.ceil(self.mutation_rate * n_agents)))
+        n_free = max(1, len(free_cols))
 
-        def random_genome() -> dict:
-            return {c: rng.permutation(n_agents) for c in free_cols}
+        if not free_cols:
+            self.samplers_ = {col: base_df[col] for col in base_df.columns}
+            self.anchor_cols_ = anchors
+            self.best_energy_ = energy(base_df, constraints)
+            return self
+
+        # Pre-generate all random indices via polars (no numpy RNG).
+        # OX1 is called len(free_cols) times per genome; tournament twice per genome.
+        budget = self.n_generations * self.population_size
+        _rints = lambda n, hi, s: (  # noqa: E731
+            pl.int_range(hi, eager=True)
+            .sample(n, with_replacement=True, seed=s)
+            .to_numpy()
+        )
+        ab_pool   = _rints(budget * 2 * n_free, n_agents, self.seed)
+        # 2 tournament calls per (genome, free_col): each parent per col is a separate call
+        tour_pool = _rints(budget * self.tournament_size * 2 * n_free, self.population_size, self.seed + 1)
+        swap_pool = _rints(budget * n_swaps * 2 * n_free, n_agents, self.seed + 2)
+        ab_ptr = tour_ptr = swap_ptr = 0
+
+        def random_genome(idx: int) -> dict:
+            return {
+                c: pl.int_range(n_agents, eager=True)
+                       .sample(n_agents, with_replacement=False, seed=self.seed + idx * len(free_cols) + j)
+                       .to_numpy()
+                for j, c in enumerate(free_cols)
+            }
 
         def ox1(p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
-            a, b = sorted(rng.integers(0, n_agents, size=2))
+            nonlocal ab_ptr
+            a, b = sorted(ab_pool[ab_ptr: ab_ptr + 2])
+            ab_ptr += 2
             child = np.full(n_agents, -1, dtype=np.intp)
             child[a:b] = p1[a:b]
             in_slice = set(child[a:b].tolist())
@@ -455,23 +416,25 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
             return child
 
         def mutate(g: dict) -> dict:
+            nonlocal swap_ptr
             out = {}
             for c in free_cols:
                 perm = g[c].copy()
                 for _ in range(n_swaps):
-                    i, j = rng.integers(0, n_agents, size=2)
+                    i, j = swap_pool[swap_ptr], swap_pool[swap_ptr + 1]
+                    swap_ptr += 2
                     perm[i], perm[j] = perm[j], perm[i]
                 out[c] = perm
             return out
 
         def tournament(scored: list) -> dict:
-            return min(
-                [scored[k] for k in rng.integers(0, len(scored), size=self.tournament_size)],
-                key=lambda x: x[0],
-            )[1]
+            nonlocal tour_ptr
+            indices = tour_pool[tour_ptr: tour_ptr + self.tournament_size]
+            tour_ptr += self.tournament_size
+            return min([scored[k % len(scored)] for k in indices], key=lambda x: x[0])[1]
 
-        scored = [(energy(apply_genome(g), constraints), g)
-                  for g in [random_genome() for _ in range(self.population_size)]]
+        initial = [random_genome(i) for i in range(self.population_size)]
+        scored = [(energy(apply_genome(g), constraints), g) for g in initial]
         scored.sort(key=lambda x: x[0])
         best_energy_val, best_genome = scored[0]
 
@@ -493,14 +456,157 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
         if best_energy_val > EPS:
             print(f"[GA] warning: energy {best_energy_val:.4f} after {self.n_generations} generations.")
 
-        self.best_df_ = apply_genome(best_genome).with_row_index("id")
+        best = apply_genome(best_genome)
+        self.samplers_ = {col: best[col] for col in base_df.columns}
+        self.anchor_cols_ = anchors
         self.best_energy_ = best_energy_val
         return self
 
-    def transform(self, X: pl.DataFrame) -> pl.DataFrame:  # noqa: ARG002
-        check_is_fitted(self, "best_df_")
-        return self.best_df_
+    def transform(self, X: pl.DataFrame, y=None) -> pl.DataFrame:
+        check_is_fitted(self, "samplers_")
+        return _conditional_transform(X, self.samplers_, self.anchor_cols_, self.seed)
 
     def score(self, X: pl.DataFrame, y=None) -> float:
-        """-energy(X, constraints); higher is better (sklearn sign convention)."""
+        """-energy(X, constraints).  Higher is better.  Use for drift detection."""
+        return -energy(X, self.constraints)
+
+
+# ---------------------------------------------------------------------------
+# MetropolisHastingsConstraintCalibration
+# ---------------------------------------------------------------------------
+
+class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
+    """Constraint calibrator using Metropolis-Hastings / simulated annealing.
+
+    Mutates individual cell values by drawing proposals from the empirical
+    distribution of X seen at fit (X[col] is both prior and proposal pool).
+    Per-column distributions are approximately preserved.
+
+    Parameters
+    ----------
+    constraints : Sequence[tuple[pl.Expr, float | pl.Expr]]
+        Stored in serialised form for sklearn clone() / pickle safety.
+    n_steps, t0, cooling, seed, verbose : optimisation hyper-parameters.
+    """
+
+    def __init__(
+        self,
+        constraints: Sequence[tuple] = (),
+        n_steps: int = 20_000,
+        t0: float = 2.0,
+        cooling: float = 0.9995,
+        seed: int = 0,
+        verbose: bool = False,
+    ):
+        self.constraints = _ser_constraints(constraints)
+        self.n_steps = n_steps
+        self.t0 = t0
+        self.cooling = cooling
+        self.seed = seed
+        self.verbose = verbose
+
+    def get_params(self, deep: bool = True) -> dict:
+        return {
+            "constraints": self.constraints,
+            "n_steps":     self.n_steps,
+            "t0":          self.t0,
+            "cooling":     self.cooling,
+            "seed":        self.seed,
+            "verbose":     self.verbose,
+        }
+
+    def fit(self, X: pl.DataFrame, y=None) -> "MetropolisHastingsConstraintCalibration":
+        """Run MH on X using X[col] as the proposal pool.  Populates samplers_."""
+        constraints = _de_constraints(self.constraints)
+        _warn_single_col_constraints(constraints)
+
+        working = X.drop("id") if "id" in X.columns else X
+        anchors = _anchor_cols(working)
+        free_cols = [c for c in working.columns if c not in set(anchors)]
+        n_agents = working.height
+
+        schema = pl.Schema({col: working[col].dtype for col in free_cols})
+        data = {col: working[col].to_list() for col in free_cols}
+
+        def to_df(d: dict) -> pl.DataFrame:
+            df = pl.DataFrame(d, schema=schema)
+            return pl.concat([working.select(anchors), df], how="horizontal_extend")
+
+        if not constraints:
+            self.samplers_ = {col: working[col] for col in working.columns}
+            self.anchor_cols_ = anchors
+            self.best_energy_ = 0.0
+            return self
+
+        # Pre-generate all random indices via polars (no numpy RNG).
+        _rints = lambda n, hi, s: (  # noqa: E731
+            pl.int_range(hi, eager=True)
+            .sample(n, with_replacement=True, seed=s)
+            .to_list()
+        )
+        row_idx = _rints(self.n_steps, n_agents, self.seed)
+        col_idx = _rints(self.n_steps, len(free_cols), self.seed + 1)
+        log_u = (
+            pl.int_range(self.n_steps, eager=True)
+            .to_frame("_i")
+            .select(pr.uniform(0, 1).alias("u"))
+            .to_series()
+            .log()
+            .to_list()
+        )
+
+        # Proposal queues — drawn from X[col] (empirical prior).
+        from collections import Counter
+        col_hit_counts = Counter(col_idx)
+        proposal_queues = {
+            free_cols[j]: iter(
+                working[free_cols[j]].sample(count, with_replacement=True, seed=self.seed + j + 10).to_list()
+            )
+            for j, count in col_hit_counts.items()
+        }
+
+        current_energy = energy(to_df(data), constraints)
+        best_data = {k: list(v) for k, v in data.items()}
+        best_energy_val = current_energy
+        T = self.t0
+        EPS = 1e-9
+
+        for step in range(self.n_steps):
+            if best_energy_val <= EPS:
+                break
+            i = row_idx[step]
+            col = free_cols[col_idx[step]]
+            new_val = next(proposal_queues[col])
+            old_val = data[col][i]
+            if new_val == old_val:
+                continue
+            data[col][i] = new_val
+            trial = energy(to_df(data), constraints)
+            delta = trial - current_energy
+            if delta <= 0 or log_u[step] < -delta / max(T, 1e-9):
+                current_energy = trial
+                if trial < best_energy_val:
+                    best_energy_val = trial
+                    best_data = {k: list(v) for k, v in data.items()}
+            else:
+                data[col][i] = old_val
+            T *= self.cooling
+            if self.verbose and step % 1_000 == 0:
+                print(f"step {step:6d}  T={T:.4f}  energy={current_energy:.4f}  best={best_energy_val:.4f}")
+
+        if best_energy_val > EPS:
+            print(f"[MH] warning: energy {best_energy_val:.4f} after {self.n_steps} steps.")
+
+        best = to_df(best_data)
+        self.samplers_ = {col: best[col] for col in working.columns}
+        self.anchor_cols_ = anchors
+        self.best_energy_ = best_energy_val
+        return self
+
+    def transform(self, X: pl.DataFrame, y=None) -> pl.DataFrame:
+        check_is_fitted(self, "samplers_")
+        return _conditional_transform(X, self.samplers_, self.anchor_cols_, self.seed)
+
+    def score(self, X: pl.DataFrame, y=None) -> float:
+        """-energy(X, constraints).  Higher is better.  Use for drift detection."""
         return -energy(X, self.constraints)

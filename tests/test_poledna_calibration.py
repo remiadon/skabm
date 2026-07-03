@@ -247,30 +247,35 @@ def test_foreign_firms(io_df):
 # After GA, we evaluate the metric and check it is near the target.
 # ---------------------------------------------------------------------------
 
-SECTOR_CONSTRAINTS = [
-    (
-        pl.col("size").log().mean().over("sector"),
-        pl.when(pl.col("sector") == "manuf").then(3.5).otherwise(2.5),
-    )
-]
-
-
 def test_firm_sector_size_ga(io_df):
     industries    = io_df["industry"]
     n_firms       = io_df["n_firms"]
     industry_enum = pl.Enum(industries.to_list())
-    sector_map    = {
-        ind: ("manuf" if ind.startswith("CPA_C") else "service")
-        for ind in industries.to_list()
-    }
-    samplers = {
-        "industry": weighted_enum(industry_enum, n_firms),
-        "size":     pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None),
-        "sector":   pl.col("industry").replace_strict(sector_map, return_dtype=pl.String),
-    }
-    population = make_dataset(samplers=samplers, n_agents=300, seed=5)
+
+    # sector is derived from industry — compute it inline in the constraint
+    # rather than materialising it as a separate column.  The calibrator only
+    # sees [industry, size] and permutes size to satisfy the constraint.
+    ind_keys = industries.to_list()
+    sec_vals = ["manuf" if i.startswith("CPA_C") else "service" for i in ind_keys]
+    sector_of = pl.col("industry").replace_strict(ind_keys, sec_vals, return_dtype=pl.String)
+
+    constraints = [
+        (
+            pl.col("size").log().mean().over(sector_of),
+            pl.when(sector_of == "manuf").then(3.5).otherwise(2.5),
+        )
+    ]
+
+    population = make_dataset(
+        samplers={
+            "industry": weighted_enum(industry_enum, n_firms),
+            "size":     pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None),
+        },
+        n_agents=300,
+        seed=5,
+    )
     cal = GeneticConstraintCalibration(
-        constraints=SECTOR_CONSTRAINTS,
+        constraints=constraints,
         population_size=40,
         n_generations=150,
         seed=5,
@@ -279,11 +284,11 @@ def test_firm_sector_size_ga(io_df):
 
     assert firms.columns[0] == "id"
 
-    # GeneticConstraintCalibration.score() returns -energy; a less-negative value = better fit.
+    # score() returns -energy; a less-negative value = better fit to constraints.
     assert cal.score(firms) >= cal.score(population)
 
     # Directly evaluate each constraint's metric and target and check convergence.
-    for metric_expr, target_expr in SECTOR_CONSTRAINTS:
+    for metric_expr, target_expr in constraints:
         achieved = firms.select(metric_expr.alias("m")).to_series()
         expected = firms.select(target_expr.alias("t")).to_series()
         assert (achieved - expected).abs().mean() == pytest.approx(0.0, abs=0.8)
@@ -293,13 +298,16 @@ def test_firm_sector_size_ga(io_df):
 # Test 7: Guard — single-column constraint metric is rejected
 # ---------------------------------------------------------------------------
 
-def test_single_column_constraint_rejected():
-    with pytest.raises(ValueError, match="Single-column marginal facts belong in `samplers`"):
-        population = make_dataset(
-            samplers={"size": pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None)},
-            n_agents=50,
-        )
-        GeneticConstraintCalibration(constraints=[(pl.col("size").mean(), 20.0)]).fit(population)
+def test_single_column_constraint_warns():
+    population = make_dataset(
+        samplers={"size": pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None)},
+        n_agents=50,
+    )
+    with pytest.warns(UserWarning, match="single-column"):
+        GeneticConstraintCalibration(
+            constraints=[(pl.col("size").mean(), 20.0)],
+            n_generations=1,
+        ).fit(population)
 
 
 # ---------------------------------------------------------------------------
