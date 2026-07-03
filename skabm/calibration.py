@@ -94,6 +94,7 @@ _POOL_SIZE = 10_000
 # Expr serialisation — sklearn clone / pickle safety
 # ---------------------------------------------------------------------------
 
+
 def _ser(v) -> bytes | float:
     return v.meta.serialize(format="binary") if isinstance(v, pl.Expr) else v
 
@@ -114,6 +115,7 @@ def _de_constraints(constraints: Sequence[tuple]) -> list[tuple]:
 # Sampling primitives
 # ---------------------------------------------------------------------------
 
+
 def weighted_enum(enum: pl.Enum, weights: Sequence[float] | pl.Series) -> pl.Expr:
     """CDF-inversion sampler for a pl.Enum with given weights.
 
@@ -124,7 +126,9 @@ def weighted_enum(enum: pl.Enum, weights: Sequence[float] | pl.Series) -> pl.Exp
         weights = weights.to_list()
     cats = list(enum.categories)
     if len(cats) != len(weights):
-        raise ValueError(f"len(weights)={len(weights)} must equal len(categories)={len(cats)}")
+        raise ValueError(
+            f"len(weights)={len(weights)} must equal len(categories)={len(cats)}"
+        )
     total = sum(weights)
     breaks = [sum(weights[: i + 1]) / total for i in range(len(cats) - 1)]
     return pr.uniform(0, 1).cut(breaks=breaks, labels=cats)
@@ -195,11 +199,14 @@ def _warn_single_col_constraints(constraints: Sequence[tuple]) -> None:
 # Conditional transform helper — shared by both calibrators
 # ---------------------------------------------------------------------------
 
+
 def _anchor_cols(df: pl.DataFrame) -> list[str]:
     """Return columns whose dtype is Enum, Categorical, or Boolean."""
     return [
-        c for c in df.columns
-        if isinstance(df[c].dtype, (pl.Enum, pl.Categorical)) or df[c].dtype == pl.Boolean
+        c
+        for c in df.columns
+        if isinstance(df[c].dtype, (pl.Enum, pl.Categorical))
+        or df[c].dtype == pl.Boolean
     ]
 
 
@@ -223,16 +230,17 @@ def _conditional_transform(
 
     if not anchor_cols:
         pool_size = next(iter(samplers_.values())).len()
-        indices = pl.int_range(pool_size, eager=True).sample(working.height, with_replacement=True, seed=seed)
+        indices = pl.int_range(pool_size, eager=True).sample(
+            working.height, with_replacement=True, seed=seed
+        )
         return pl.DataFrame(
             {col: samplers_[col].gather(indices) for col in working.columns}
         ).with_row_index("id")
 
     _SEP = "\x00"
-    pool_keys = (
-        pl.DataFrame({col: samplers_[col] for col in anchor_cols})
-        .select(pl.concat_str(anchor_cols, separator=_SEP).alias("_k"))["_k"]
-    )
+    pool_keys = pl.DataFrame({col: samplers_[col] for col in anchor_cols}).select(
+        pl.concat_str(anchor_cols, separator=_SEP).alias("_k")
+    )["_k"]
 
     chunks = []
     for group_key, group in working.with_row_index("_orig").group_by(anchor_cols):
@@ -260,6 +268,7 @@ def _conditional_transform(
 # ---------------------------------------------------------------------------
 # make_dataset — pure marginal sampler, no inter-column constraints
 # ---------------------------------------------------------------------------
+
 
 def make_dataset(
     samplers: dict[str, "pl.Series | pl.Expr"],
@@ -297,7 +306,9 @@ def make_dataset(
         for i, (col, entry) in enumerate(mutable.items())
     }
     schema = pl.Schema({col: s.dtype for col, s in col_series.items()})
-    df = pl.DataFrame({col: s.to_list() for col, s in col_series.items()}, schema=schema)
+    df = pl.DataFrame(
+        {col: s.to_list() for col, s in col_series.items()}, schema=schema
+    )
     for col, expr in derived:
         df = df.with_columns(expr.alias(col))
     return df.with_row_index("id")
@@ -306,6 +317,7 @@ def make_dataset(
 # ---------------------------------------------------------------------------
 # GeneticConstraintCalibration
 # ---------------------------------------------------------------------------
+
 
 class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
     """Constraint calibrator using a genetic algorithm over row permutations.
@@ -344,14 +356,14 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
 
     def get_params(self, deep: bool = True) -> dict:
         return {
-            "constraints":     self.constraints,
+            "constraints": self.constraints,
             "population_size": self.population_size,
-            "n_generations":   self.n_generations,
-            "mutation_rate":   self.mutation_rate,
-            "elite_frac":      self.elite_frac,
+            "n_generations": self.n_generations,
+            "mutation_rate": self.mutation_rate,
+            "elite_frac": self.elite_frac,
             "tournament_size": self.tournament_size,
-            "seed":            self.seed,
-            "verbose":         self.verbose,
+            "seed": self.seed,
+            "verbose": self.verbose,
         }
 
     def fit(self, X: pl.DataFrame, y=None) -> "GeneticConstraintCalibration":
@@ -389,23 +401,31 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
             .sample(n, with_replacement=True, seed=s)
             .to_numpy()
         )
-        ab_pool   = _rints(budget * 2 * n_free, n_agents, self.seed)
+        ab_pool = _rints(budget * 2 * n_free, n_agents, self.seed)
         # 2 tournament calls per (genome, free_col): each parent per col is a separate call
-        tour_pool = _rints(budget * self.tournament_size * 2 * n_free, self.population_size, self.seed + 1)
+        tour_pool = _rints(
+            budget * self.tournament_size * 2 * n_free,
+            self.population_size,
+            self.seed + 1,
+        )
         swap_pool = _rints(budget * n_swaps * 2 * n_free, n_agents, self.seed + 2)
         ab_ptr = tour_ptr = swap_ptr = 0
 
         def random_genome(idx: int) -> dict:
             return {
                 c: pl.int_range(n_agents, eager=True)
-                       .sample(n_agents, with_replacement=False, seed=self.seed + idx * len(free_cols) + j)
-                       .to_numpy()
+                .sample(
+                    n_agents,
+                    with_replacement=False,
+                    seed=self.seed + idx * len(free_cols) + j,
+                )
+                .to_numpy()
                 for j, c in enumerate(free_cols)
             }
 
         def ox1(p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
             nonlocal ab_ptr
-            a, b = sorted(ab_pool[ab_ptr: ab_ptr + 2])
+            a, b = sorted(ab_pool[ab_ptr : ab_ptr + 2])
             ab_ptr += 2
             child = np.full(n_agents, -1, dtype=np.intp)
             child[a:b] = p1[a:b]
@@ -429,9 +449,11 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
 
         def tournament(scored: list) -> dict:
             nonlocal tour_ptr
-            indices = tour_pool[tour_ptr: tour_ptr + self.tournament_size]
+            indices = tour_pool[tour_ptr : tour_ptr + self.tournament_size]
             tour_ptr += self.tournament_size
-            return min([scored[k % len(scored)] for k in indices], key=lambda x: x[0])[1]
+            return min([scored[k % len(scored)] for k in indices], key=lambda x: x[0])[
+                1
+            ]
 
         initial = [random_genome(i) for i in range(self.population_size)]
         scored = [(energy(apply_genome(g), constraints), g) for g in initial]
@@ -444,8 +466,14 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
                 break
             next_pop = [g for _, g in scored[:n_elite]]
             while len(next_pop) < self.population_size:
-                next_pop.append(mutate({c: ox1(tournament(scored)[c], tournament(scored)[c])
-                                        for c in free_cols}))
+                next_pop.append(
+                    mutate(
+                        {
+                            c: ox1(tournament(scored)[c], tournament(scored)[c])
+                            for c in free_cols
+                        }
+                    )
+                )
             scored = [(energy(apply_genome(g), constraints), g) for g in next_pop]
             scored.sort(key=lambda x: x[0])
             if scored[0][0] < best_energy_val:
@@ -454,7 +482,9 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
                 print(f"gen {gen:4d}  energy={best_energy_val:.4f}")
 
         if best_energy_val > EPS:
-            print(f"[GA] warning: energy {best_energy_val:.4f} after {self.n_generations} generations.")
+            print(
+                f"[GA] warning: energy {best_energy_val:.4f} after {self.n_generations} generations."
+            )
 
         best = apply_genome(best_genome)
         self.samplers_ = {col: best[col] for col in base_df.columns}
@@ -474,6 +504,7 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
 # ---------------------------------------------------------------------------
 # MetropolisHastingsConstraintCalibration
 # ---------------------------------------------------------------------------
+
 
 class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
     """Constraint calibrator using Metropolis-Hastings / simulated annealing.
@@ -508,11 +539,11 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
     def get_params(self, deep: bool = True) -> dict:
         return {
             "constraints": self.constraints,
-            "n_steps":     self.n_steps,
-            "t0":          self.t0,
-            "cooling":     self.cooling,
-            "seed":        self.seed,
-            "verbose":     self.verbose,
+            "n_steps": self.n_steps,
+            "t0": self.t0,
+            "cooling": self.cooling,
+            "seed": self.seed,
+            "verbose": self.verbose,
         }
 
     def fit(self, X: pl.DataFrame, y=None) -> "MetropolisHastingsConstraintCalibration":
@@ -557,10 +588,13 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
 
         # Proposal queues — drawn from X[col] (empirical prior).
         from collections import Counter
+
         col_hit_counts = Counter(col_idx)
         proposal_queues = {
             free_cols[j]: iter(
-                working[free_cols[j]].sample(count, with_replacement=True, seed=self.seed + j + 10).to_list()
+                working[free_cols[j]]
+                .sample(count, with_replacement=True, seed=self.seed + j + 10)
+                .to_list()
             )
             for j, count in col_hit_counts.items()
         }
@@ -592,10 +626,14 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
                 data[col][i] = old_val
             T *= self.cooling
             if self.verbose and step % 1_000 == 0:
-                print(f"step {step:6d}  T={T:.4f}  energy={current_energy:.4f}  best={best_energy_val:.4f}")
+                print(
+                    f"step {step:6d}  T={T:.4f}  energy={current_energy:.4f}  best={best_energy_val:.4f}"
+                )
 
         if best_energy_val > EPS:
-            print(f"[MH] warning: energy {best_energy_val:.4f} after {self.n_steps} steps.")
+            print(
+                f"[MH] warning: energy {best_energy_val:.4f} after {self.n_steps} steps."
+            )
 
         best = to_df(best_data)
         self.samplers_ = {col: best[col] for col in working.columns}

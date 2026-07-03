@@ -41,16 +41,16 @@ _BD_DATASET = "BD_9PM_R2"
 
 # Value-added component codes that appear as prd_ava (column) dimension.
 _IO_COMPONENTS = {
-    "P1":    "output",
-    "D1":    "wages",
-    "B1G":   "value_added",
-    "P51C":  "depreciation",
+    "P1": "output",
+    "D1": "wages",
+    "B1G": "value_added",
+    "P51C": "depreciation",
     "P2_ADJ": "intermediate",
 }
 
 # Business demography indicators we need.
-_BD_FIRMS    = "V11960"   # number of active enterprises
-_BD_EMPLOYED = "V16961"   # persons employed
+_BD_FIRMS = "V11960"  # number of active enterprises
+_BD_EMPLOYED = "V16961"  # persons employed
 
 
 def _cpa_to_nace(cpa: str) -> list[str]:
@@ -121,11 +121,11 @@ def _fetch_bd_raw(geo: str) -> pl.DataFrame:
     )
 
 
-def _nearest_year(df: pl.DataFrame, nace: str, indicator: str, year: int) -> float | None:
+def _nearest_year(
+    df: pl.DataFrame, nace: str, indicator: str, year: int
+) -> float | None:
     """Return the value for `nace`/`indicator` at the nearest year with non-null data."""
-    sub = df.filter(
-        (pl.col("nace_r2") == nace) & (pl.col("indic_sb") == indicator)
-    )
+    sub = df.filter((pl.col("nace_r2") == nace) & (pl.col("indic_sb") == indicator))
     if sub.is_empty():
         return None
     year_cols = [c for c in sub.columns if c.isdigit()]
@@ -140,6 +140,7 @@ def _nearest_year(df: pl.DataFrame, nace: str, indicator: str, year: int) -> flo
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def fetch_io_components(geo: str = "AT", year: int = 2010) -> pl.DataFrame:
     """Return one row per leaf-level CPA industry with IO-table flow values.
@@ -196,19 +197,21 @@ def fetch_firm_demographics(geo: str = "AT", year: int = 2010) -> pl.DataFrame:
         best_year = year
 
         for nace in nace_codes:
-            v_firms    = _nearest_year(bd_raw, nace, _BD_FIRMS,    year)
+            v_firms = _nearest_year(bd_raw, nace, _BD_FIRMS, year)
             v_employed = _nearest_year(bd_raw, nace, _BD_EMPLOYED, year)
             if v_firms is not None:
-                n_firms_total    += v_firms
+                n_firms_total += v_firms
             if v_employed is not None:
                 n_employed_total += v_employed
 
-        rows.append({
-            "industry":   industry,
-            "n_firms":    int(n_firms_total) if n_firms_total else None,
-            "n_employed": int(n_employed_total) if n_employed_total else None,
-            "year_used":  best_year,
-        })
+        rows.append(
+            {
+                "industry": industry,
+                "n_firms": int(n_firms_total) if n_firms_total else None,
+                "n_employed": int(n_employed_total) if n_employed_total else None,
+                "year_used": best_year,
+            }
+        )
 
     return pl.DataFrame(rows).sort("industry")
 
@@ -223,18 +226,15 @@ def build_firm_io_df(geo: str = "AT", year: int = 2010) -> pl.DataFrame:
     delta_s         : f64  — depreciation rate proxy (depreciation / output)
     tech_share_s    : f64  — intermediate input share (intermediate / output)
     """
-    io  = fetch_io_components(geo, year)
+    io = fetch_io_components(geo, year)
     dem = fetch_firm_demographics(geo, year)
-    return (
-        io.join(dem, on="industry", how="left")
-        .with_columns(
-            # output per person (EUR, note: IO values in mln EUR, employed is persons)
-            (pl.col("output") * 1e6 / pl.col("n_employed")).alias("alpha_s"),
-            # annual wage per person (EUR)
-            (pl.col("wages") * 1e6 / pl.col("n_employed")).alias("w_bar_s"),
-            # depreciation as share of gross output
-            (pl.col("depreciation") / pl.col("output")).alias("delta_s"),
-            # intermediate input share of gross output
-            (pl.col("intermediate") / pl.col("output")).alias("tech_share_s"),
-        )
+    return io.join(dem, on="industry", how="left").with_columns(
+        # output per person (EUR, note: IO values in mln EUR, employed is persons)
+        (pl.col("output") * 1e6 / pl.col("n_employed")).alias("alpha_s"),
+        # annual wage per person (EUR)
+        (pl.col("wages") * 1e6 / pl.col("n_employed")).alias("w_bar_s"),
+        # depreciation as share of gross output
+        (pl.col("depreciation") / pl.col("output")).alias("delta_s"),
+        # intermediate input share of gross output
+        (pl.col("intermediate") / pl.col("output")).alias("tech_share_s"),
     )

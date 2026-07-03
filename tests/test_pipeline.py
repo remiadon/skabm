@@ -35,14 +35,14 @@ from skabm.calibration import (
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
-SECTOR_ENUM   = pl.Enum(["manuf", "service"])
+SECTOR_ENUM = pl.Enum(["manuf", "service"])
 AGE_CLASS_ENUM = pl.Enum(["young", "mature"])
 
 SAMPLERS = {
-    "sector":    weighted_enum(SECTOR_ENUM,    [1, 1]),         # 50 / 50
-    "age_class": weighted_enum(AGE_CLASS_ENUM, [2, 1]),         # 67 % young
-    "size":      pr.normal(mean=4.0, std=1.0).exp().cast(pl.Int64).clip(1, None),
-    "wage":      pr.normal(mean=2.5, std=0.5).exp(),
+    "sector": weighted_enum(SECTOR_ENUM, [1, 1]),  # 50 / 50
+    "age_class": weighted_enum(AGE_CLASS_ENUM, [2, 1]),  # 67 % young
+    "size": pr.normal(mean=4.0, std=1.0).exp().cast(pl.Int64).clip(1, None),
+    "wage": pr.normal(mean=2.5, std=0.5).exp(),
 }
 
 # Two inter-column constraints, each pointing to a different enum anchor:
@@ -88,6 +88,7 @@ def fitted_mh(population):
 # 1. make_dataset sanity
 # ---------------------------------------------------------------------------
 
+
 def test_make_dataset_shape_and_id(population):
     assert population.height == 400
     assert population.columns[0] == "id"
@@ -104,18 +105,19 @@ def test_make_dataset_column_types(population):
 def test_make_dataset_sector_balance(population):
     counts = population["sector"].value_counts()
     manuf = counts.filter(pl.col("sector") == "manuf")["count"][0]
-    assert manuf == pytest.approx(200, abs=40)   # 50 % ± 10 %
+    assert manuf == pytest.approx(200, abs=40)  # 50 % ± 10 %
 
 
 def test_make_dataset_age_class_balance(population):
     counts = population["age_class"].value_counts()
     young = counts.filter(pl.col("age_class") == "young")["count"][0]
-    assert young == pytest.approx(267, abs=40)   # 67 % ± 10 %
+    assert young == pytest.approx(267, abs=40)  # 67 % ± 10 %
 
 
 # ---------------------------------------------------------------------------
 # 2. GA — fitted attributes and samplers_
 # ---------------------------------------------------------------------------
+
 
 def test_ga_has_samplers_after_fit(fitted_ga):
     assert hasattr(fitted_ga, "samplers_")
@@ -136,6 +138,7 @@ def test_ga_best_energy_recorded(fitted_ga):
 # ---------------------------------------------------------------------------
 # 3. GA — transform satisfies constraints
 # ---------------------------------------------------------------------------
+
 
 def test_ga_transform_satisfies_constraints(population, fitted_ga):
     calibrated = fitted_ga.transform(population)
@@ -162,12 +165,13 @@ def test_ga_transform_output_shape(population, fitted_ga):
 # the per-column marginal distributions are preserved in expectation.
 # ---------------------------------------------------------------------------
 
+
 def test_ga_preserves_anchor_distributions(population, fitted_ga):
     # All anchor columns kept from X unchanged — exact distribution match.
     calibrated = fitted_ga.transform(population)
     for col in fitted_ga.anchor_cols_:
         orig = population[col].value_counts().sort(col)["count"]
-        cal  = calibrated[col].value_counts().sort(col)["count"]
+        cal = calibrated[col].value_counts().sort(col)["count"]
         assert (orig == cal).all(), f"distribution mismatch for anchor column {col!r}"
 
 
@@ -175,13 +179,14 @@ def test_ga_preserves_size_distribution_approximately(population, fitted_ga):
     # Conditional sampling preserves per-column marginals in expectation.
     calibrated = fitted_ga.transform(population)
     orig_log_mean = population["size"].log().mean()
-    cal_log_mean  = calibrated["size"].log().mean()
+    cal_log_mean = calibrated["size"].log().mean()
     assert cal_log_mean == pytest.approx(orig_log_mean, abs=0.5)
 
 
 # ---------------------------------------------------------------------------
 # 5. GA — transform generalises to a different population size
 # ---------------------------------------------------------------------------
+
 
 def test_ga_transform_different_size(fitted_ga):
     bigger = make_dataset(SAMPLERS, n_agents=800, seed=99)
@@ -194,6 +199,7 @@ def test_ga_transform_different_size(fitted_ga):
 # ---------------------------------------------------------------------------
 # 6. score() for drift detection
 # ---------------------------------------------------------------------------
+
 
 def test_score_calibrated_beats_random(population, fitted_ga):
     calibrated = fitted_ga.transform(population)
@@ -209,18 +215,26 @@ def test_score_detects_broken_data(population, fitted_ga):
 
 def test_score_on_drift(fitted_ga):
     # Two populations: one satisfying both constraints (good), one violating size~sector.
-    good = pl.DataFrame({
-        "sector":    pl.Series(["manuf"] * 200 + ["service"] * 200, dtype=SECTOR_ENUM),
-        "age_class": pl.Series(["young"] * 267 + ["mature"] * 133, dtype=AGE_CLASS_ENUM),
-        "size":      pl.Series([500] * 200 + [10] * 200, dtype=pl.Int64),
-        "wage":      pl.Series([3.0] * 400),
-    })
-    drifted = pl.DataFrame({
-        "sector":    pl.Series(["manuf"] * 200 + ["service"] * 200, dtype=SECTOR_ENUM),
-        "age_class": pl.Series(["young"] * 267 + ["mature"] * 133, dtype=AGE_CLASS_ENUM),
-        "size":      pl.Series([10] * 200 + [500] * 200, dtype=pl.Int64),   # reversed
-        "wage":      pl.Series([3.0] * 400),
-    })
+    good = pl.DataFrame(
+        {
+            "sector": pl.Series(["manuf"] * 200 + ["service"] * 200, dtype=SECTOR_ENUM),
+            "age_class": pl.Series(
+                ["young"] * 267 + ["mature"] * 133, dtype=AGE_CLASS_ENUM
+            ),
+            "size": pl.Series([500] * 200 + [10] * 200, dtype=pl.Int64),
+            "wage": pl.Series([3.0] * 400),
+        }
+    )
+    drifted = pl.DataFrame(
+        {
+            "sector": pl.Series(["manuf"] * 200 + ["service"] * 200, dtype=SECTOR_ENUM),
+            "age_class": pl.Series(
+                ["young"] * 267 + ["mature"] * 133, dtype=AGE_CLASS_ENUM
+            ),
+            "size": pl.Series([10] * 200 + [500] * 200, dtype=pl.Int64),  # reversed
+            "wage": pl.Series([3.0] * 400),
+        }
+    )
     assert fitted_ga.score(good) > fitted_ga.score(drifted)
 
 
@@ -234,6 +248,7 @@ def test_score_on_drift(fitted_ga):
 # cal.transform() instead.
 # ---------------------------------------------------------------------------
 
+
 def test_make_dataset_from_fitted_samplers_preserves_marginals(fitted_ga):
     """make_dataset with fitted samplers_ preserves per-column marginals."""
     new_pop = make_dataset(fitted_ga.samplers_, n_agents=400, seed=7)
@@ -241,7 +256,9 @@ def test_make_dataset_from_fitted_samplers_preserves_marginals(fitted_ga):
     assert new_pop["size"].log().mean() == pytest.approx(fitted_size_mean, abs=0.5)
 
 
-def test_transform_gives_better_score_than_make_dataset_from_samplers(fitted_ga, population):
+def test_transform_gives_better_score_than_make_dataset_from_samplers(
+    fitted_ga, population
+):
     """transform() (conditional) scores better than make_dataset() (marginal)."""
     new_pop = make_dataset(fitted_ga.samplers_, n_agents=400, seed=7)
     calibrated = fitted_ga.transform(population)
@@ -251,6 +268,7 @@ def test_transform_gives_better_score_than_make_dataset_from_samplers(fitted_ga,
 # ---------------------------------------------------------------------------
 # 8. MH — approximately preserves per-column distributions
 # ---------------------------------------------------------------------------
+
 
 def test_mh_transform_satisfies_constraints(population, fitted_mh):
     calibrated = fitted_mh.transform(population)
@@ -263,14 +281,14 @@ def test_mh_transform_satisfies_constraints(population, fitted_mh):
 def test_mh_approximately_preserves_size_mean(population, fitted_mh):
     calibrated = fitted_mh.transform(population)
     orig_log_mean = population["size"].log().mean()
-    cal_log_mean  = calibrated["size"].log().mean()
+    cal_log_mean = calibrated["size"].log().mean()
     assert cal_log_mean == pytest.approx(orig_log_mean, abs=0.5)
 
 
 def test_mh_approximately_preserves_size_std(population, fitted_mh):
     calibrated = fitted_mh.transform(population)
     orig_std = population["size"].log().std()
-    cal_std  = calibrated["size"].log().std()
+    cal_std = calibrated["size"].log().std()
     assert cal_std == pytest.approx(orig_std, abs=0.5)
 
 
@@ -282,6 +300,7 @@ def test_mh_score_improves_after_fit(population, fitted_mh):
 # ---------------------------------------------------------------------------
 # 9. Single-column constraints warn, not raise
 # ---------------------------------------------------------------------------
+
 
 def test_single_column_constraint_warns_at_fit(population):
     cal = GeneticConstraintCalibration(
@@ -308,11 +327,16 @@ def test_single_column_constraint_still_runs(population):
 # 10. energy() utility
 # ---------------------------------------------------------------------------
 
+
 def test_energy_zero_with_no_constraints(population):
     assert energy(population, []) == 0.0
 
 
 def test_energy_positive_when_constraint_violated(population):
-    bad_constraint = [(pl.col("size").log().mean().over("sector"),
-                       pl.when(pl.col("sector") == "manuf").then(100.0).otherwise(0.0))]
+    bad_constraint = [
+        (
+            pl.col("size").log().mean().over("sector"),
+            pl.when(pl.col("sector") == "manuf").then(100.0).otherwise(0.0),
+        )
+    ]
     assert energy(population, bad_constraint) > 0.0

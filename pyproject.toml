@@ -23,5 +23,8 @@ package = true
 
 [dependency-groups]
 dev = [
+    "ipython>=9.15.0",
+    "prek>=0.4.6",
     "pytest>=9.1.1",
+    "ruff>=0.15.20",
 ]
