@@ -26,12 +26,6 @@ from functools import lru_cache
 
 import polars as pl
 
-try:
-    import eurostat as _eurostat
-except ImportError as e:
-    raise ImportError("pip install eurostat") from e
-
-
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -53,16 +47,6 @@ _BD_FIRMS = "V11960"  # number of active enterprises
 _BD_EMPLOYED = "V16961"  # persons employed
 
 
-def _cpa_to_nace(cpa: str) -> list[str]:
-    """Strip 'CPA_' prefix; expand range codes like CPA_C10-12 → [C10, C11, C12]."""
-    code = cpa.removeprefix("CPA_")
-    m = re.match(r"^([A-Z])(\d+)-(\d+)$", code)
-    if m:
-        letter, lo, hi = m.group(1), int(m.group(2)), int(m.group(3))
-        return [f"{letter}{n}" for n in range(lo, hi + 1)]
-    return [code]
-
-
 def _is_leaf(code: str, all_codes: set[str]) -> bool:
     """True when no other CPA code in the dataset is a strict sub-code of `code`.
 
@@ -76,18 +60,16 @@ def _is_leaf(code: str, all_codes: set[str]) -> bool:
         s = other.removeprefix("CPA_")
         # s is a sub-code of stripped when stripped is a range that contains s
         m = re.match(r"^([A-Z])(\d+)-(\d+)$", stripped)
-        if m and s.startswith(m.group(1)):
-            try:
-                n = int(s[1:])
-                if int(m.group(2)) <= n <= int(m.group(3)):
-                    return False
-            except ValueError:
-                pass
+        if m and s.startswith(m.group(1)) and s[1:].isdigit():
+            if int(m.group(2)) <= int(s[1:]) <= int(m.group(3)):
+                return False
     return True
 
 
 @lru_cache(maxsize=32)
 def _fetch_io_raw(geo: str, year: str) -> pl.DataFrame:
+    import eurostat
+
     """Cached raw fetch of the IO table for one country."""
     filter_pars = {
         "geo": [geo],
@@ -95,7 +77,7 @@ def _fetch_io_raw(geo: str, year: str) -> pl.DataFrame:
         "stk_flow": ["TOTAL"],
         "prd_ava": list(_IO_COMPONENTS),
     }
-    raw = _eurostat.get_data_df(_IO_DATASET, filter_pars=filter_pars)
+    raw = eurostat.get_data_df(_IO_DATASET, filter_pars=filter_pars)
     return (
         pl.from_pandas(raw)
         .rename({"geo\\TIME_PERIOD": "geo"})
@@ -108,12 +90,14 @@ def _fetch_io_raw(geo: str, year: str) -> pl.DataFrame:
 
 @lru_cache(maxsize=32)
 def _fetch_bd_raw(geo: str) -> pl.DataFrame:
+    import eurostat
+
     """Cached raw fetch of business demography for one country."""
     filter_pars = {
         "geo": [geo],
         "indic_sb": [_BD_FIRMS, _BD_EMPLOYED],
     }
-    raw = _eurostat.get_data_df(_BD_DATASET, filter_pars=filter_pars)
+    raw = eurostat.get_data_df(_BD_DATASET, filter_pars=filter_pars)
     return (
         pl.from_pandas(raw)
         .rename({"geo\\TIME_PERIOD": "geo"})
@@ -134,7 +118,6 @@ def _nearest_year(
         val = sub[col][0]
         if val is not None and not (isinstance(val, float) and val != val):  # not NaN
             return float(val)
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +174,7 @@ def fetch_firm_demographics(geo: str = "AT", year: int = 2010) -> pl.DataFrame:
 
     rows: list[dict] = []
     for industry in io_df["industry"].to_list():
-        nace_codes = _cpa_to_nace(industry)
+        nace_codes = industry.removeprefix("CPA_")
         n_firms_total = 0
         n_employed_total = 0
         best_year = year

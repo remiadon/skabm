@@ -340,3 +340,51 @@ def test_energy_positive_when_constraint_violated(population):
         )
     ]
     assert energy(population, bad_constraint) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# 11. Edge cases — no anchor columns, all anchor columns, early convergence
+# ---------------------------------------------------------------------------
+
+
+def test_transform_without_anchor_columns():
+    # No enum/categorical/boolean column: transform samples jointly from pools.
+    numeric_only = make_dataset(
+        samplers={
+            "size": pr.normal(mean=4.0, std=1.0).exp().cast(pl.Int64).clip(1, None),
+            "wage": pr.normal(mean=2.5, std=0.5).exp(),
+        },
+        n_agents=100,
+        seed=0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        cal = GeneticConstraintCalibration(
+            constraints=[(pl.col("size").log().mean(), 4.0)],
+            population_size=5,
+            n_generations=5,
+            seed=0,
+        ).fit(numeric_only)
+    assert cal.anchor_cols_ == []
+    out = cal.transform(numeric_only)
+    assert out.height == 100
+    assert set(out.columns) == {"id", "size", "wage"}
+
+
+def test_fit_with_only_anchor_columns(population):
+    # Every column is an anchor → nothing to permute, fit short-circuits.
+    anchors_only = population.select("id", "sector", "age_class")
+    cal = GeneticConstraintCalibration(constraints=CONSTRAINTS[:0]).fit(anchors_only)
+    assert set(cal.samplers_.keys()) == {"sector", "age_class"}
+    assert cal.best_energy_ == 0.0
+
+
+def test_mh_early_break_on_trivial_constraint(population):
+    # Already-satisfied constraint → energy 0 at step 0 → early break.
+    trivial = [(pl.col("size").log().mean().over("sector") * 0.0, 0.0)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        cal = MetropolisHastingsConstraintCalibration(
+            constraints=trivial, n_steps=100, seed=0
+        ).fit(population)
+    assert cal.best_energy_ == 0.0

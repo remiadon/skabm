@@ -1,2 +1,3 @@
 - Use polars-random instead of the numpy.random API
 - Think in terms of polars expressions / execution plan, not in terms of eager calls to Numpy
+- never create functions for code with low Kolmogorov complexity and only called stricly less than 3 times : inline it

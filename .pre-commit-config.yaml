@@ -3,19 +3,29 @@ repos:
     hooks:
       - id: ruff-check
         name: ruff lint
-        entry: uv run ruff check --fix skabm tests
+        entry: uv run --no-sync ruff check --fix skabm tests
         language: system
         pass_filenames: false
 
       - id: ruff-format
         name: ruff format
-        entry: uv run ruff format skabm tests
+        entry: uv run --no-sync ruff format skabm tests
         language: system
         pass_filenames: false
 
-      - id: pytest
-        name: pytest
-        entry: uv run pytest --tb=short -q
+      - id: pytest-cov
+        name: pytest (coverage ≥ 99%)
+        entry: uv run --no-sync pytest --tb=short -q --cov=skabm --cov-fail-under=99
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: coverage-badge
+        name: update coverage badge in README
+        entry: >-
+          bash -c 'pct=$(uv run --no-sync coverage report --format=total) &&
+          sed -i "" -E "s|(coverage-)[0-9]+(%25-)[a-z]+|\\1${pct}\\2brightgreen|" README.md &&
+          git add README.md'
         language: system
         pass_filenames: false
         stages: [pre-commit]

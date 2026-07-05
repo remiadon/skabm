@@ -2,3 +2,4 @@
 /__pycache__
 /skabm.egg-info
 **/__pycache__/
+.coverage

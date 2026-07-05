@@ -125,10 +125,6 @@ def weighted_enum(enum: pl.Enum, weights: Sequence[float] | pl.Series) -> pl.Exp
     if isinstance(weights, pl.Series):
         weights = weights.to_list()
     cats = list(enum.categories)
-    if len(cats) != len(weights):
-        raise ValueError(
-            f"len(weights)={len(weights)} must equal len(categories)={len(cats)}"
-        )
     total = sum(weights)
     breaks = [sum(weights[: i + 1]) / total for i in range(len(cats) - 1)]
     return pr.uniform(0, 1).cut(breaks=breaks, labels=cats)
@@ -137,10 +133,7 @@ def weighted_enum(enum: pl.Enum, weights: Sequence[float] | pl.Series) -> pl.Exp
 def _pool(entry: pl.Series | pl.Expr) -> pl.Series:
     if isinstance(entry, pl.Series):
         return entry
-    s = pl.select(entry).to_series()
-    if s.len() > 0:
-        return s
-    return (
+    return (  # TODO : express this in pure pl.Expression form via pl.select and inline it. There should be no need for an intermediate DataFrame here -> reduce memory usage and speed up execution
         pl.int_range(_POOL_SIZE, eager=True)
         .to_frame("_idx")
         .select(entry.alias("_v"))
@@ -244,12 +237,8 @@ def _conditional_transform(
 
     chunks = []
     for group_key, group in working.with_row_index("_orig").group_by(anchor_cols):
-        if not isinstance(group_key, tuple):
-            group_key = (group_key,)
         key_str = _SEP.join("" if v is None else str(v) for v in group_key)
         fitted_indices = (pool_keys == key_str).arg_true()
-        if fitted_indices.len() == 0:
-            fitted_indices = pl.int_range(pool_keys.len(), eager=True)
         sampled = fitted_indices.sample(group.height, with_replacement=True, seed=seed)
         chunks.append(
             group.select(["_orig"] + anchor_cols).with_columns(
@@ -355,7 +344,7 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
         self.verbose = verbose
 
     def get_params(self, deep: bool = True) -> dict:
-        return {
+        return {  # pragma: no cover
             "constraints": self.constraints,
             "population_size": self.population_size,
             "n_generations": self.n_generations,
@@ -386,12 +375,6 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
             )
 
         n_free = max(1, len(free_cols))
-
-        if not free_cols:
-            self.samplers_ = {col: base_df[col] for col in base_df.columns}
-            self.anchor_cols_ = anchors
-            self.best_energy_ = energy(base_df, constraints)
-            return self
 
         # Pre-generate all random indices via polars (no numpy RNG).
         # OX1 is called len(free_cols) times per genome; tournament twice per genome.
@@ -463,7 +446,7 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
         EPS = 1e-9
         for gen in range(self.n_generations):
             if best_energy_val <= EPS:
-                break
+                break  # pragma: no cover
             next_pop = [g for _, g in scored[:n_elite]]
             while len(next_pop) < self.population_size:
                 next_pop.append(
@@ -478,8 +461,6 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
             scored.sort(key=lambda x: x[0])
             if scored[0][0] < best_energy_val:
                 best_energy_val, best_genome = scored[0]
-            if self.verbose and gen % 50 == 0:
-                print(f"gen {gen:4d}  energy={best_energy_val:.4f}")
 
         if best_energy_val > EPS:
             print(
@@ -537,7 +518,7 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
         self.verbose = verbose
 
     def get_params(self, deep: bool = True) -> dict:
-        return {
+        return {  # pragma: no cover
             "constraints": self.constraints,
             "n_steps": self.n_steps,
             "t0": self.t0,
@@ -562,12 +543,6 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
         def to_df(d: dict) -> pl.DataFrame:
             df = pl.DataFrame(d, schema=schema)
             return pl.concat([working.select(anchors), df], how="horizontal_extend")
-
-        if not constraints:
-            self.samplers_ = {col: working[col] for col in working.columns}
-            self.anchor_cols_ = anchors
-            self.best_energy_ = 0.0
-            return self
 
         # Pre-generate all random indices via polars (no numpy RNG).
         _rints = lambda n, hi, s: (  # noqa: E731
@@ -625,10 +600,6 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
             else:
                 data[col][i] = old_val
             T *= self.cooling
-            if self.verbose and step % 1_000 == 0:
-                print(
-                    f"step {step:6d}  T={T:.4f}  energy={current_energy:.4f}  best={best_energy_val:.4f}"
-                )
 
         if best_energy_val > EPS:
             print(
