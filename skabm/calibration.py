@@ -89,6 +89,8 @@ from sklearn.utils.validation import check_is_fitted
 
 _POOL_SIZE = 10_000
 
+# TODO : pl.random_seed and pr.random_seed : https://github.com/diegoglozano/polars-random/issues/27
+
 
 # ---------------------------------------------------------------------------
 # Expr serialisation — sklearn clone / pickle safety
@@ -298,7 +300,12 @@ def make_dataset(
     df = pl.DataFrame(
         {col: s.to_list() for col, s in col_series.items()}, schema=schema
     )
-    for col, expr in derived:
+    for (
+        col,
+        expr,
+    ) in (
+        derived
+    ):  # FIXME : remove me, this should be done via a plain .with_columns() call
         df = df.with_columns(expr.alias(col))
     return df.with_row_index("id")
 
