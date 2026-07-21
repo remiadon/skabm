@@ -12,12 +12,13 @@ demography BD_9PM_R2, Austria 2010):
   5. central bank                         singleton, Taylor-rule state
   6. rest of world (foreign firms)        L = 50% of domestic firms
 
-Construction: one `map_df` call per population (auto-generated template +
-class tag; predicates are column names), then the initialization rules
-(`household_income`, `household_wealth`) are inserted in-graph.
-Simulation: `RDFSimulator` is iterated; each tick applies the SPARQL
-DELETE/INSERT upserts from `skabm.rules` in the paper's event order and
-yields raw per-agent state, summarized here with plain polars expressions.
+Construction and simulation are one call: the populations are passed to
+`RDFSimulator.fit_iter` as keyword arguments (one DataFrame per agent
+class; templates are auto-generated, predicates are column names), the
+init rules (`household_income`, `household_wealth`) run in-graph right
+after mapping, and each tick applies the SPARQL DELETE/INSERT upserts from
+`skabm.rules` in the paper's event order and yields raw per-agent state,
+summarized here with plain polars expressions.
 See skabm/rules.py for the deliberate simplifications this pure-SPARQL
 architecture imposes (no search-and-matching, no stochastic shocks, no
 AR(1) re-estimation).
@@ -25,14 +26,12 @@ AR(1) re-estimation).
 
 import polars as pl
 import polars_random as pr
-from maplib import Model
 from time import time
 
 from skabm.calibration import make_dataset, weighted_enum
 from skabm.datasets import build_firm_io_df
 from skabm.rules import (
     EX_NS,
-    map_df,
     firm_pricing,
     firm_production,
     firm_sales,
@@ -216,21 +215,15 @@ central_bank = pl.DataFrame(
     }
 )
 
-# --- Model construction: one map_df per population + init rules --------------
-m = Model()
-map_df(m, firms, "Firm")
-map_df(m, households, "Household")
-map_df(m, governments, "Government")
-map_df(m, banks, "Bank")
-map_df(m, foreign_firms, "ForeignFirm")
-map_df(m, central_bank, "CentralBank")
-
-m.insert(household_income(THETA_DIV, THETA_UB), transient=True)
-m.insert(household_wealth(D_H * N_HOUSEHOLDS / (H_ACTIVE + H_INACTIVE)))
-
-# --- Simulation: 12 quarters of SPARQL upserts, paper event ordering ---------
+# --- Simulation: SPARQL upserts in the paper's event ordering ----------------
 # Taylor-rule coefficients from the published Table 2 (2010:Q4, quarterly).
+# The default rules (rules.POLEDNA_*) would also work; they are spelled out
+# here because the demo rescales D^H to its sampling fraction.
 sim = RDFSimulator(
+    init_rules=[
+        household_income(THETA_DIV, THETA_UB),  # eq. 49
+        household_wealth(D_H * N_HOUSEHOLDS / (H_ACTIVE + H_INACTIVE)),  # 5.2
+    ],
     update_rules=[
         firm_production(growth_e=0.005),  # (i) supply choice, eq. 5 + 12
         firm_pricing(inflation_e=0.005),  # (i) price setting, eq. 8
@@ -243,12 +236,22 @@ sim = RDFSimulator(
         ),  # eq. 69
     ],
     n_periods=120,
-).fit(m)
+)
 
 # Each tick yields raw per-agent state; the macro summary is plain polars:
 # GDP by the production approach (Appendix B.1), CPI as mean price.
+# Bank is mapped but inert (no rule references ex:Bank yet) — fit warns.
 t0 = time()
-for t, state in enumerate(sim):
+for t, state in enumerate(
+    sim.fit_iter(
+        Firm=firms,
+        Household=households,
+        Government=governments,
+        Bank=banks,
+        ForeignFirm=foreign_firms,
+        CentralBank=central_bank,
+    )
+):
     print(
         state.select(
             pl.lit(t).alias("t"),
@@ -261,4 +264,6 @@ for t, state in enumerate(sim):
         )
     )
 t1 = time()
-print(f"Simulated {sim.n_periods} ticks in {t1 - t0:.2f} seconds ({(t1 - t0) / sim.n_periods:.3f} s/tick)")
+print(
+    f"Simulated {sim.n_periods} ticks in {t1 - t0:.2f} seconds ({(t1 - t0) / sim.n_periods:.3f} s/tick)"
+)

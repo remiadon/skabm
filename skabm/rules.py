@@ -294,7 +294,7 @@ def taylor_rule(
 # ---------------------------------------------------------------------------
 
 
-def state_extract() -> str:
+def state_extract(model) -> pl.DataFrame:
     """Per-agent state as a sparse wide frame — no aggregation in SPARQL.
 
     One row per firm (price, output, tech_share), household (wealth), and
@@ -302,7 +302,7 @@ def state_extract() -> str:
     (GDP, price level, ...) belongs in polars expressions on the caller's
     side.
     """
-    return f"""
+    return model.query(f"""
     {_PREFIXES}
     SELECT ?agent ?price ?output ?tech_share ?wealth ?policy_rate
     WHERE {{
@@ -311,4 +311,33 @@ def state_extract() -> str:
         UNION {{ ?agent a ex:Household ; def:wealth ?wealth }}
         UNION {{ ?agent a ex:CentralBank ; def:policy_rate ?policy_rate }}
     }}
-    """
+    """)
+
+
+# ---------------------------------------------------------------------------
+# Poledna defaults (published Table 2, 2010:Q4) — what RDFSimulator uses when
+# init_rules / update_rules are not given, so a new economic ABM with newer
+# data starts from a complete, working rule set
+# ---------------------------------------------------------------------------
+
+THETA_DIV = 0.7768  # dividend payout ratio
+THETA_UB = 0.3586  # unemployment benefit replacement rate
+TAU_VAT = 0.1529  # value-added tax rate
+D_H = 222_933.2e6  # initial household-sector deposits, Austria 2010:Q4 (EUR)
+
+POLEDNA_INIT_RULES = (
+    household_income(THETA_DIV, THETA_UB),  # eq. 49
+    household_wealth(D_H),  # Section 5.2 (rescale D_H for downscaled demos)
+)
+
+POLEDNA_UPDATE_RULES = (
+    firm_production(growth_e=0.005),  # (i) supply choice, eq. 5 + 12
+    firm_pricing(inflation_e=0.005),  # (i) price setting, eq. 8
+    household_income_update(THETA_DIV, THETA_UB),  # eq. 49
+    household_update(TAU_VAT),  # (v) consumption + savings, eqs. 40 + 50
+    firm_sales(TAU_VAT),  # (iv) goods market, eqs. 1-2 + 27 + 31
+    government_consumption(growth=0.005),  # eq. 51
+    taylor_rule(
+        rho=0.9263, r_star=-0.0034, pi_star=0.005, xi_pi=0.3214, xi_gamma=1.2994
+    ),  # eq. 69
+)
