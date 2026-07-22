@@ -9,13 +9,23 @@ one calibrated DataFrame per agent class::
     sim.fit(Firm=firms, Household=households, CentralBank=central_bank)
 
 Everything else follows sklearn: ``init_rules`` and ``update_rules`` are
-``__init__`` parameters (plain SPARQL strings — serializable, so
-``get_params`` / ``clone`` work), both defaulting to the Poledna rule sets
-from ``skabm.rules``, so declaring a new economic ABM with newer data is
-just calibrating new DataFrames.  ``fit_iter`` is the generator variant of
-``fit``: it yields the raw per-agent state (``rules.state_extract``) after
-each tick, and summary logic stays in polars expressions on the caller's
-side.
+``__init__`` parameters (``string.Template`` SPARQL — serializable, so
+``get_params`` / ``clone`` work), defaulting to the full Poledna rule sets
+(``rules.DEFAULT_INIT_RULES`` / ``rules.DEFAULT_UPDATE_RULES``).  Rule
+*logic* lives in the templates; rule *parameters* live in the ``params``
+dict, merged over ``rules.POLEDNA_PARAMS`` and substituted into the
+templates' ``$placeholders`` at fit time — overriding one number
+(``params={"total_deposits": 2.5e4}``) never means re-writing a rule.
+The defaults self-scope to the agent kinds actually passed: at fit time,
+rules whose referenced classes (``ex:Firm``, ``ex:CentralBank``, ...) are
+all absent from the populations are filtered out entirely, so a use-case
+with only ``Firm=`` and ``Household=`` gets exactly the firm and household
+dynamics.  Declaring a new economic ABM with newer data is just
+calibrating new DataFrames.
+
+``fit_iter`` is the generator variant of ``fit``: it yields the raw
+per-agent state (``rules.state_extract``) after each tick, and summary
+logic stays in polars expressions on the caller's side.
 
 Lifecycle: an empty maplib ``Model`` is created at ``__init__`` and exposed
 as ``model_`` — the *fitted artifact*, where data and rules blend into one
@@ -56,6 +66,7 @@ against.
 from __future__ import annotations
 
 import warnings
+from string import Template
 from typing import Iterator, Sequence
 
 import polars as pl
@@ -63,9 +74,11 @@ from maplib import Model
 from sklearn.base import BaseEstimator
 
 from skabm.rules import (
-    POLEDNA_INIT_RULES,
-    POLEDNA_UPDATE_RULES,
+    DEFAULT_INIT_RULES,
+    DEFAULT_UPDATE_RULES,
+    POLEDNA_PARAMS,
     map_df,
+    render,
     state_extract,
 )
 
@@ -75,15 +88,20 @@ class RDFSimulator(BaseEstimator):
 
     Parameters
     ----------
-    init_rules : Sequence[str] | None
-        SPARQL CONSTRUCT strings applied once through ``Model.insert``
-        right after the populations are mapped (e.g.
-        ``rules.household_income``).  ``None`` selects
-        ``rules.POLEDNA_INIT_RULES``.
-    update_rules : Sequence[str] | None
-        SPARQL UPDATE strings (DELETE/INSERT upserts) applied in order
-        within each tick — the model's event sequence (Poledna Section
-        3.5).  ``None`` selects ``rules.POLEDNA_UPDATE_RULES``.
+    init_rules : Sequence[Template | str]
+        SPARQL CONSTRUCT rules applied once through ``Model.insert`` right
+        after the populations are mapped (e.g. ``rules.HOUSEHOLD_INCOME``).
+        ``string.Template`` rules get their ``$placeholders`` substituted
+        from ``params``; plain strings pass through.  Rules anchored on
+        unmapped agent classes no-op harmlessly.
+    update_rules : Sequence[Template | str]
+        SPARQL UPDATE rules (DELETE/INSERT upserts) applied in order within
+        each tick — the model's event sequence (Poledna Section 3.5).
+    params : dict
+        Substitutes for the rule templates' ``$placeholders``, merged over
+        ``rules.POLEDNA_PARAMS`` — pass only what differs (e.g.
+        ``{"total_deposits": 2.5e4}``).  Numeric values are injected as
+        xsd:double literals.
     n_periods : int
         Number of ticks ``fit`` runs (and ``fit_iter`` yields).
     warm_start : bool
@@ -99,25 +117,24 @@ class RDFSimulator(BaseEstimator):
 
     def __init__(
         self,
-        init_rules: Sequence[str] | None = None,
-        update_rules: Sequence[str] | None = None,
+        init_rules: Sequence[Template | str] = DEFAULT_INIT_RULES,
+        update_rules: Sequence[Template | str] = DEFAULT_UPDATE_RULES,
+        params: dict = POLEDNA_PARAMS,
         n_periods: int = 12,
         warm_start: bool = False,
     ):
         self.init_rules = init_rules
         self.update_rules = update_rules
+        self.params = params
         self.n_periods = n_periods
         self.warm_start = warm_start
         self.model_ = Model()
 
     def _fit_iter(self, **populations: pl.DataFrame) -> Iterator[None]:
         """Advance the model one tick per iteration (no extraction)."""
-        init_rules = (
-            self.init_rules if self.init_rules is not None else POLEDNA_INIT_RULES
-        )
-        update_rules = (
-            self.update_rules if self.update_rules is not None else POLEDNA_UPDATE_RULES
-        )
+        merged = {**POLEDNA_PARAMS, **self.params}
+        init_rules = [render(rule, merged) for rule in self.init_rules]
+        update_rules = [render(rule, merged) for rule in self.update_rules]
         if self.warm_start:
             if populations:
                 raise ValueError(

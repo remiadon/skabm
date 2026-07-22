@@ -2,29 +2,33 @@
 
 ``map_df`` lifts a calibrated agent population (a polars DataFrame) into a
 maplib model in one call: maplib's ``map_default`` auto-generates the OTTR
-template (primary key ``id``, IRI-typed link columns, nullable attributes),
-and one ``map_triples`` call tags every agent with its class.  There is no
-hand-written template registry: **predicates are column names** under
-maplib's default namespace (``urn:maplib_default:``), classes live under
-``EX_NS``.  DataFrame conventions: an ``id`` column of full IRIs
+template (primary key ``id``, IRI-typed link columns, nullable attributes)
+and applies it, and one ``map_triples`` call tags every agent with its
+class.  There is no hand-written template registry: **predicates are column
+names** under maplib's default namespace (``urn:maplib_default:``), classes
+live under ``EX_NS``.  DataFrame conventions: an ``id`` column of full IRIs
 (``EX_NS + "firm_0"``); link columns hold the target agent's IRI (or null).
 
-The rule factories return the behavioural SPARQL over those predicates:
+Rules are ``string.Template`` objects: the SPARQL text carries the *logic*,
+``$placeholders`` carry the *parameters*, and ``render(rule, params)``
+substitutes them as xsd:double literals at fit time.  Default parameter
+values live in ``POLEDNA_PARAMS`` (published Table 2, 2010:Q4); overriding
+one number means passing ``params={"total_deposits": ...}`` to
+``RDFSimulator``, never re-writing a rule.  Two kinds of rules:
 
-* **Initialization rules** — run once through ``Model.insert`` while
-  constructing the model (``household_income``, ``household_wealth``).
-* **Update rules** — run every tick through ``Model.update`` (that is what
-  ``RDFSimulator`` does).  Each is an *upsert*: ``DELETE`` the old value
-  (matched through ``OPTIONAL`` so the first application works on a freshly
-  initialized graph), ``INSERT`` the new one — SPARQL INSERT alone has set
-  semantics and would accumulate duplicate values.
-* **State extract** — ``state_extract()`` is a plain SELECT of per-agent
-  state with no aggregation; ``RDFSimulator`` yields its result each tick
-  and summary logic stays in polars expressions on the caller's side.
+* **Initialization rules** (``DEFAULT_INIT_RULES``) — CONSTRUCTs run once
+  through ``Model.insert`` after the populations are mapped: initial
+  conditions, not laws of motion.
+* **Update rules** (``DEFAULT_UPDATE_RULES``) — run every tick through
+  ``Model.update``.  Each is an *upsert*: ``DELETE`` the old value (matched
+  through ``OPTIONAL`` where needed) then ``INSERT`` the new one — SPARQL
+  INSERT alone has set semantics and would accumulate duplicate values.
+  The tuple order is the paper's event sequence (Section 3.5).  A rule
+  anchored on a class with no mapped agents matches nothing and no-ops, so
+  the full default set self-scopes to the kinds actually passed.
 
-The recommended per-tick ordering follows the paper's event sequence
-(Poledna et al. 2023, Section 3.5): production, pricing, income, consumption
-and savings, sales and profits, government consumption, monetary policy.
+``state_extract(model)`` returns per-agent state as a sparse wide frame
+with no aggregation; summary logic belongs in polars expressions.
 
 Deliberate simplifications versus the paper, where pure SPARQL hits its
 limits (kept on purpose — this architecture is being stress-tested):
@@ -48,12 +52,18 @@ comparisons on unbound variables as false instead of erroring, so a
 COALESCE chain would bind the wrong arm.
 """
 
+from string import Template
+
 import polars as pl
 
 EX_NS = "http://example.net/skabm#"
 DEF_NS = "urn:maplib_default:"
 
-_PREFIXES = f"PREFIX ex:<{EX_NS}>\n    PREFIX def:<{DEF_NS}>"
+_PREFIXES = (
+    f"PREFIX ex:<{EX_NS}>\n"
+    f"PREFIX def:<{DEF_NS}>\n"
+    "PREFIX xsd:<http://www.w3.org/2001/XMLSchema#>\n"
+)
 
 _RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
@@ -63,8 +73,30 @@ def dbl(x: float) -> str:
     return f"{x:.6e}"
 
 
+def render(rule: "Template | str", params: dict) -> str:
+    """Substitute a rule Template's $-placeholders with xsd:double literals.
+
+    Numeric parameter values go through ``dbl`` so decimal literals can
+    never leak into the SPARQL; plain-string rules pass through unchanged.
+    Missing placeholders raise ``KeyError`` (loudly, at fit time).
+    """
+    if isinstance(rule, Template):
+        return rule.substitute(
+            {k: dbl(v) if isinstance(v, (int, float)) else v for k, v in params.items()}
+        )
+    return rule
+
+
 def map_df(model, df: pl.DataFrame, kind: str) -> None:
     """Map an agent population into the model in one call.
+
+    Users pass bare local names everywhere (``"firm_0"``): the ``id``
+    column is prefixed with ``EX_NS``, and a *link* column — one whose bare
+    values name agents already mapped into the model — is prefixed to the
+    same nodes, so ``employer="firm_0"`` resolves to the firm.  Which
+    columns are links is read from the graph, not declared: a value is a
+    reference iff an agent with that id already exists.  (Map referenced
+    populations first; e.g. firms before households.)
 
     ``map_default`` generates the template from the DataFrame schema (every
     non-``id`` column becomes a ``def:`` predicate; IRI-valued and nullable
@@ -77,6 +109,14 @@ def map_df(model, df: pl.DataFrame, kind: str) -> None:
     columns), so every agent is tagged ``rdf:type ex:<kind>`` here — that
     is what lets rules anchor on ``?hh a ex:Household``.
     """
+    df = df.with_columns(pl.format(EX_NS + "{}", pl.col("id")).alias("id"))
+    known = {s.strip("<>") for s in model.query("SELECT ?s WHERE { ?s a ?c }")["s"]}
+    for c in df.columns:
+        if c == "id" or df.schema[c] != pl.String:
+            continue
+        vals = {EX_NS + v for v in df[c].drop_nulls().to_list()}
+        if vals and vals <= known:
+            df = df.with_columns((pl.lit(EX_NS) + pl.col(c)).alias(c))
     model.map_default(df, primary_key_column="id")
     model.map_triples(
         df.select(subject="id").with_columns(object=pl.lit(EX_NS + kind)),
@@ -85,208 +125,213 @@ def map_df(model, df: pl.DataFrame, kind: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Initialization rules — Model.insert, once, at model construction
+# Initialization rules — Model.insert, once, right after mapping
 # ---------------------------------------------------------------------------
 
-
-def household_income(dividend_ratio: float, benefit_replacement: float) -> str:
-    """Income by activity status (Poledna eq. 49), for ``Model.insert``.
-
-    Wage from the ``employer`` link; else dividend
-    ``dividend_ratio * max(0, profit)`` from the ``owns`` link; else
-    unemployment benefits ``benefit_replacement`` times the average wage.
+# A fraction $firm_ownership_ratio of households own firms (Poledna Section
+# 3.2: investor households): firm j is owned by household floor(j / ratio),
+# spreading owners uniformly across the household index range.  The
+# assignment is deterministic — SPARQL has no seedable RAND, so truly random
+# matching belongs to the calibration layer or a numerical backend.  Only
+# firms without a data-defined owner are filled (FILTER NOT EXISTS), and
+# users never declare `owns` themselves.  Relies on the skabm id convention
+# ``EX_NS + "firm_<j>"`` / ``EX_NS + "hh_<i>"``.
+FIRM_OWNERSHIP = Template(
+    _PREFIXES
+    + """
+    CONSTRUCT { ?owner def:owns ?f }
+    WHERE {
+        ?f a ex:Firm .
+        FILTER NOT EXISTS { ?anyone def:owns ?f }
+        BIND(xsd:integer(STRAFTER(STR(?f), "#firm_")) AS ?j)
+        BIND(xsd:integer(FLOOR(?j / $firm_ownership_ratio)) AS ?i)
+        BIND(IRI(CONCAT(\""""
+    + EX_NS
+    + """hh_", STR(?i))) AS ?owner)
+    }
     """
-    return f"""
-    {_PREFIXES}
-    CONSTRUCT {{ ?hh def:income ?income }}
-    WHERE {{
-        {{ SELECT (AVG(?any_w) AS ?w_avg) WHERE {{ ?any_f def:w_bar ?any_w }} }}
+)
+
+# Income by activity status (Poledna eq. 49): wage from the `employer` link;
+# else dividend $dividend_ratio * max(0, profit) from the `owns` link; else
+# unemployment benefits $benefit_replacement times the average wage.
+HOUSEHOLD_INCOME = Template(
+    _PREFIXES
+    + """
+    CONSTRUCT { ?hh def:income ?income }
+    WHERE {
+        { SELECT (AVG(?any_w) AS ?w_avg) WHERE { ?any_f def:w_bar ?any_w } }
         ?hh a ex:Household .
-        OPTIONAL {{ ?hh def:employer ?f . ?f def:w_bar ?w . }}
-        OPTIONAL {{ ?hh def:owns ?g . ?g def:profit ?p . }}
+        OPTIONAL { ?hh def:employer ?f . ?f def:w_bar ?w . }
+        OPTIONAL { ?hh def:owns ?g . ?g def:profit ?p . }
         BIND(
             IF(BOUND(?w), ?w,
-            IF(BOUND(?p), {dbl(dividend_ratio)} * IF(?p > 0e0, ?p, 0e0),
-            {dbl(benefit_replacement)} * ?w_avg)) AS ?income)
-    }}
+            IF(BOUND(?p), $dividend_ratio * IF(?p > 0e0, ?p, 0e0),
+            $benefit_replacement * ?w_avg)) AS ?income)
+    }
     """
+)
 
-
-def household_wealth(total_deposits: float) -> str:
-    """Initial wealth D_h(0) = D^H Y_h(0) / sum Y_h(0) (Poledna Section 5.2),
-    for ``Model.insert`` after ``household_income``."""
-    return f"""
-    {_PREFIXES}
-    CONSTRUCT {{ ?hh def:wealth ?wealth }}
-    WHERE {{
-        {{ SELECT (SUM(?any_i) AS ?total) WHERE {{ ?any_hh def:income ?any_i }} }}
+# Initial wealth D_h(0) = $total_deposits * Y_h(0) / sum Y_h(0)
+# (Poledna Section 5.2); run after HOUSEHOLD_INCOME.
+HOUSEHOLD_WEALTH = Template(
+    _PREFIXES
+    + """
+    CONSTRUCT { ?hh def:wealth ?wealth }
+    WHERE {
+        { SELECT (SUM(?any_i) AS ?total) WHERE { ?any_hh def:income ?any_i } }
         ?hh def:income ?income .
-        BIND({dbl(total_deposits)} * ?income / ?total AS ?wealth)
-    }}
+        BIND($total_deposits * ?income / ?total AS ?wealth)
+    }
     """
+)
 
 
 # ---------------------------------------------------------------------------
 # Update rules — Model.update, every tick (upsert pattern)
 # ---------------------------------------------------------------------------
 
-
-def firm_production(growth_e: float) -> str:
-    """Supply choice (eq. 5) capped by labor capacity (eq. 12, Leontief).
-
-    output <- min(output * (1 + growth_e), alpha * size).  The
-    intermediate-input and capital legs of the Leontief nest are omitted
-    (no input stocks in the simplified state).
-    """
-    return f"""
-    {_PREFIXES}
-    DELETE {{ ?f def:output ?y0 }}
-    INSERT {{ ?f def:output ?y1 }}
-    WHERE {{
+# Supply choice (eq. 5) capped by labor capacity (eq. 12, Leontief):
+# output <- min(output * (1 + $growth_e), alpha * size).  The
+# intermediate-input and capital legs of the Leontief nest are omitted.
+FIRM_PRODUCTION = Template(
+    _PREFIXES
+    + """
+    DELETE { ?f def:output ?y0 }
+    INSERT { ?f def:output ?y1 }
+    WHERE {
         ?f a ex:Firm ; def:output ?y0 ; def:alpha ?alpha ; def:size ?n .
-        BIND(?y0 * (1e0 + {dbl(growth_e)}) AS ?y_desired)
+        BIND(?y0 * (1e0 + $growth_e) AS ?y_desired)
         BIND(?alpha * ?n AS ?y_capacity)
         BIND(IF(?y_desired < ?y_capacity, ?y_desired, ?y_capacity) AS ?y1)
-    }}
+    }
     """
+)
 
-
-def firm_pricing(inflation_e: float) -> str:
-    """Cost-push price setting (eq. 8), reduced to the expected-inflation
-    passthrough: price <- price * (1 + inflation_e) with a constant real
-    cost structure."""
-    return f"""
-    {_PREFIXES}
-    DELETE {{ ?f def:price ?p0 }}
-    INSERT {{ ?f def:price ?p1 }}
-    WHERE {{
+# Cost-push price setting (eq. 8), reduced to the expected-inflation
+# passthrough: price <- price * (1 + $inflation_e).
+FIRM_PRICING = Template(
+    _PREFIXES
+    + """
+    DELETE { ?f def:price ?p0 }
+    INSERT { ?f def:price ?p1 }
+    WHERE {
         ?f a ex:Firm ; def:price ?p0 .
-        BIND(?p0 * (1e0 + {dbl(inflation_e)}) AS ?p1)
-    }}
+        BIND(?p0 * (1e0 + $inflation_e) AS ?p1)
+    }
     """
+)
 
-
-def household_income_update(dividend_ratio: float, benefit_replacement: float) -> str:
-    """Per-tick refresh of eq. 49 income from current wages and profits.
-
-    Same logic as ``household_income`` but as an upsert, so dividends track
-    the owned firm's evolving profit.
-    """
-    return f"""
-    {_PREFIXES}
-    DELETE {{ ?hh def:income ?i0 }}
-    INSERT {{ ?hh def:income ?i1 }}
-    WHERE {{
-        {{ SELECT (AVG(?any_w) AS ?w_avg) WHERE {{ ?any_f def:w_bar ?any_w }} }}
+# Per-tick refresh of eq. 49 income from current wages and profits — same
+# logic as HOUSEHOLD_INCOME but as an upsert, so dividends track the owned
+# firm's evolving profit.
+HOUSEHOLD_INCOME_UPDATE = Template(
+    _PREFIXES
+    + """
+    DELETE { ?hh def:income ?i0 }
+    INSERT { ?hh def:income ?i1 }
+    WHERE {
+        { SELECT (AVG(?any_w) AS ?w_avg) WHERE { ?any_f def:w_bar ?any_w } }
         ?hh a ex:Household .
-        OPTIONAL {{ ?hh def:income ?i0 }}
-        OPTIONAL {{ ?hh def:employer ?f . ?f def:w_bar ?w . }}
-        OPTIONAL {{ ?hh def:owns ?g . ?g def:profit ?p . }}
+        OPTIONAL { ?hh def:income ?i0 }
+        OPTIONAL { ?hh def:employer ?f . ?f def:w_bar ?w . }
+        OPTIONAL { ?hh def:owns ?g . ?g def:profit ?p . }
         BIND(
             IF(BOUND(?w), ?w,
-            IF(BOUND(?p), {dbl(dividend_ratio)} * IF(?p > 0e0, ?p, 0e0),
-            {dbl(benefit_replacement)} * ?w_avg)) AS ?i1)
-    }}
+            IF(BOUND(?p), $dividend_ratio * IF(?p > 0e0, ?p, 0e0),
+            $benefit_replacement * ?w_avg)) AS ?i1)
+    }
     """
+)
 
-
-def household_update(vat_rate: float) -> str:
-    """One household tick: consumption budget (eq. 40) out of stored
-    ``def:income``, savings absorb the rest (eq. 50).
-
-    wealth <- wealth + income - psi * income / (1 + vat_rate).
-    Run ``household_income_update`` earlier in the tick so income is current.
-    """
-    return f"""
-    {_PREFIXES}
-    DELETE {{ ?hh def:wealth ?w0 }}
-    INSERT {{ ?hh def:wealth ?w1 }}
-    WHERE {{
+# One household tick: consumption budget (eq. 40) out of stored def:income,
+# savings absorb the rest (eq. 50):
+# wealth <- wealth + income - psi * income / (1 + $vat_rate).
+# Run HOUSEHOLD_INCOME_UPDATE earlier in the tick so income is current.
+HOUSEHOLD_UPDATE = Template(
+    _PREFIXES
+    + """
+    DELETE { ?hh def:wealth ?w0 }
+    INSERT { ?hh def:wealth ?w1 }
+    WHERE {
         ?hh a ex:Household ;
             def:wealth ?w0 ;
             def:psi ?psi ;
             def:income ?inc .
-        BIND(?psi * ?inc / (1e0 + {dbl(vat_rate)}) AS ?consumption)
+        BIND(?psi * ?inc / (1e0 + $vat_rate) AS ?consumption)
         BIND(?w0 + ?inc - ?consumption AS ?w1)
-    }}
+    }
     """
+)
 
-
-def firm_sales(vat_rate: float) -> str:
-    """Goods market without search-and-matching (eqs. 1-2, 27, 31 collapsed).
-
-    Total nominal demand = household consumption budgets + government
-    budgets + foreign demand, allocated to firms proportionally to their
-    supply share price*output / sum(price*output) (the paper's
-    size-weighted visiting probability without the random sequential
-    element) and capped by supply.  profit = margin * revenue; liquidity
-    accumulates profit.
-    """
-    return f"""
-    {_PREFIXES}
-    DELETE {{ ?f def:profit ?pi0 . ?f def:liquidity ?d0 }}
-    INSERT {{ ?f def:profit ?pi1 . ?f def:liquidity ?d1 }}
-    WHERE {{
-        {{ SELECT (SUM(?psi_h * ?i_h) AS ?c_hh)
-           WHERE {{ ?h a ex:Household ; def:psi ?psi_h ; def:income ?i_h }} }}
-        {{ SELECT (SUM(?b_j) AS ?c_gov) WHERE {{ ?j a ex:Government ; def:budget ?b_j }} }}
-        {{ SELECT (SUM(?d_l) AS ?c_row) WHERE {{ ?l a ex:ForeignFirm ; def:demand_size ?d_l }} }}
-        {{ SELECT (SUM(?p_g * ?y_g) AS ?supply)
-           WHERE {{ ?g a ex:Firm ; def:price ?p_g ; def:output ?y_g }} }}
+# Goods market without search-and-matching (eqs. 1-2, 27, 31 collapsed):
+# total nominal demand (households + government + foreign) is allocated to
+# firms proportionally to their supply share price*output / sum(price*output)
+# — the paper's size-weighted visiting probability without the random
+# sequential element — and capped by supply.  profit = margin * revenue;
+# liquidity accumulates profit.
+FIRM_SALES = Template(
+    _PREFIXES
+    + """
+    DELETE { ?f def:profit ?pi0 . ?f def:liquidity ?d0 }
+    INSERT { ?f def:profit ?pi1 . ?f def:liquidity ?d1 }
+    WHERE {
+        { SELECT (SUM(?psi_h * ?i_h) AS ?c_hh)
+          WHERE { ?h a ex:Household ; def:psi ?psi_h ; def:income ?i_h } }
+        { SELECT (SUM(?b_j) AS ?c_gov) WHERE { ?j a ex:Government ; def:budget ?b_j } }
+        { SELECT (SUM(?d_l) AS ?c_row) WHERE { ?l a ex:ForeignFirm ; def:demand_size ?d_l } }
+        { SELECT (SUM(?p_g * ?y_g) AS ?supply)
+          WHERE { ?g a ex:Firm ; def:price ?p_g ; def:output ?y_g } }
         ?f a ex:Firm ; def:price ?p ; def:output ?y ; def:margin ?mrg ;
            def:profit ?pi0 ; def:liquidity ?d0 .
-        BIND(IF(BOUND(?c_hh), ?c_hh / (1e0 + {dbl(vat_rate)}), 0e0)
+        BIND(IF(BOUND(?c_hh), ?c_hh / (1e0 + $vat_rate), 0e0)
              + IF(BOUND(?c_gov), ?c_gov, 0e0)
              + IF(BOUND(?c_row), ?c_row, 0e0) AS ?demand_total)
         BIND(?demand_total * (?p * ?y) / ?supply AS ?demand_f)
         BIND(IF(?demand_f < ?p * ?y, ?demand_f, ?p * ?y) AS ?revenue)
         BIND(?mrg * ?revenue AS ?pi1)
         BIND(?d0 + ?pi1 AS ?d1)
-    }}
+    }
     """
+)
 
-
-def government_consumption(growth: float) -> str:
-    """Government consumption drift (eq. 51 without the log-AR(1) form and
-    without shocks): budget <- budget * (1 + growth)."""
-    return f"""
-    {_PREFIXES}
-    DELETE {{ ?j def:budget ?b0 }}
-    INSERT {{ ?j def:budget ?b1 }}
-    WHERE {{
+# Government consumption drift (eq. 51 without the log-AR(1) form and
+# without shocks): budget <- budget * (1 + $gov_growth).
+GOVERNMENT_CONSUMPTION = Template(
+    _PREFIXES
+    + """
+    DELETE { ?j def:budget ?b0 }
+    INSERT { ?j def:budget ?b1 }
+    WHERE {
         ?j a ex:Government ; def:budget ?b0 .
-        BIND(?b0 * (1e0 + {dbl(growth)}) AS ?b1)
-    }}
+        BIND(?b0 * (1e0 + $gov_growth) AS ?b1)
+    }
     """
+)
 
-
-def taylor_rule(
-    rho: float, r_star: float, pi_star: float, xi_pi: float, xi_gamma: float
-) -> str:
-    """Generalized Taylor rule (eq. 69, euro-area terms dropped).
-
-    Realized growth and inflation are measured in-graph against the lagged
-    aggregates stored on the CentralBank node, which are refreshed by the
-    same upsert.
-    """
-    return f"""
-    {_PREFIXES}
-    DELETE {{ ?cb def:policy_rate ?r0 . ?cb def:prev_output ?py . ?cb def:prev_price ?pp }}
-    INSERT {{ ?cb def:policy_rate ?r1 . ?cb def:prev_output ?y_now . ?cb def:prev_price ?p_now }}
-    WHERE {{
-        {{ SELECT (SUM(?y_f) AS ?y_now) (AVG(?p_f) AS ?p_now)
-           WHERE {{ ?f a ex:Firm ; def:output ?y_f ; def:price ?p_f }} }}
+# Generalized Taylor rule (eq. 69, euro-area terms dropped).  Realized
+# growth and inflation are measured in-graph against the lagged aggregates
+# stored on the CentralBank node, refreshed by the same upsert.
+TAYLOR_RULE = Template(
+    _PREFIXES
+    + """
+    DELETE { ?cb def:policy_rate ?r0 . ?cb def:prev_output ?py . ?cb def:prev_price ?pp }
+    INSERT { ?cb def:policy_rate ?r1 . ?cb def:prev_output ?y_now . ?cb def:prev_price ?p_now }
+    WHERE {
+        { SELECT (SUM(?y_f) AS ?y_now) (AVG(?p_f) AS ?p_now)
+          WHERE { ?f a ex:Firm ; def:output ?y_f ; def:price ?p_f } }
         ?cb a ex:CentralBank ; def:policy_rate ?r0 ;
             def:prev_output ?py ; def:prev_price ?pp .
         BIND(?y_now / ?py - 1e0 AS ?growth)
         BIND(?p_now / ?pp - 1e0 AS ?inflation)
-        BIND({dbl(rho)} * ?r0
-             + (1e0 - {dbl(rho)}) * ({dbl(r_star)} + {dbl(pi_star)}
-                + {dbl(xi_pi)} * (?inflation - {dbl(pi_star)})
-                + {dbl(xi_gamma)} * ?growth) AS ?r_raw)
+        BIND($rho * ?r0
+             + (1e0 - $rho) * ($r_star + $pi_star
+                + $xi_pi * (?inflation - $pi_star)
+                + $xi_gamma * ?growth) AS ?r_raw)
         BIND(IF(?r_raw > 0e0, ?r_raw, 0e0) AS ?r1)
-    }}
+    }
     """
+)
 
 
 # ---------------------------------------------------------------------------
@@ -302,42 +347,50 @@ def state_extract(model) -> pl.DataFrame:
     (GDP, price level, ...) belongs in polars expressions on the caller's
     side.
     """
-    return model.query(f"""
-    {_PREFIXES}
+    return model.query(
+        _PREFIXES
+        + """
     SELECT ?agent ?price ?output ?tech_share ?wealth ?policy_rate
-    WHERE {{
-        {{ ?agent a ex:Firm ; def:price ?price ; def:output ?output ;
-                  def:tech_share ?tech_share }}
-        UNION {{ ?agent a ex:Household ; def:wealth ?wealth }}
-        UNION {{ ?agent a ex:CentralBank ; def:policy_rate ?policy_rate }}
-    }}
-    """)
+    WHERE {
+        { ?agent a ex:Firm ; def:price ?price ; def:output ?output ;
+                 def:tech_share ?tech_share }
+        UNION { ?agent a ex:Household ; def:wealth ?wealth }
+        UNION { ?agent a ex:CentralBank ; def:policy_rate ?policy_rate }
+    }
+    """
+    )
 
 
 # ---------------------------------------------------------------------------
-# Poledna defaults (published Table 2, 2010:Q4) — what RDFSimulator uses when
-# init_rules / update_rules are not given, so a new economic ABM with newer
-# data starts from a complete, working rule set
+# Defaults — RDFSimulator's __init__ defaults.  POLEDNA_PARAMS carries the
+# published Table 2 values (2010:Q4); user params dicts are merged over it,
+# so overriding one number never means re-writing a rule.
 # ---------------------------------------------------------------------------
 
-THETA_DIV = 0.7768  # dividend payout ratio
-THETA_UB = 0.3586  # unemployment benefit replacement rate
-TAU_VAT = 0.1529  # value-added tax rate
-D_H = 222_933.2e6  # initial household-sector deposits, Austria 2010:Q4 (EUR)
+POLEDNA_PARAMS = {
+    "firm_ownership_ratio": 0.03,  # investor share of households (one owner per firm: set n_firms / n_households)
+    "dividend_ratio": 0.7768,  # theta^DIV
+    "benefit_replacement": 0.3586,  # theta^UB
+    "vat_rate": 0.1529,  # tau^VAT
+    "total_deposits": 222_933.2e6,  # D^H, Austria 2010:Q4 (EUR); rescale for demos
+    "growth_e": 0.005,  # expected quarterly real growth
+    "inflation_e": 0.005,  # expected quarterly inflation
+    "gov_growth": 0.005,  # government consumption drift
+    "rho": 0.9263,  # Taylor rule: policy-rate smoothing
+    "r_star": -0.0034,  # Taylor rule: real equilibrium rate
+    "pi_star": 0.005,  # Taylor rule: inflation target
+    "xi_pi": 0.3214,  # Taylor rule: inflation weight
+    "xi_gamma": 1.2994,  # Taylor rule: growth weight
+}
 
-POLEDNA_INIT_RULES = (
-    household_income(THETA_DIV, THETA_UB),  # eq. 49
-    household_wealth(D_H),  # Section 5.2 (rescale D_H for downscaled demos)
-)
+DEFAULT_INIT_RULES = (FIRM_OWNERSHIP, HOUSEHOLD_INCOME, HOUSEHOLD_WEALTH)
 
-POLEDNA_UPDATE_RULES = (
-    firm_production(growth_e=0.005),  # (i) supply choice, eq. 5 + 12
-    firm_pricing(inflation_e=0.005),  # (i) price setting, eq. 8
-    household_income_update(THETA_DIV, THETA_UB),  # eq. 49
-    household_update(TAU_VAT),  # (v) consumption + savings, eqs. 40 + 50
-    firm_sales(TAU_VAT),  # (iv) goods market, eqs. 1-2 + 27 + 31
-    government_consumption(growth=0.005),  # eq. 51
-    taylor_rule(
-        rho=0.9263, r_star=-0.0034, pi_star=0.005, xi_pi=0.3214, xi_gamma=1.2994
-    ),  # eq. 69
+DEFAULT_UPDATE_RULES = (
+    FIRM_PRODUCTION,  # (i) supply choice, eq. 5 + 12
+    FIRM_PRICING,  # (i) price setting, eq. 8
+    HOUSEHOLD_INCOME_UPDATE,  # eq. 49
+    HOUSEHOLD_UPDATE,  # (v) consumption + savings, eqs. 40 + 50
+    FIRM_SALES,  # (iv) goods market, eqs. 1-2 + 27 + 31
+    GOVERNMENT_CONSUMPTION,  # eq. 51
+    TAYLOR_RULE,  # eq. 69
 )

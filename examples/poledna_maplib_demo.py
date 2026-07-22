@@ -15,7 +15,7 @@ demography BD_9PM_R2, Austria 2010):
 Construction and simulation are one call: the populations are passed to
 `RDFSimulator.fit_iter` as keyword arguments (one DataFrame per agent
 class; templates are auto-generated, predicates are column names), the
-init rules (`household_income`, `household_wealth`) run in-graph right
+init rules (`HOUSEHOLD_INCOME`, `HOUSEHOLD_WEALTH`) run in-graph right
 after mapping, and each tick applies the SPARQL DELETE/INSERT upserts from
 `skabm.rules` in the paper's event order and yields raw per-agent state,
 summarized here with plain polars expressions.
@@ -30,27 +30,17 @@ from time import time
 
 from skabm.calibration import make_dataset, weighted_enum
 from skabm.datasets import build_firm_io_df
-from skabm.rules import (
-    EX_NS,
-    firm_pricing,
-    firm_production,
-    firm_sales,
-    government_consumption,
-    household_income,
-    household_income_update,
-    household_update,
-    household_wealth,
-    taylor_rule,
-)
 from skabm.simulation import RDFSimulator
 
+# Everything is bare local names ("firm_0"): map_df prefixes ids, and a link
+# column (whose values name already-mapped agents) resolves automatically.
+
 # --- Table 2 / Table 7 scalars (reference quarter 2010:Q4) -------------------
+# (behavioral parameters live in rules.POLEDNA_PARAMS; these are only the
+# ones the calibration itself needs)
 TAU_SIF = 0.2122  # employers' social insurance contributions
-TAU_VAT = 0.1529  # value-added tax rate
 TAU_INC = 0.2134  # income tax rate
 PSI = 0.9394  # propensity to consume out of expected income
-THETA_DIV = 0.7768  # dividend payout ratio
-THETA_UB = 0.3586  # unemployment benefit replacement rate
 D_I = 52_141.2e6  # initial firm-sector deposits (EUR)
 D_H = 222_933.2e6  # initial household-sector deposits (EUR)
 H_ACTIVE = 4_729_215  # economically active persons (census)
@@ -97,8 +87,8 @@ firms = (
         seed=0,
     )
     .with_columns(
-        pl.format(EX_NS + "firm_{}", pl.col("id")).alias("id"),
-        pl.format(EX_NS + "{}", pl.col("industry").cast(pl.String)).alias("industry"),
+        pl.col("id").cast(pl.String).alias("id"),
+        pl.col("industry").cast(pl.String).alias("industry"),
         # start below labor capacity alpha*size so firm_production has headroom
         (0.9 * pl.col("alpha") * pl.col("size")).alias("output"),  # ~Y_i(0)
         pl.lit(1.0).alias("price"),  # P_i(0) = 1
@@ -139,14 +129,11 @@ households = (
         seed=1,
     )
     .with_columns(
-        pl.format(EX_NS + "hh_{}", pl.col("id")).alias("id"),
-        # one investor per firm (Section 3.2): household k owns firm k
-        firms["id"].rename("owns").extend_constant(None, N_HOUSEHOLDS - N_FIRMS),
         pl.lit(PSI).alias("psi"),
-    )
-    .with_columns(
-        # investors do not supply labor; inactive households neither
-        pl.when(pl.col("owns").is_null() & (pl.col("status") == "active"))
+        # inactive households do not supply labor.  Firm ownership is NOT a
+        # column: the FIRM_OWNERSHIP init rule assigns it in-graph (Section
+        # 3.2), controlled by the firm_ownership_ratio hyperparameter.
+        pl.when(pl.col("status") == "active")
         .then(pl.col("employer").cast(pl.String))
         .otherwise(None)
         .alias("employer"),
@@ -163,10 +150,7 @@ governments = make_dataset(
     n_agents=J,
     seed=2,
 ).with_columns(
-    pl.format(EX_NS + "gov_{}", pl.col("id")).alias("id"),
-    pl.format(EX_NS + "{}", pl.col("purchase_sector").cast(pl.String)).alias(
-        "purchase_sector"
-    ),
+    pl.col("purchase_sector").cast(pl.String).alias("purchase_sector"),
     pl.lit(TAU_INC).alias("tax_rate"),
     pl.lit(0.20 * gva0 / J).alias("budget"),
 )
@@ -180,7 +164,7 @@ banks = make_dataset(
     },
     n_agents=N_BANKS,
     seed=3,
-).with_columns(pl.format(EX_NS + "bank_{}", pl.col("id")).alias("id"))
+).with_columns(pl.format("bank_{}", pl.col("id")).alias("id"))
 
 # --- Rest of world: L foreign consumers, exports ~52% of GVA -----------------
 foreign_firms = (
@@ -193,10 +177,7 @@ foreign_firms = (
         seed=4,
     )
     .with_columns(
-        pl.format(EX_NS + "row_{}", pl.col("id")).alias("id"),
-        pl.format(EX_NS + "{}", pl.col("source_industry").cast(pl.String)).alias(
-            "source_industry"
-        ),
+        pl.col("source_industry").cast(pl.String).alias("source_industry"),
         (0.52 * gva0 * pl.col("demand_weight") / pl.col("demand_weight").sum()).alias(
             "demand_size"
         ),
@@ -207,7 +188,7 @@ foreign_firms = (
 # --- Central bank: singleton with Taylor-rule state (Section 3.5) ------------
 central_bank = pl.DataFrame(
     {
-        "id": [EX_NS + "central_bank"],
+        "id": ["central_bank"],
         "policy_rate": [0.009],
         "inflation_target": [0.005],
         "prev_output": [float(firms["output"].sum())],
@@ -215,26 +196,18 @@ central_bank = pl.DataFrame(
     }
 )
 
-# --- Simulation: SPARQL upserts in the paper's event ordering ----------------
-# Taylor-rule coefficients from the published Table 2 (2010:Q4, quarterly).
-# The default rules (rules.POLEDNA_*) would also work; they are spelled out
-# here because the demo rescales D^H to its sampling fraction.
+# --- Simulation: default Poledna rules, one parameter override ---------------
+# Rule logic lives in skabm.rules Templates; every behavioral parameter
+# takes its published Table 2 value from rules.POLEDNA_PARAMS.  The single
+# substitute this demo needs is total_deposits (D^H in HOUSEHOLD_WEALTH),
+# rescaled to the demo's sampling fraction because the paper is 1:1 with
+# Austria and this demo is not.
 sim = RDFSimulator(
-    init_rules=[
-        household_income(THETA_DIV, THETA_UB),  # eq. 49
-        household_wealth(D_H * N_HOUSEHOLDS / (H_ACTIVE + H_INACTIVE)),  # 5.2
-    ],
-    update_rules=[
-        firm_production(growth_e=0.005),  # (i) supply choice, eq. 5 + 12
-        firm_pricing(inflation_e=0.005),  # (i) price setting, eq. 8
-        household_income_update(THETA_DIV, THETA_UB),  # eq. 49
-        household_update(TAU_VAT),  # (v) consumption + savings, eqs. 40 + 50
-        firm_sales(TAU_VAT),  # (iv) goods market, eqs. 1-2 + 27 + 31
-        government_consumption(0.005),  # eq. 51
-        taylor_rule(
-            rho=0.9263, r_star=-0.0034, pi_star=0.005, xi_pi=0.3214, xi_gamma=1.2994
-        ),  # eq. 69
-    ],
+    params={
+        "total_deposits": D_H * N_HOUSEHOLDS / (H_ACTIVE + H_INACTIVE),
+        # one investor per firm (Section 3.2)
+        "firm_ownership_ratio": N_FIRMS / N_HOUSEHOLDS,
+    },
     n_periods=120,
 )
 

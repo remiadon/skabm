@@ -307,7 +307,9 @@ def make_dataset(
         derived
     ):  # FIXME : remove me, this should be done via a plain .with_columns() call
         df = df.with_columns(expr.alias(col))
-    return df.with_row_index("id")
+    return df.with_row_index(
+        "id"
+    )  # TODO `id` should be a string, that would make it eaaier for downstream code.
 
 
 # ---------------------------------------------------------------------------
