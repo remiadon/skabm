@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import warnings
 from string import Template
-from typing import Iterator, Sequence
+from typing import Callable, Iterator, Sequence
 
 import polars as pl
 from maplib import Model
@@ -107,6 +107,12 @@ class RDFSimulator(BaseEstimator):
     warm_start : bool
         When True, ``fit``/``fit_iter`` continue ticking the existing
         ``model_`` instead of rebuilding it — no populations may be passed.
+    state_extract : callable
+        ``Model -> pl.DataFrame``, called by ``fit_iter`` after each tick to
+        yield raw per-agent state.  Defaults to ``rules.state_extract`` (the
+        Poledna columns); a different model family passes its own (e.g.
+        ``schelling.state_extract``).  Which predicates are observable is a
+        property of the rule set, not of the simulator.
 
     Attributes
     ----------
@@ -122,12 +128,14 @@ class RDFSimulator(BaseEstimator):
         params: dict = POLEDNA_PARAMS,
         n_periods: int = 12,
         warm_start: bool = False,
+        state_extract: Callable[[Model], pl.DataFrame] = state_extract,
     ):
         self.init_rules = init_rules
         self.update_rules = update_rules
         self.params = params
         self.n_periods = n_periods
         self.warm_start = warm_start
+        self.state_extract = state_extract
         self.model_ = Model()
 
     def _fit_iter(self, **populations: pl.DataFrame) -> Iterator[None]:
@@ -164,13 +172,13 @@ class RDFSimulator(BaseEstimator):
 
     def fit_iter(self, **populations: pl.DataFrame) -> Iterator[pl.DataFrame]:
         """Map the populations, apply init rules, then yield per-agent state
-        (``rules.state_extract``) after each of the ``n_periods`` ticks.
+        (``self.state_extract``) after each of the ``n_periods`` ticks.
 
         Keyword names are agent classes (``Firm=...``, ``Household=...``);
         each value is the population DataFrame mapped via ``rules.map_df``.
         """
         for _ in self._fit_iter(**populations):
-            yield state_extract(self.model_)
+            yield self.state_extract(self.model_)
 
     def fit(self, **populations: pl.DataFrame) -> "RDFSimulator":
         """Map the populations, apply init rules, run all ticks; return self."""

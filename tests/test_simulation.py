@@ -283,6 +283,7 @@ def test_get_params_and_clone():
         "params",
         "n_periods",
         "warm_start",
+        "state_extract",
     }
     assert params["n_periods"] == 7
     assert params["params"]["total_deposits"] == 3000.0
