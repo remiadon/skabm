@@ -2,19 +2,18 @@
 
 The model lives in skabm/schelling.py: the 2D grid is a `Cell` population,
 the Moore neighbourhood a CONSTRUCT, the people are *derived* by the SETTLE
-rule from `$density`, and HAPPINESS / LCG_TICK / RELOCATE advance the world.
-There is no Eurostat access and no calibration layer here — the grid is built
-by hand, seeded once through ``polars_random.set_random_seed`` (>=0.5).
+rule from `$density`, and HAPPINESS / DRAW / RELOCATE advance the world.
+There is no Eurostat access and no calibration layer here — the `Cell` frame
+is purely spatial (x/y + id), no random column.
 
-That single global seed is what makes these assertions exact rather than
-statistical: the cells' `rng` column is the *only* entropy source, and every
-rule downstream (settlement, the group draw, relocation) is a deterministic
-SPARQL LCG over it.  Fix the seed and the whole trajectory is reproducible to
-the last digit — see ``test_reproducible_under_global_seed``.
+Randomness comes from the `pr:uniform` SPARQL UDF
+(`rules.register_polars_random`, maplib >= 0.20.26); `RDFSimulator(random_seed=)`
+pins it, so a whole run is reproducible to the last digit — see
+``test_reproducible_under_random_seed``.
 
-Covered: neighbourhood topology, population derivation + user override,
-one-person-per-cell (the rank-join matching), the core segregation result,
-exact reproducibility, and the GeoSPARQL spatial-structure swap.
+Covered: population derivation + user override, one-person-per-cell (the
+rank-join matching), the core segregation result, reproducibility, and the
+GeoSPARQL spatial-structure swap.
 """
 
 import polars as pl
@@ -33,10 +32,9 @@ from skabm.schelling import (
 from skabm.simulation import RDFSimulator
 
 
-def grid(size: int, seed: int = 0) -> pl.DataFrame:
-    """A size x size Cell population: float coordinates plus one integer-valued
-    `rng` seed per cell (the sole entropy source), all governed by ``seed``."""
-    pr.set_random_seed(seed)
+def grid(size: int) -> pl.DataFrame:
+    """A size x size Cell population: just float coordinates and an id — the
+    randomness lives in the pr:uniform UDF, not in the data."""
     return (
         pl.DataFrame({"x": range(size)})
         .join(pl.DataFrame({"y": range(size)}), how="cross")
@@ -44,7 +42,6 @@ def grid(size: int, seed: int = 0) -> pl.DataFrame:
             pl.format("cell_{}_{}", pl.col("x"), pl.col("y")).alias("id"),
             pl.col("x").cast(pl.Float64),
             pl.col("y").cast(pl.Float64),
-            pr.uniform(1.0, 2147483646.0).floor().alias("rng"),
         )
     )
 
@@ -61,6 +58,7 @@ def test_settle_derives_population():
         params=params,
         n_periods=0,
         state_extract=state_extract,
+        random_seed=0,
     ).fit(Cell=grid(6))
     people = sim.model_.query(
         _PREFIXES
@@ -73,13 +71,13 @@ def test_settle_derives_population():
 
 def test_settle_yields_to_user_population():
     # The SETTLE gate (FILTER NOT EXISTS a ex:Person) mirrors FIRM_OWNERSHIP:
-    # a caller-supplied Person population turns settlement off entirely.
+    # a caller-supplied Person population turns settlement off entirely.  Such
+    # persons need no rng column — DRAW assigns def:draw each tick.
     persons = pl.DataFrame(
         {
             "id": ["alice", "bob"],
             "group": [0.0, 1.0],
             "location": ["cell_0_0", "cell_1_1"],
-            "rng": [123.0, 456.0],
         }
     )
     sim = RDFSimulator(
@@ -88,6 +86,7 @@ def test_settle_yields_to_user_population():
         params=SCHELLING_PARAMS,
         n_periods=1,
         state_extract=state_extract,
+        random_seed=0,
     ).fit(Cell=grid(6), Person=persons)
     n = sim.model_.query(
         _PREFIXES + "SELECT (COUNT(?p) AS ?n) WHERE { ?p a ex:Person }"
@@ -104,6 +103,7 @@ def test_one_person_per_cell_invariant():
         params=SCHELLING_PARAMS,
         n_periods=8,
         state_extract=state_extract,
+        random_seed=0,
     ).fit(Cell=grid(12))
     occ = sim.model_.query(
         _PREFIXES + "SELECT ?p ?c WHERE { ?p a ex:Person ; def:location ?c }"
@@ -121,6 +121,7 @@ def test_segregation_rises_and_converges():
         params=SCHELLING_PARAMS,
         n_periods=30,
         state_extract=state_extract,
+        random_seed=0,
     )
     seg, unhappy = [], []
     for s in sim.fit_iter(Cell=grid(12)):
@@ -130,18 +131,37 @@ def test_segregation_rises_and_converges():
     assert min(unhappy) == 0  # reaches a configuration with nobody unhappy
 
 
+def test_reproducible_under_random_seed():
+    # The pr:uniform UDF draws the reproducible size=N Series form, so a fixed
+    # random_seed pins the whole trajectory; a different seed changes it.
+    def seg_path(seed: int) -> list[float]:
+        sim = RDFSimulator(
+            init_rules=SCHELLING_INIT_RULES,
+            update_rules=SCHELLING_UPDATE_RULES,
+            params=SCHELLING_PARAMS,
+            n_periods=10,
+            state_extract=state_extract,
+            random_seed=seed,
+        )
+        return [
+            round(s["share_similar"].mean(), 6) for s in sim.fit_iter(Cell=grid(10))
+        ]
+
+    assert seg_path(0) == seg_path(0)
+    assert seg_path(0) != seg_path(1)
+
+
 def test_geo_variant_plugs_in():
     # Swapping the lattice for continuous GeoSPARQL points changes only the
     # neighbourhood rule (GEO_NEIGHBORHOOD) and the coordinate column: SETTLE,
     # the update rules and RDFSimulator are reused verbatim, and segregation
-    # still rises.  (maplib 0.20.19 has no geof: functions, so the distance
-    # test is hand-rolled from the WKT string — see skabm/schelling.py.)
-    pr.set_random_seed(0)
+    # still rises.  (maplib has no geof: functions, so the distance test is
+    # hand-rolled from the WKT string — see skabm/schelling.py.)
+    pr.set_random_seed(0)  # reproducible point positions
     cells = (
         pl.select(
             x=pr.uniform(0.0, 15.0, size=300),
             y=pr.uniform(0.0, 15.0, size=300),
-            rng=pr.uniform(1.0, 2147483646.0, size=300).floor(),
         )
         .with_columns(
             pl.format("cell_{}", pl.int_range(pl.len())).alias("id"),
@@ -155,6 +175,7 @@ def test_geo_variant_plugs_in():
         params=SCHELLING_GEO_PARAMS,
         n_periods=15,
         state_extract=geo_state_extract,
+        random_seed=0,
     )
     seg = [s["share_similar"].mean() for s in sim.fit_iter(Cell=cells)]
     neighbours = sim.model_.query(

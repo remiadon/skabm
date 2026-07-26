@@ -37,11 +37,11 @@ limits (kept on purpose — this architecture is being stress-tested):
   allocated proportionally to supply shares instead of by random visiting;
   employment links are static.  Random sequential algorithms are not
   expressible declaratively.
-* **No stochastic shocks**: SPARQL has no seedable RAND, so exogenous AR(1)
-  processes degenerate to deterministic drifts and Monte Carlo ensembles
-  are out of reach in-graph.
 * **No AR(1) re-estimation** (eq. 6/9): expectations are constant
-  parameters, not regressions on the model's own history.
+  parameters, not regressions on the model's own history.  The exogenous
+  processes do carry stochastic innovations, though — ``pr:normal`` shocks
+  on the drifts (``$..._sigma`` params, off by default), so Monte-Carlo
+  ensembles are back in reach.
 * **No log/exp**: AR(1) laws of motion in log-levels (eq. 51, 77, 81)
   become linear growth factors.
 
@@ -55,17 +55,48 @@ COALESCE chain would bind the wrong arm.
 from string import Template
 
 import polars as pl
+import polars_random as pr
+from maplib import xsd
 
 EX_NS = "http://example.net/skabm#"
 DEF_NS = "urn:maplib_default:"
+PR_NS = "urn:pr:"  # polars-random UDFs, registered by register_polars_random
 
 _PREFIXES = (
     f"PREFIX ex:<{EX_NS}>\n"
     f"PREFIX def:<{DEF_NS}>\n"
+    f"PREFIX pr:<{PR_NS}>\n"
     "PREFIX xsd:<http://www.w3.org/2001/XMLSchema#>\n"
 )
 
 _RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+
+
+def register_polars_random(model) -> None:
+    """Expose polars-random draws to SPARQL as UDFs (maplib >= 0.20.26).
+
+    Registers ``pr:uniform(low, high)`` and ``pr:normal(mean, std)`` — callable
+    in any rule via ``BIND(pr:uniform(0e0, 1e0) AS ?u)`` — giving the graph the
+    seedable RAND plain SPARQL lacks.  Each UDF receives a DataFrame with one
+    column per argument (``"0"``, ``"1"``) and returns the ``out`` Series.
+
+    The draw uses polars-random's ``size=`` Series form (the only one that
+    honours ``pr.set_random_seed``; the Series-argument form returns a
+    non-reproducible expression) and affine-transforms it per row, so bounds
+    may vary by row and a run is reproducible whenever the caller fixes the
+    seed (see ``RDFSimulator(random_seed=...)``).
+    """
+
+    def _uniform(df: pl.DataFrame) -> pl.Series:
+        u = pr.uniform(0.0, 1.0, size=len(df))
+        return (df["0"] + (df["1"] - df["0"]) * u).alias("out")
+
+    def _normal(df: pl.DataFrame) -> pl.Series:
+        z = pr.normal(0.0, 1.0, size=len(df))
+        return (df["0"] + df["1"] * z).alias("out")
+
+    model.add_udf(PR_NS + "uniform", _uniform, xsd.double, [xsd.double, xsd.double])
+    model.add_udf(PR_NS + "normal", _normal, xsd.double, [xsd.double, xsd.double])
 
 
 def dbl(x: float) -> str:
@@ -131,11 +162,11 @@ def map_df(model, df: pl.DataFrame, kind: str) -> None:
 # A fraction $firm_ownership_ratio of households own firms (Poledna Section
 # 3.2: investor households): firm j is owned by household floor(j / ratio),
 # spreading owners uniformly across the household index range.  The
-# assignment is deterministic — SPARQL has no seedable RAND, so truly random
-# matching belongs to the calibration layer or a numerical backend.  Only
-# firms without a data-defined owner are filled (FILTER NOT EXISTS), and
-# users never declare `owns` themselves.  Relies on the skabm id convention
-# ``EX_NS + "firm_<j>"`` / ``EX_NS + "hh_<i>"``.
+# assignment is deterministic by choice (a stable index map is easier to
+# reason about than random matching; the pr:uniform UDF could randomise it if
+# wanted).  Only firms without a data-defined owner are filled
+# (FILTER NOT EXISTS), and users never declare `owns` themselves.  Relies on
+# the skabm id convention ``EX_NS + "firm_<j>"`` / ``EX_NS + "hh_<i>"``.
 FIRM_OWNERSHIP = Template(
     _PREFIXES
     + """
@@ -192,8 +223,9 @@ HOUSEHOLD_WEALTH = Template(
 # ---------------------------------------------------------------------------
 
 # Supply choice (eq. 5) capped by labor capacity (eq. 12, Leontief):
-# output <- min(output * (1 + $growth_e), alpha * size).  The
-# intermediate-input and capital legs of the Leontief nest are omitted.
+# output <- min(output * (1 + $growth_e + eps), alpha * size), eps an AR(1)
+# innovation eps ~ N(0, $growth_sigma) (eq. 6).  The intermediate-input and
+# capital legs of the Leontief nest are omitted.
 FIRM_PRODUCTION = Template(
     _PREFIXES
     + """
@@ -201,7 +233,7 @@ FIRM_PRODUCTION = Template(
     INSERT { ?f def:output ?y1 }
     WHERE {
         ?f a ex:Firm ; def:output ?y0 ; def:alpha ?alpha ; def:size ?n .
-        BIND(?y0 * (1e0 + $growth_e) AS ?y_desired)
+        BIND(?y0 * (1e0 + $growth_e + pr:normal(0e0, $growth_sigma)) AS ?y_desired)
         BIND(?alpha * ?n AS ?y_capacity)
         BIND(IF(?y_desired < ?y_capacity, ?y_desired, ?y_capacity) AS ?y1)
     }
@@ -209,7 +241,8 @@ FIRM_PRODUCTION = Template(
 )
 
 # Cost-push price setting (eq. 8), reduced to the expected-inflation
-# passthrough: price <- price * (1 + $inflation_e).
+# passthrough with an AR(1) innovation eps ~ N(0, $inflation_sigma):
+# price <- price * (1 + $inflation_e + eps).
 FIRM_PRICING = Template(
     _PREFIXES
     + """
@@ -217,7 +250,7 @@ FIRM_PRICING = Template(
     INSERT { ?f def:price ?p1 }
     WHERE {
         ?f a ex:Firm ; def:price ?p0 .
-        BIND(?p0 * (1e0 + $inflation_e) AS ?p1)
+        BIND(?p0 * (1e0 + $inflation_e + pr:normal(0e0, $inflation_sigma)) AS ?p1)
     }
     """
 )
@@ -295,8 +328,9 @@ FIRM_SALES = Template(
     """
 )
 
-# Government consumption drift (eq. 51 without the log-AR(1) form and
-# without shocks): budget <- budget * (1 + $gov_growth).
+# Government consumption AR(1) (eq. 51), the drift carrying an innovation
+# eps ~ N(0, $gov_growth_sigma): budget <- budget * (1 + $gov_growth + eps).
+# (Still linear rather than the paper's log-AR(1) form.)
 GOVERNMENT_CONSUMPTION = Template(
     _PREFIXES
     + """
@@ -304,7 +338,7 @@ GOVERNMENT_CONSUMPTION = Template(
     INSERT { ?j def:budget ?b1 }
     WHERE {
         ?j a ex:Government ; def:budget ?b0 .
-        BIND(?b0 * (1e0 + $gov_growth) AS ?b1)
+        BIND(?b0 * (1e0 + $gov_growth + pr:normal(0e0, $gov_growth_sigma)) AS ?b1)
     }
     """
 )
@@ -376,6 +410,12 @@ POLEDNA_PARAMS = {
     "growth_e": 0.005,  # expected quarterly real growth
     "inflation_e": 0.005,  # expected quarterly inflation
     "gov_growth": 0.005,  # government consumption drift
+    # AR(1) innovation std devs (eq. 6/8/51).  Default 0 => normal(0,0)=0 =>
+    # deterministic drifts (backward-compatible); set > 0 with
+    # RDFSimulator(random_seed=...) for stochastic runs / Monte-Carlo ensembles.
+    "growth_sigma": 0.0,  # firm output growth shock
+    "inflation_sigma": 0.0,  # firm price shock
+    "gov_growth_sigma": 0.0,  # government consumption shock
     "rho": 0.9263,  # Taylor rule: policy-rate smoothing
     "r_star": -0.0034,  # Taylor rule: real equilibrium rate
     "pi_star": 0.005,  # Taylor rule: inflation target

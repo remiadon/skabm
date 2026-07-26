@@ -25,32 +25,20 @@ way Poledna's traverse ``?hh def:employer ?f``.
 Two things Schelling needs that Poledna did not, and that pure SPARQL does
 not give:
 
-* **Randomness.**  ``rules`` documents "no stochastic shocks: SPARQL has no
-  seedable RAND".  Schelling is meaningless without it, so randomness is
-  carried *in the graph* as agent state: every agent holds a ``def:rng``
-  counter advanced each tick by ``LCG_TICK``, a Park-Miller minimal
-  standard generator (a=16807, m=2^31-1) written in double arithmetic —
-  every intermediate stays under 2^53, so the recurrence is exact.  The
-  *seed* enters as one calibration-layer column (``polars_random``), since
-  SPARQL has no RAND to synthesize it in-graph.  This generalizes: the same
-  ``def:rng`` trick would restore Poledna's AR(1) shocks.
-
-  TODO: when maplib ships ``Model.add_udf`` (documented but not in 0.20.19),
-  register polars-random's Series functions as SPARQL UDFs — then a single
-  ``BIND(<urn:pr:uniform>(1e0, 2147483646e0) AS ?rng)`` in an init rule
-  replaces the seed column outright, and puts genuine RAND inside SPARQL for
-  every model (Poledna's stochastic shocks included).  An in-graph hash of
-  the cell coordinates works too, but needs ~40 lines of hand-rolled
-  modular-squaring arithmetic (maplib rejects ``SUBSTR`` on a variable in a
-  CONSTRUCT, so ``MD5(id)`` can't be parsed there) — not worth it over one
-  ``polars_random`` column while the UDF path is imminent.
+* **Randomness.**  Schelling is meaningless without it, and the graph gets
+  it straight from SPARQL: the ``pr:uniform`` UDF (polars-random behind
+  ``rules.register_polars_random``, maplib >= 0.20.26) is called in-rule via
+  ``BIND(pr:uniform(0e0, 1e0) AS ?u)``.  ``SETTLE`` draws occupancy and group
+  that way; the per-tick ``DRAW`` rule materialises a fresh ``def:draw`` per
+  agent for the move.  No seed column, no in-graph PRNG — just
+  ``RDFSimulator(random_seed=...)`` to make a run reproducible.
 * **One-to-one matching.**  Each mover must land on a *distinct* empty
   cell.  This is the same wall ``rules`` hits with "no search-and-matching"
   — and hitting it twice, in two unrelated model families, says the limit
   is structural rather than Poledna-specific: SPARQL has no sequential
   activation and no assignment operator.  ``RELOCATE`` works around it
-  with a **rank join**: movers are ranked by their RNG draw, vacant cells
-  by theirs, and rank *k* is paired with rank *k*.  Both orderings are
+  with a **rank join**: movers are ranked by their ``def:draw``, vacant
+  cells by theirs, and rank *k* is paired with rank *k*.  Both orderings are
   random, so the matching is a uniform random permutation — statistically
   what AMBER's ``random.choice`` over ``empty_spots`` produces, obtained
   declaratively and in one batch.  Ranking is a correlated
@@ -122,14 +110,9 @@ GRID_NEIGHBORHOOD = Template(
 # Person population is free — the caller passes only the grid (`Cell=`), and
 # each cell is independently occupied with probability $density (AMBER's
 # `p['density']`), spawning one Person located on it, in one of $n_groups
-# groups drawn uniformly.  Occupancy is thus stochastic: the count is
-# ~$density*|cells|, not AMBER's exact int(density*size^2) — the difference
-# is one Bernoulli draw per cell.
-#
-# All randomness is the cell's own def:rng stream (seeded, integer-valued),
-# advanced three Park-Miller steps here so the occupancy draw, the group
-# draw, and the seed handed to the spawned Person are decorrelated; the LCG
-# modulo (2^31-1) is exact in doubles for the same reason as LCG_TICK.
+# groups drawn uniformly.  Both draws come straight from the pr:uniform UDF,
+# so occupancy is genuinely stochastic: the count is ~$density*|cells|, not
+# AMBER's exact int(density*size^2) — one Bernoulli draw per cell.
 #
 # This is the one point where the grid asymmetry with Poledna bites: SPARQL
 # CONSTRUCT can only bind over rows that exist, so it can populate a passed
@@ -142,27 +125,17 @@ SETTLE = Template(
     _PREFIXES
     + """
     CONSTRUCT {
-        ?p a ex:Person . ?p def:location ?c . ?p def:group ?g . ?p def:rng ?seed
+        ?p a ex:Person . ?p def:location ?c . ?p def:group ?g
     }
     WHERE {
         FILTER NOT EXISTS { ?existing a ex:Person }
-        ?c a ex:Cell ; def:rng ?r .
-        BIND(16807e0 * ?r AS ?x1)
-        BIND(?x1 - 2147483647e0 * FLOOR(?x1 / 2147483647e0) AS ?d1)
-        FILTER(?d1 / 2147483647e0 < $density)
-        BIND(16807e0 * ?d1 AS ?x2)
-        BIND(?x2 - 2147483647e0 * FLOOR(?x2 / 2147483647e0) AS ?d2)
-        # ?u2 is its own BIND on purpose: maplib does not left-associate the
-        # chain `?d2 / m * n_groups`, evaluating it as `?d2 / (m * n_groups)`,
-        # which floors to 0 for every agent (one group, segregation trivially
-        # 1.0).  Parenthesising via an intermediate is the safe form.
-        # xsd:double casts are load-bearing too: FLOOR / the modulo yield
-        # integer-valued results maplib would store as Int64, colliding with
-        # the xsd:double def:rng column the cells already carry.
-        BIND(?d2 / 2147483647e0 AS ?u2)
-        BIND(xsd:double(FLOOR(?u2 * $n_groups)) AS ?g)
-        BIND(16807e0 * ?d2 AS ?x3)
-        BIND(xsd:double(?x3 - 2147483647e0 * FLOOR(?x3 / 2147483647e0)) AS ?seed)
+        ?c a ex:Cell .
+        BIND(pr:uniform(0e0, 1e0) AS ?u_occ)
+        FILTER(?u_occ < $density)
+        # xsd:double cast: FLOOR yields an integer-valued result maplib would
+        # otherwise store as Int64, an unwelcome type for a group label.
+        BIND(pr:uniform(0e0, 1e0) AS ?u_grp)
+        BIND(xsd:double(FLOOR(?u_grp * $n_groups)) AS ?g)
         BIND(IRI(CONCAT(\""""
     + EX_NS
     + """settler_", STRAFTER(STR(?c), "#"))) AS ?p)
@@ -201,31 +174,30 @@ HAPPINESS = Template(
     """
 )
 
-# Park-Miller minimal standard LCG, r <- 16807 r mod (2^31 - 1), in doubles:
-# 16807 * (2^31-1) ~ 3.6e13 < 2^53, so every intermediate is exact **provided
-# the seed is an integer-valued double in [1, 2^31-2]** — a continuous seed
-# turns this into a float map whose entropy erodes with rounding, so the
-# calibration layer must `.floor()` its draws.  Anchored on `def:rng` alone
-# rather than on a class, so it advances persons and cells (and any future
-# agent kind) in one pass.
-LCG_TICK = Template(
+# Fresh per-agent random draw for this tick, straight from the pr:uniform UDF.
+# RELOCATE ranks movers and vacant cells by this value, so it must be
+# *materialised* (a stored triple stable across RELOCATE's self-join) rather
+# than drawn inline — an inline BIND would re-draw on each side of the join.
+# Anchored on `?a a ?cls` so it refreshes every agent kind (cells + persons)
+# in one pass.
+DRAW = Template(
     _PREFIXES
     + """
-    DELETE { ?a def:rng ?r0 }
-    INSERT { ?a def:rng ?r1 }
+    DELETE { ?a def:draw ?d0 }
+    INSERT { ?a def:draw ?d1 }
     WHERE {
-        ?a def:rng ?r0 .
-        BIND(16807e0 * ?r0 AS ?x)
-        BIND(?x - 2147483647e0 * FLOOR(?x / 2147483647e0) AS ?r1)
+        ?a a ?cls .
+        OPTIONAL { ?a def:draw ?d0 }
+        BIND(pr:uniform(0e0, 1e0) AS ?d1)
     }
     """
 )
 
 # The move, as a rank join.  Movers (share_similar < $want_similar) are
-# ranked by their RNG draw; vacant cells (no inbound def:location) by theirs.
-# Both subselects project ?rank, so the natural join pairs the k-th mover
-# with the k-th cell — a uniform random matching, since both orders are
-# random.  Rank is COUNT(peers with rng <= mine); the `<=` (rather than `<`,
+# ranked by this tick's def:draw; vacant cells (no inbound def:location) by
+# theirs.  Both subselects project ?rank, so the natural join pairs the k-th
+# mover with the k-th cell — a uniform random matching, since both orders are
+# random.  Rank is COUNT(peers with draw <= mine); the `<=` (rather than `<`,
 # which would be the natural rank) is what keeps the agent's own row in its
 # own group, so the minimum never silently vanishes.  The off-by-one is
 # identical on both sides and therefore cancels in the join.
@@ -239,16 +211,16 @@ RELOCATE = Template(
     INSERT { ?p def:location ?c1 }
     WHERE {
         { SELECT ?p (COUNT(?q) AS ?rank) WHERE {
-              ?p a ex:Person ; def:rng ?rp ; def:share_similar ?sp .
+              ?p a ex:Person ; def:draw ?rp ; def:share_similar ?sp .
               FILTER(?sp < $want_similar)
-              ?q a ex:Person ; def:rng ?rq ; def:share_similar ?sq .
+              ?q a ex:Person ; def:draw ?rq ; def:share_similar ?sq .
               FILTER(?sq < $want_similar)
               FILTER(?rq <= ?rp)
           } GROUP BY ?p }
         { SELECT ?c1 (COUNT(?d) AS ?rank) WHERE {
-              ?c1 a ex:Cell ; def:rng ?rc .
+              ?c1 a ex:Cell ; def:draw ?rc .
               FILTER NOT EXISTS { ?u def:location ?c1 }
-              ?d a ex:Cell ; def:rng ?rd .
+              ?d a ex:Cell ; def:draw ?rd .
               FILTER NOT EXISTS { ?v def:location ?d }
               FILTER(?rd <= ?rc)
           } GROUP BY ?c1 }
@@ -288,7 +260,7 @@ def state_extract(model) -> pl.DataFrame:
 # ---------------------------------------------------------------------------
 #
 # The whole spatial model is captured by ONE relation: `def:neighbor`.
-# HAPPINESS, RELOCATE, SETTLE and LCG_TICK never mention coordinates — they
+# HAPPINESS, RELOCATE, SETTLE and DRAW never mention coordinates — they
 # route through `?c def:neighbor ?cn` and occupancy (`def:location`).  So a
 # different space is a different `def:neighbor` rule and nothing else: the
 # lattice's 8 integer offsets become "cells within radius R of each other",
@@ -362,8 +334,7 @@ SCHELLING_PARAMS = {
 }
 
 # GRID_NEIGHBORHOOD wires the topology; SETTLE derives the Person population
-# onto the passed grid (unless the caller supplies their own).  Seeds ride in
-# on the cells' `rng` column (see the module docstring's Randomness note).
+# onto the passed grid (unless the caller supplies their own).
 SCHELLING_INIT_RULES = (GRID_NEIGHBORHOOD, SETTLE)
 
 # The GeoSPARQL variant: identical except the neighbourhood rule.  Same SETTLE,
@@ -375,6 +346,6 @@ SCHELLING_GEO_PARAMS = {**SCHELLING_PARAMS, "radius": 1.7}  # neighbour cutoff
 
 SCHELLING_UPDATE_RULES = (
     HAPPINESS,  # AMBER: Person.update_happiness, in Model.update
-    LCG_TICK,  # draw this tick's randomness
+    DRAW,  # this tick's random draw per agent (pr:uniform UDF)
     RELOCATE,  # AMBER: Person.find_new_home, in Model.step
 )

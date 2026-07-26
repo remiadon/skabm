@@ -70,6 +70,7 @@ from string import Template
 from typing import Callable, Iterator, Sequence
 
 import polars as pl
+import polars_random as pr
 from maplib import Model
 from sklearn.base import BaseEstimator
 
@@ -78,6 +79,7 @@ from skabm.rules import (
     DEFAULT_UPDATE_RULES,
     POLEDNA_PARAMS,
     map_df,
+    register_polars_random,
     render,
     state_extract,
 )
@@ -113,6 +115,11 @@ class RDFSimulator(BaseEstimator):
         Poledna columns); a different model family passes its own (e.g.
         ``schelling.state_extract``).  Which predicates are observable is a
         property of the rule set, not of the simulator.
+    random_seed : int | None
+        When set, ``pr.set_random_seed`` is called at the start of each
+        ``fit``/``fit_iter`` so the ``pr:uniform`` / ``pr:normal`` SPARQL UDFs
+        (registered on ``model_`` via ``rules.register_polars_random``) draw a
+        reproducible sequence.  Leave None for entropy-seeded stochastic runs.
 
     Attributes
     ----------
@@ -129,6 +136,7 @@ class RDFSimulator(BaseEstimator):
         n_periods: int = 12,
         warm_start: bool = False,
         state_extract: Callable[[Model], pl.DataFrame] = state_extract,
+        random_seed: int | None = None,
     ):
         self.init_rules = init_rules
         self.update_rules = update_rules
@@ -136,10 +144,13 @@ class RDFSimulator(BaseEstimator):
         self.n_periods = n_periods
         self.warm_start = warm_start
         self.state_extract = state_extract
+        self.random_seed = random_seed
         self.model_ = Model()
 
     def _fit_iter(self, **populations: pl.DataFrame) -> Iterator[None]:
         """Advance the model one tick per iteration (no extraction)."""
+        if self.random_seed is not None:
+            pr.set_random_seed(self.random_seed)
         merged = {**POLEDNA_PARAMS, **self.params}
         init_rules = [render(rule, merged) for rule in self.init_rules]
         update_rules = [render(rule, merged) for rule in self.update_rules]
@@ -149,6 +160,7 @@ class RDFSimulator(BaseEstimator):
                     "warm_start=True continues the existing model_; do not pass "
                     "populations (assign model_ directly instead)."
                 )
+            register_polars_random(self.model_)
         else:
             rules_text = "\n".join((*init_rules, *update_rules))
             for kind in populations:
@@ -161,6 +173,7 @@ class RDFSimulator(BaseEstimator):
                         stacklevel=3,
                     )
             self.model_ = Model()
+            register_polars_random(self.model_)
             for kind, df in populations.items():
                 map_df(self.model_, df, kind)
             for rule in init_rules:

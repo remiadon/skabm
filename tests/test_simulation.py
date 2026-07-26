@@ -274,6 +274,36 @@ def test_bare_link_resolves_from_model():
     assert income["i"].to_list() == [30.0]
 
 
+def test_ar_shocks_opt_in_and_reproducible():
+    # AR(1) innovations (pr:normal UDF) are opt-in: sigma defaults to 0 so the
+    # default run is a deterministic drift, reproducible with no seed at all.
+    def outputs(sim):
+        return sorted(
+            round(x, 4)
+            for x in sim.model_.query(
+                f"{_PREFIX} SELECT ?y WHERE {{ ?f def:output ?y }}"
+            )["y"]
+        )
+
+    base = outputs(RDFSimulator(params=PARAMS, n_periods=3).fit(Firm=FIRMS))
+    assert base == outputs(RDFSimulator(params=PARAMS, n_periods=3).fit(Firm=FIRMS))
+
+    # growth_sigma > 0 turns FIRM_PRODUCTION stochastic; random_seed pins it.
+    shocked = dict(PARAMS, growth_sigma=0.02)
+    s1 = outputs(
+        RDFSimulator(params=shocked, n_periods=3, random_seed=1).fit(Firm=FIRMS)
+    )
+    s2 = outputs(
+        RDFSimulator(params=shocked, n_periods=3, random_seed=1).fit(Firm=FIRMS)
+    )
+    s3 = outputs(
+        RDFSimulator(params=shocked, n_periods=3, random_seed=2).fit(Firm=FIRMS)
+    )
+    assert s1 != base  # shocks moved the path off the deterministic drift
+    assert s1 == s2  # same seed -> identical run
+    assert s1 != s3  # the seed matters
+
+
 def test_get_params_and_clone():
     sim = RDFSimulator(params=PARAMS, n_periods=7)
     params = sim.get_params()
@@ -284,6 +314,7 @@ def test_get_params_and_clone():
         "n_periods",
         "warm_start",
         "state_extract",
+        "random_seed",
     }
     assert params["n_periods"] == 7
     assert params["params"]["total_deposits"] == 3000.0

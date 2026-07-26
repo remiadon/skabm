@@ -6,17 +6,17 @@ WKT geometry (`"POINT(x y)"`), not a regular integer grid.  The neighbourhood
 becomes "within radius R" instead of the 8 Moore offsets.
 
 Everything else is byte-for-byte the grid model: `SCHELLING_UPDATE_RULES`
-(HAPPINESS / LCG_TICK / RELOCATE) is imported unchanged, `SETTLE` derives the
+(HAPPINESS / DRAW / RELOCATE) is imported unchanged, `SETTLE` derives the
 people unchanged, and the same `RDFSimulator` runs it.  The only differences
-from `schelling_maplib_demo.py` are the init tuple (GEO_NEIGHBORHOOD replaces
+from `schelling.py` are the init tuple (GEO_NEIGHBORHOOD replaces
 GRID_NEIGHBORHOOD), the coordinate column (a WKT string instead of x/y), and
 the geo state extract.  That is the entire cost of swapping spatial structures
 — the abstraction seam is the `def:neighbor` relation.
 
-maplib note: geometry is stored and queried, but maplib 0.20.19 implements no
-`geof:` functions, so GEO_NEIGHBORHOOD parses the WKT and does the distance
-test in arithmetic (see skabm/schelling.py).  With `geof:distance` it would be
-a one-line FILTER; nothing else here would change.
+maplib note: geometry is stored and queried, but maplib implements no `geof:`
+functions, so GEO_NEIGHBORHOOD parses the WKT and does the distance test in
+arithmetic (see skabm/schelling.py).  With `geof:distance` it would be a
+one-line FILTER; nothing else here would change.
 """
 
 from time import time
@@ -35,24 +35,23 @@ from skabm.simulation import RDFSimulator
 N_CELLS = 600  # irregular locations scattered in a continuous 20x20 extent
 EXTENT = 20.0
 
-pr.set_random_seed(0)  # one global seed governs every draw below (polars-random >=0.5)
+pr.set_random_seed(0)  # reproducible point *positions* (rng streams come from the UDF)
 
 # --- Cells: irregular points, as WKT geometry -------------------------------
-# Real-world analogue: actual addresses/parcels, not a lattice.  x/y are drawn
-# continuously and formatted into a WKT POINT; `rng` seeds each location's
-# Park-Miller stream (SETTLE places a settler, RELOCATE shuffles vacancies).
+# Real-world analogue: actual addresses/parcels, not a lattice.  Only the
+# positions are drawn here (real data); geometry is the sole spatial column,
+# as in a GeoSPARQL graph.
 cells = (
     pl.select(
         x=pr.uniform(0.0, EXTENT, size=N_CELLS),
         y=pr.uniform(0.0, EXTENT, size=N_CELLS),
-        rng=pr.uniform(1.0, 2147483646.0, size=N_CELLS).floor(),
     )
     .with_columns(
         pl.format("cell_{}", pl.int_range(pl.len())).alias("id"),
         pl.format("POINT({} {})", pl.col("x"), pl.col("y")).alias("geometry"),
     )
     .drop("x", "y")
-)  # geometry is the sole spatial column, as in a GeoSPARQL graph
+)
 
 # --- Simulation: same simulator, geo init rules + geo extract ----------------
 sim = RDFSimulator(
@@ -61,6 +60,7 @@ sim = RDFSimulator(
     params=SCHELLING_GEO_PARAMS,
     n_periods=40,
     state_extract=geo_state_extract,
+    random_seed=0,
 )
 
 t0 = time()
