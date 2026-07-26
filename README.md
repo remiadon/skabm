@@ -96,6 +96,14 @@ Design decisions, in sklearn vocabulary:
   by explicit intervention; predicates the rules upsert (output, price,
   wealth, ...) are *state*, owned by the rules after t=0. The partition is
   derivable from the rule strings.
+- **Randomness is a UDF**: SPARQL has no `RAND`, so skabm registers
+  polars-random as SPARQL functions (`rules.register_polars_random`,
+  maplib ≥ 0.20.26): `pr:uniform`/`pr:normal`, called in-rule via
+  `BIND(pr:uniform(0e0, 1e0) AS ?u)`, with `RDFSimulator(random_seed=...)`
+  pinning them for reproducible runs. This is what lets the Schelling
+  example derive its whole population in-graph with no seed column, and
+  gives Poledna genuine AR(1) innovations (`$..._sigma` params, off by
+  default) — Monte-Carlo ensembles included.
 
 ## Limitations
 
@@ -111,17 +119,13 @@ supply shares). Consequently employment links are static — hiring and
 firing would require rewiring `employer` triples under per-firm vacancy
 quotas, which needs an ordering no single UPDATE can express.
 
-**No stochastic shocks.** maplib's SPARQL has no seedable `RAND`, so the
-paper's exogenous AR(1) processes degenerate to deterministic drifts, and
-Monte-Carlo ensembles (the paper runs 500 per forecast) are out of reach
-in-graph. The pure-SPARQL simulator is a deterministic scenario engine,
-not a forecasting engine.
-
-**No in-graph estimation.** The paper's agents re-estimate AR(1)
+**No in-graph estimation.** The paper's agents re-estimate their AR(1)
 expectation rules on the model's own history every quarter (behavioral
-learning); SPARQL cannot run regressions, so expectations are constant
-parameters. Likewise SPARQL has no `log`/`exp`, so log-level laws of
-motion become linear growth factors.
+learning); SPARQL cannot run regressions, so the *expectation parameters*
+are constants (the exogenous processes do carry `pr:normal` innovations —
+see "Randomness is a UDF" above — they just aren't re-fit from history).
+Likewise SPARQL has no `log`/`exp`, so log-level laws of motion become
+linear growth factors.
 
 **Activation is synchronous and staged — and there is no scheduler, on
 purpose.** ABM "schedulers" do two jobs: ordering behavioral *phases*
@@ -137,10 +141,12 @@ in-house scheduler could only reorder phases, which an ordered rule list
 already does; the investment only becomes worthwhile with a numerical
 backend, where activation regimes become a real, implementable choice.
 
-**Reproducibility caveat.** `make_dataset` seeds its sampling draws but
-polars-random value pools are not yet seedable end-to-end
-([polars-random#27](https://github.com/diegoglozano/polars-random/issues/27)),
-so calibrated populations differ between runs.
+**Reproducibility caveat.** A *simulation* is reproducible via
+`RDFSimulator(random_seed=...)`, which pins the `pr:*` UDF draws. *Calibration*
+is subtler: `polars_random.set_random_seed` only reaches the `size=N` Series
+form, not the expression-over-frame form `make_dataset` uses for its value
+pools, so a population is reproducible only when each `pr.*` sampler (and
+`weighted_enum`) is given an explicit `seed=`.
 
 ## Roadmap
 
@@ -149,8 +155,8 @@ so calibrated populations differ between runs.
   differentiable kernels), step in frame-land, re-map at observation
   points. The SPARQL path then becomes the slow, semantically transparent
   reference implementation the fast kernels are validated against — and
-  the home of stochastic shocks, search-and-matching, activation regimes,
-  and gradient-based calibration.
+  the home of search-and-matching, activation regimes, and gradient-based
+  calibration.
 - **Rule-scoped validation**: each rule knows the predicates it traverses;
   check coverage against the graph at fit time (eventually SHACL shapes).
 - **Self-describing export**: serialize `model_` together with its rule
