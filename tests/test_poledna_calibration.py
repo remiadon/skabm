@@ -89,9 +89,9 @@ def firm_samplers(io_df) -> dict:
     return {
         # Industry ∝ n_firms (Section 4.1.1): each firm belongs to one industry,
         # count calibrated from business demography data (BD_9PM_R2).
-        "industry": weighted_enum(industry_enum, io_df["n_firms"]),
+        "industry": weighted_enum(industry_enum, io_df["n_firms"], seed=100),
         # Firm size ~ LogNormal(3, 1): mean(log(size)) = 3.0, Pareto tail (Section 4.1.1).
-        "size": pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None),
+        "size": pr.normal(3.0, 1.0, seed=101).exp().cast(pl.Int64).clip(1, None),
         # IO-table coefficients: industry-homogeneous, derived via replace_strict.
         # ā_i = output / employed                             (Section 4.1.2)
         "alpha": pl.col("industry").replace_strict(
@@ -123,8 +123,10 @@ def test_firm_marginals(firm_samplers):
     assert firms.columns[0] == "id"
     assert firms["id"].to_list() == list(range(500))
 
-    # LogNormal(3, 1): mean(log(size)) = 3.0 by construction.
-    assert firms["size"].log().mean() == pytest.approx(3.0, abs=0.4)
+    # LogNormal(3, 1): mean(log(size)) = 3.0 by construction.  The sampler now
+    # carries an explicit seed, so the draw is reproducible and this bound can
+    # be tight (realized 2.933) instead of absorbing run-to-run RNG noise.
+    assert firms["size"].log().mean() == pytest.approx(3.0, abs=0.15)
 
     # IO-table coefficients are industry-homogeneous (one value per sector).
     for col in ("alpha", "w_bar", "delta", "tech_share"):
@@ -148,8 +150,10 @@ def test_household_marginals():
 
     households = make_dataset(
         samplers={
-            "status": weighted_enum(status_enum, [H_ACTIVE, H_INACTIVE]),
-            "wage_class": weighted_enum(wage_enum, [0.325, 0.325, 0.175, 0.175]),
+            "status": weighted_enum(status_enum, [H_ACTIVE, H_INACTIVE], seed=110),
+            "wage_class": weighted_enum(
+                wage_enum, [0.325, 0.325, 0.175, 0.175], seed=111
+            ),
         },
         n_agents=2_000,
         seed=1,
@@ -157,15 +161,17 @@ def test_household_marginals():
 
     assert households.columns[0] == "id"
 
+    # Seeded weighted_enum draws → deterministic shares, so these bounds are
+    # tight (realized: inactive 0.4565, Q3+Q4 0.3515) rather than ±0.04.
     inactive_share = households.filter(pl.col("status") == "inactive").height / 2_000
     assert inactive_share == pytest.approx(
-        H_INACTIVE / (H_ACTIVE + H_INACTIVE), abs=0.04
+        H_INACTIVE / (H_ACTIVE + H_INACTIVE), abs=0.02
     )
 
     q3q4_share = (
         households.filter(pl.col("wage_class").is_in(["Q3", "Q4"])).height / 2_000
     )
-    assert q3q4_share == pytest.approx(0.35, abs=0.04)
+    assert q3q4_share == pytest.approx(0.35, abs=0.015)
 
     # Scalar household parameters verified against Table 2.
     assert HH["propensity"] == pytest.approx(0.9394)
@@ -187,9 +193,9 @@ def test_government_entities(io_df):
     gov_entities = make_dataset(
         samplers={
             # Each government entity purchases from one sector, weighted by output share.
-            "purchase_sector": weighted_enum(industry_enum, io_df["output"]),
+            "purchase_sector": weighted_enum(industry_enum, io_df["output"], seed=120),
             # Fixed income tax rate τ^INC shared by all entities (Table 2).
-            "tax_rate": pr.uniform(TAX["income"], TAX["income"] + 1e-12),
+            "tax_rate": pr.uniform(TAX["income"], TAX["income"] + 1e-12, seed=121),
         },
         n_agents=J,
         seed=2,
@@ -215,10 +221,12 @@ def test_banks():
     banks = make_dataset(
         samplers={
             # Capital ratio calibrated around Basel III minimum ζ = 0.03.
-            "capital_ratio": pr.normal(0.08, 0.02).clip(BANKING["capital_ratio"], 0.30),
+            "capital_ratio": pr.normal(0.08, 0.02, seed=130).clip(
+                BANKING["capital_ratio"], 0.30
+            ),
             # Leverage = assets/equity; clipped at 1/max_capital_ratio.
-            "leverage": pr.normal(12.0, 2.0).clip(1 / 0.30, None),
-            "deposit_share": pr.uniform(0.05, 0.30),
+            "leverage": pr.normal(12.0, 2.0, seed=131).clip(1 / 0.30, None),
+            "deposit_share": pr.uniform(0.05, 0.30, seed=132),
         },
         n_agents=12,
         seed=3,
@@ -247,8 +255,11 @@ def test_foreign_firms(io_df):
     industry_enum = pl.Enum(industries.to_list())
     foreign_firms = make_dataset(
         samplers={
-            "source_industry": weighted_enum(industry_enum, io_df["output"]),
-            "demand_size": pr.normal(2.5, 1.0).exp().cast(pl.Int64).clip(1, None),
+            "source_industry": weighted_enum(industry_enum, io_df["output"], seed=140),
+            "demand_size": pr.normal(2.5, 1.0, seed=141)
+            .exp()
+            .cast(pl.Int64)
+            .clip(1, None),
         },
         n_agents=L,
         seed=4,
@@ -293,8 +304,8 @@ def test_firm_sector_size_ga(io_df):
 
     population = make_dataset(
         samplers={
-            "industry": weighted_enum(industry_enum, n_firms),
-            "size": pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None),
+            "industry": weighted_enum(industry_enum, n_firms, seed=150),
+            "size": pr.normal(3.0, 1.0, seed=151).exp().cast(pl.Int64).clip(1, None),
         },
         n_agents=300,
         seed=5,
@@ -312,11 +323,14 @@ def test_firm_sector_size_ga(io_df):
     # score() returns -energy; a less-negative value = better fit to constraints.
     assert cal.score(firms) >= cal.score(population)
 
-    # Directly evaluate each constraint's metric and target and check convergence.
+    # Directly evaluate each constraint's metric and target and check
+    # convergence.  Seeded population + seeded GA (seed=5) make the whole
+    # optimisation deterministic, so this bound is tight (realized 0.072)
+    # rather than the ±0.8 that non-reproducible runs needed.
     for metric_expr, target_expr in constraints:
         achieved = firms.select(metric_expr.alias("m")).to_series()
         expected = firms.select(target_expr.alias("t")).to_series()
-        assert (achieved - expected).abs().mean() == pytest.approx(0.0, abs=0.8)
+        assert (achieved - expected).abs().mean() == pytest.approx(0.0, abs=0.15)
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +340,9 @@ def test_firm_sector_size_ga(io_df):
 
 def test_single_column_constraint_warns():
     population = make_dataset(
-        samplers={"size": pr.normal(3.0, 1.0).exp().cast(pl.Int64).clip(1, None)},
+        samplers={
+            "size": pr.normal(3.0, 1.0, seed=160).exp().cast(pl.Int64).clip(1, None)
+        },
         n_agents=50,
     )
     with pytest.warns(UserWarning, match="single-column"):
@@ -348,16 +364,19 @@ def test_full_poledna_calibration(firm_samplers):
     firms = make_dataset(samplers=firm_samplers, n_agents=1_000, seed=10)
     households = make_dataset(
         samplers={
-            "status": weighted_enum(status_enum, [H_ACTIVE, H_INACTIVE]),
-            "wage_class": weighted_enum(wage_enum, [0.325, 0.325, 0.175, 0.175]),
+            "status": weighted_enum(status_enum, [H_ACTIVE, H_INACTIVE], seed=170),
+            "wage_class": weighted_enum(
+                wage_enum, [0.325, 0.325, 0.175, 0.175], seed=171
+            ),
         },
         n_agents=2_000,
         seed=11,
     )
 
-    # Firms: Section 4.1.1 + 4.1.2 headline checks.
+    # Firms: Section 4.1.1 + 4.1.2 headline checks.  Seeded samplers → tight,
+    # deterministic bound (realized 2.916).
     assert firms.columns[0] == "id"
-    assert firms["size"].log().mean() == pytest.approx(3.0, abs=0.4)
+    assert firms["size"].log().mean() == pytest.approx(3.0, abs=0.15)
     assert (firms["alpha"] > 0).all()
     assert firms["delta"].is_between(0, 1).all()
     assert firms["tech_share"].is_between(0, 1).all()
@@ -365,7 +384,7 @@ def test_full_poledna_calibration(firm_samplers):
     # Households: census active share H^act / (H^act + H^inact) ≈ 53.4%.
     assert households.columns[0] == "id"
     active_share = households.filter(pl.col("status") == "active").height / 2_000
-    assert active_share == pytest.approx(H_ACTIVE / (H_ACTIVE + H_INACTIVE), abs=0.05)
+    assert active_share == pytest.approx(H_ACTIVE / (H_ACTIVE + H_INACTIVE), abs=0.02)
 
     # Scalar parameters from Table 2.
     assert BANKING["capital_ratio"] == pytest.approx(0.03)

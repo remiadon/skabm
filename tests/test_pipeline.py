@@ -38,11 +38,18 @@ from skabm.calibration import (
 SECTOR_ENUM = pl.Enum(["manuf", "service"])
 AGE_CLASS_ENUM = pl.Enum(["young", "mature"])
 
+# Every pr.* root carries an explicit seed so make_dataset is reproducible:
+# polars-random's global set_random_seed does NOT reach expressions materialised
+# over a frame (only its size= Series form), so a per-call seed is the only way
+# to pin these pools.  Reproducible population => the GA (seed=0) downstream is
+# deterministic too, which is what lets the assertions below be tight.  (The MH
+# calibrator stays internally non-reproducible even with its seed, so the MH
+# tests keep loose tolerances.)
 SAMPLERS = {
-    "sector": weighted_enum(SECTOR_ENUM, [1, 1]),  # 50 / 50
-    "age_class": weighted_enum(AGE_CLASS_ENUM, [2, 1]),  # 67 % young
-    "size": pr.normal(mean=4.0, std=1.0).exp().cast(pl.Int64).clip(1, None),
-    "wage": pr.normal(mean=2.5, std=0.5).exp(),
+    "sector": weighted_enum(SECTOR_ENUM, [1, 1], seed=200),  # 50 / 50
+    "age_class": weighted_enum(AGE_CLASS_ENUM, [2, 1], seed=201),  # 67 % young
+    "size": pr.normal(mean=4.0, std=1.0, seed=202).exp().cast(pl.Int64).clip(1, None),
+    "wage": pr.normal(mean=2.5, std=0.5, seed=203).exp(),
 }
 
 # Two inter-column constraints, each pointing to a different enum anchor:
@@ -105,13 +112,13 @@ def test_make_dataset_column_types(population):
 def test_make_dataset_sector_balance(population):
     counts = population["sector"].value_counts()
     manuf = counts.filter(pl.col("sector") == "manuf")["count"][0]
-    assert manuf == pytest.approx(200, abs=40)  # 50 % ± 10 %
+    assert manuf == pytest.approx(200, abs=25)  # seeded: realized 208
 
 
 def test_make_dataset_age_class_balance(population):
     counts = population["age_class"].value_counts()
     young = counts.filter(pl.col("age_class") == "young")["count"][0]
-    assert young == pytest.approx(267, abs=40)  # 67 % ± 10 %
+    assert young == pytest.approx(267, abs=20)  # seeded: realized 266
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +187,8 @@ def test_ga_preserves_size_distribution_approximately(population, fitted_ga):
     calibrated = fitted_ga.transform(population)
     orig_log_mean = population["size"].log().mean()
     cal_log_mean = calibrated["size"].log().mean()
-    assert cal_log_mean == pytest.approx(orig_log_mean, abs=0.5)
+    # Seeded population + GA => deterministic; realized dev 0.008, was ±0.5.
+    assert cal_log_mean == pytest.approx(orig_log_mean, abs=0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +261,9 @@ def test_make_dataset_from_fitted_samplers_preserves_marginals(fitted_ga):
     """make_dataset with fitted samplers_ preserves per-column marginals."""
     new_pop = make_dataset(fitted_ga.samplers_, n_agents=400, seed=7)
     fitted_size_mean = fitted_ga.samplers_["size"].log().mean()
-    assert new_pop["size"].log().mean() == pytest.approx(fitted_size_mean, abs=0.5)
+    # samplers_ are Series pools; make_dataset(seed=7) resamples them
+    # deterministically.  Realized dev 0.099, was ±0.5.
+    assert new_pop["size"].log().mean() == pytest.approx(fitted_size_mean, abs=0.2)
 
 
 def test_transform_gives_better_score_than_make_dataset_from_samplers(

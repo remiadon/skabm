@@ -118,18 +118,27 @@ def _de_constraints(constraints: Sequence[tuple]) -> list[tuple]:
 # ---------------------------------------------------------------------------
 
 
-def weighted_enum(enum: pl.Enum, weights: Sequence[float] | pl.Series) -> pl.Expr:
+def weighted_enum(
+    enum: pl.Enum, weights: Sequence[float] | pl.Series, seed: int | None = None
+) -> pl.Expr:
     """CDF-inversion sampler for a pl.Enum with given weights.
 
     Returns a row-context pl.Expr (polars-random).  Pass directly as a sampler
     value; _pool() materialises it via a dummy frame.
+
+    ``seed`` seeds the underlying ``pr.uniform`` draw.  Leave it None for
+    entropy-seeded draws; pass an int for a reproducible sampler.  This is the
+    only way to make a ``weighted_enum`` column deterministic: the global
+    ``pr.set_random_seed`` does *not* reach polars-random expressions
+    materialised over a frame (only its ``size=`` Series form), so
+    ``make_dataset`` is reproducible iff every ``pr.*`` root carries a seed.
     """
     if isinstance(weights, pl.Series):
         weights = weights.to_list()
     cats = list(enum.categories)
     total = sum(weights)
     breaks = [sum(weights[: i + 1]) / total for i in range(len(cats) - 1)]
-    return pr.uniform(0, 1).cut(breaks=breaks, labels=cats)
+    return pr.uniform(0, 1, seed=seed).cut(breaks=breaks, labels=cats)
 
 
 def _pool(entry: pl.Series | pl.Expr) -> pl.Series:
