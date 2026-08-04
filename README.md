@@ -104,6 +104,16 @@ Design decisions, in sklearn vocabulary:
   example derive its whole population in-graph with no seed column, and
   gives Poledna genuine AR(1) innovations (`$..._sigma` params, off by
   default) — Monte-Carlo ensembles included.
+- **Estimation is an inline UDF, auto-wired**: behavioral learning (agents
+  re-fitting expectations on the model's own history, Hommes & Zhu 2014) is
+  another UDF — `sac:forecast` — but the modeller only ever writes it *inside*
+  their own rule: `sac("SUM", "Firm", "output", prior="growth_e", out="g_e")`
+  binds `?g_e` to the SAC-learned forecast, and nothing about history bookkeeping
+  appears in the rule set. The `model_` is an `Ontology` (a `Model` that
+  self-registers the UDFs) whose `expand_rules` detects the
+  `ex:sig__<agg>__<class>__<predicate>` signals those `sac(...)` calls imply and
+  tops the graph up with the measurement, a shared clock, and one generic
+  `PROCESS_ACCOUNTING` — so a rule set with no `sac()` gets no bookkeeping at all.
 
 ## Limitations
 
@@ -119,13 +129,16 @@ supply shares). Consequently employment links are static — hiring and
 firing would require rewiring `employer` triples under per-firm vacancy
 quotas, which needs an ordering no single UPDATE can express.
 
-**No in-graph estimation.** The paper's agents re-estimate their AR(1)
-expectation rules on the model's own history every quarter (behavioral
-learning); SPARQL cannot run regressions, so the *expectation parameters*
-are constants (the exogenous processes do carry `pr:normal` innovations —
-see "Randomness is a UDF" above — they just aren't re-fit from history).
-Likewise SPARQL has no `log`/`exp`, so log-level laws of motion become
-linear growth factors.
+**Learning is the simplified form; no `log`/`exp`.** In-graph behavioral
+learning ships as SAC-learning (see "Estimation is an inline UDF" above), which
+is the sample-mean-plus-first-order-autocorrelation estimator — not the paper's
+full recursive least squares. The household-income expectation is wired the same
+way but currently inert: household income is constant in the simplified rules
+(fixed wages/benefits; owner-households are also wage-earners, so dividends are
+dormant), so its realized series is flat and SAC returns the prior — the
+plumbing activates for free once income dynamics are added. And SPARQL still has
+no `log`/`exp`, so log-level laws of motion (eq. 51, 77, 81) stay linear growth
+factors.
 
 **Activation is synchronous and staged — and there is no scheduler, on
 purpose.** ABM "schedulers" do two jobs: ordering behavioral *phases*

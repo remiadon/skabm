@@ -27,16 +27,18 @@ calibrating new DataFrames.
 per-agent state (``rules.state_extract``) after each tick, and summary
 logic stays in polars expressions on the caller's side.
 
-Lifecycle: an empty maplib ``Model`` is created at ``__init__`` and exposed
-as ``model_`` — the *fitted artifact*, where data and rules blend into one
-ontology-shaped world.  A cold ``fit``/``fit_iter`` rebuilds it from
-scratch (sklearn semantics: refitting restarts the world), maps each
-population with ``rules.map_df``, applies ``init_rules`` — necessarily
-*after* mapping, since init rules are CONSTRUCTs over agent patterns and
-insert nothing into an empty graph — then advances ``n_periods`` ticks of
-``update_rules`` upserts.  Population keywords not referenced by any rule
-are mapped but trigger a ``UserWarning``, since no rule will ever touch
-them.
+Lifecycle: an empty ``Ontology`` (a maplib ``Model`` that self-registers the
+``pr:``/``sac:`` UDFs and can auto-wire SAC-learning) is created at
+``__init__`` and exposed as ``model_`` — the *fitted artifact*, where data and
+rules blend into one ontology-shaped world.  A cold ``fit``/``fit_iter``
+rebuilds it from scratch (sklearn semantics: refitting restarts the world),
+asks ``model_.expand_rules`` to top the rule set up with the SAC history
+bookkeeping any inline ``rules.sac(...)`` calls imply, maps each population
+with ``rules.map_df``, applies ``init_rules`` — necessarily *after* mapping,
+since init rules are CONSTRUCTs over agent patterns and insert nothing into an
+empty graph — then advances ``n_periods`` ticks of ``update_rules`` upserts.
+Population keywords not referenced by any rule are mapped but trigger a
+``UserWarning``, since no rule will ever touch them.
 
 ``warm_start=True`` skips the rebuild/map/init phase entirely and keeps
 ticking the existing ``model_`` — possibly under *different* update rules,
@@ -74,12 +76,12 @@ import polars_random as pr
 from maplib import Model
 from sklearn.base import BaseEstimator
 
+from skabm.ontology import Ontology
 from skabm.rules import (
     DEFAULT_INIT_RULES,
     DEFAULT_UPDATE_RULES,
     POLEDNA_PARAMS,
     map_df,
-    register_polars_random,
     render,
     state_extract,
 )
@@ -118,8 +120,8 @@ class RDFSimulator(BaseEstimator):
     random_seed : int | None
         When set, ``pr.set_random_seed`` is called at the start of each
         ``fit``/``fit_iter`` so the ``pr:uniform`` / ``pr:normal`` SPARQL UDFs
-        (registered on ``model_`` via ``rules.register_polars_random``) draw a
-        reproducible sequence.  Leave None for entropy-seeded stochastic runs.
+        (registered on ``model_`` by ``Ontology``) draw a reproducible sequence.
+        Leave None for entropy-seeded stochastic runs.
 
     Attributes
     ----------
@@ -145,7 +147,7 @@ class RDFSimulator(BaseEstimator):
         self.warm_start = warm_start
         self.state_extract = state_extract
         self.random_seed = random_seed
-        self.model_ = Model()
+        self.model_ = Ontology()
 
     def _fit_iter(self, **populations: pl.DataFrame) -> Iterator[None]:
         """Advance the model one tick per iteration (no extraction)."""
@@ -160,7 +162,11 @@ class RDFSimulator(BaseEstimator):
                     "warm_start=True continues the existing model_; do not pass "
                     "populations (assign model_ directly instead)."
                 )
-            register_polars_random(self.model_)
+            # a hand-assigned plain Model is upgraded so it carries the UDFs and
+            # can expand its own SAC bookkeeping.
+            if not isinstance(self.model_, Ontology):
+                self.model_ = Ontology(self.model_)
+            _, update_rules = self.model_.expand_rules(init_rules, update_rules)
         else:
             rules_text = "\n".join((*init_rules, *update_rules))
             for kind in populations:
@@ -172,8 +178,13 @@ class RDFSimulator(BaseEstimator):
                         UserWarning,
                         stacklevel=3,
                     )
-            self.model_ = Model()
-            register_polars_random(self.model_)
+            # a fresh Ontology self-registers the pr:/sac: UDFs; expand_rules
+            # tops the rule set up with the SAC history bookkeeping the inline
+            # sac(...) calls imply (a no-op when no rule uses sac()).
+            self.model_ = Ontology()
+            init_rules, update_rules = self.model_.expand_rules(
+                init_rules, update_rules
+            )
             for kind, df in populations.items():
                 map_df(self.model_, df, kind)
             for rule in init_rules:
