@@ -13,9 +13,17 @@ and sklearn get_params/clone compatibility.
 
 import polars as pl
 import pytest
+from maplib import Model
 from sklearn.base import clone
 
-from skabm.rules import DEF_NS, FIRM_OWNERSHIP, FIRM_PRODUCTION, HOUSEHOLD_INCOME
+from skabm.rules import (
+    DEF_NS,
+    FIRM_OWNERSHIP,
+    FIRM_PRODUCTION,
+    HOUSEHOLD_INCOME,
+    _PREFIXES,
+    register_sac,
+)
 from skabm.simulation import RDFSimulator
 
 _PREFIX = f"PREFIX def:<{DEF_NS}>"
@@ -302,6 +310,118 @@ def test_ar_shocks_opt_in_and_reproducible():
     assert s1 != base  # shocks moved the path off the deterministic drift
     assert s1 == s2  # same seed -> identical run
     assert s1 != s3  # the seed matters
+
+
+def _sac_forecast_in_graph(values: list[float]) -> float:
+    """Run the sac:forecast UDF over ``values`` (in order) and return it."""
+    m = Model()
+    m.map_default(
+        pl.DataFrame(
+            {
+                "id": [f"urn:o:{i}" for i in range(len(values))],
+                "series": ["s"] * len(values),
+                "t": list(range(len(values))),
+                "value": values,
+            }
+        ),
+        primary_key_column="id",
+    )
+    register_sac(m)
+    return m.query(
+        _PREFIXES + 'SELECT (SAMPLE(?f) AS ?fc) WHERE { ?o def:series "s" ; def:t ?t ; '
+        "def:value ?v . BIND(sac:forecast(xsd:double(?t), ?v) AS ?f) }"
+    )["fc"][0]
+
+
+def test_sac_forecast_is_sample_autocorrelation_learning():
+    # SAC-learning: forecast = mean + b*(last - mean), where b is the
+    # first-order sample autocorrelation. Check against the polars closed form.
+    x = pl.Series([0.01, 0.012, 0.011, 0.013, 0.009])
+    dev = x - x.mean()
+    beta = (dev * dev.shift(1)).sum() / (dev * dev).sum()
+    expected = x.mean() + max(-0.999, min(0.999, beta)) * (x[-1] - x.mean())
+    assert _sac_forecast_in_graph(x.to_list()) == pytest.approx(expected)
+
+    # a single observation has no autocorrelation to learn -> the last value
+    assert _sac_forecast_in_graph([0.02]) == pytest.approx(0.02)
+    # a constant series (zero variance) likewise falls back to that level
+    assert _sac_forecast_in_graph([0.005] * 6) == pytest.approx(0.005)
+
+
+def _growth_forecast(model):
+    """The model's current inline-SAC growth forecast, or None with <2 obs.
+
+    Runs the same query ``FIRM_PRODUCTION``'s spliced ``sac("SUM", "Firm",
+    "output", ...)`` fragment runs, so it reads exactly the expectation the rule
+    consumes.
+    """
+    r = model.query(
+        _PREFIXES + "SELECT (SAMPLE(?f) AS ?fc) (COUNT(?v) AS ?n) WHERE { "
+        "?o def:of ex:sig__SUM__Firm__output ; def:t ?t ; def:value ?v . "
+        "BIND(sac:forecast(xsd:double(?t), ?v) AS ?f) }"
+    )
+    return r["fc"][0] if r["n"][0] >= 2 else None
+
+
+def test_expectations_learned_inline_and_reproducible():
+    # The concrete proof estimation is live in-graph: with shocks, the growth
+    # expectation FIRM_PRODUCTION reads is re-estimated off the model's own
+    # realized SUM(output) history and drifts away from the constant prior; the
+    # run stays reproducible under a fixed seed.
+    pops = dict(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
+    prior = PARAMS["growth_e"]
+
+    def path(params, seed=None):
+        sim = RDFSimulator(params=params, n_periods=6, random_seed=seed)
+        return [_growth_forecast(sim.model_) for _ in sim.fit_iter(**pops)]
+
+    shocked = dict(PARAMS, growth_sigma=0.02)
+    learned = path(shocked, seed=1)
+    assert any(g is not None and abs(g - prior) > 1e-6 for g in learned)  # learned
+    assert learned == path(shocked, seed=1)  # same seed -> identical path
+
+    # Deterministic path (sigma=0): realized growth is constant, so SAC-learning
+    # reproduces the prior exactly — the run is unchanged by learning.
+    flat = path(PARAMS)
+    assert all(g is None or g == pytest.approx(prior) for g in flat)
+
+
+def test_firm_only_tracks_firm_signals_income_dormant():
+    # A Firm-only run auto-wires the firm-derived signals (SUM output, AVG price)
+    # and advances output; the income signal stays dormant — no households means
+    # its t=0 aggregate is unbound, so it gets no def:prev and never accumulates —
+    # and HOUSEHOLD_UPDATE (absent) never reads it.
+    sim = RDFSimulator(params=PARAMS, n_periods=3).fit(Firm=FIRMS)
+    m = sim.model_
+    signals = {
+        local(r["sig"])
+        for r in m.query(
+            f"{_PREFIXES} SELECT ?sig WHERE {{ ?sig a ex:Signal }}"
+        ).to_dicts()
+    }
+    assert "sig__SUM__Firm__output" in signals and "sig__AVG__Firm__price" in signals
+    dormant = m.query(
+        f"{_PREFIXES} SELECT ?p WHERE {{ ex:sig__SUM__Household__income def:prev ?p }}"
+    )
+    assert dormant.height == 0  # income signal never primed
+    outputs = m.query(f"{_PREFIX} SELECT ?y WHERE {{ ?f def:output ?y }}")
+    assert (outputs["y"] > FIRMS["output"]).all()  # production still advanced
+
+
+def test_ontology_expand_rules_injects_only_when_sac_used():
+    from skabm.ontology import Ontology
+    from skabm.rules import sac
+
+    onto = Ontology()
+    # a rule that calls sac() -> one PROCESS_INIT, one MEASURE, one PROCESS_ACCOUNTING
+    with_sac = ["WHERE {}" + sac("SUM", "Firm", "output", prior="growth_e", out="g")]
+    init, update = onto.expand_rules([], with_sac)
+    assert len(init) == 1  # PROCESS_INIT seeded
+    assert len(update) == 1 + 1 + 1  # user rule + measurement + accounting
+
+    # no sac() anywhere -> nothing injected (Schelling-style rule sets are untouched)
+    plain = ["SELECT * WHERE { ?s ?p ?o }"]
+    assert onto.expand_rules([], plain) == ([], plain)
 
 
 def test_get_params_and_clone():

@@ -37,11 +37,16 @@ limits (kept on purpose — this architecture is being stress-tested):
   allocated proportionally to supply shares instead of by random visiting;
   employment links are static.  Random sequential algorithms are not
   expressible declaratively.
-* **No AR(1) re-estimation** (eq. 6/9): expectations are constant
-  parameters, not regressions on the model's own history.  The exogenous
-  processes do carry stochastic innovations, though — ``pr:normal`` shocks
-  on the drifts (``$..._sigma`` params, off by default), so Monte-Carlo
-  ensembles are back in reach.
+* **SAC-learning expectations** (eq. 6/9): expected growth, inflation and
+  household-income growth are *re-estimated in-graph* every tick by
+  Sample-Autocorrelation Learning (Hommes & Zhu 2014).  A rule calls the
+  estimator inline — ``sac("SUM", "Firm", "output", prior="growth_e", out="g_e")``
+  splices a ``sac:forecast`` UDF (``register_sac``) over the signal's history —
+  and ``Ontology.expand_rules`` auto-generates the measurement + ``PROCESS_INIT``
+  / ``PROCESS_ACCOUNTING`` bookkeeping, so no rule set carries history plumbing
+  by hand.  The drifts additionally carry ``pr:normal`` innovations
+  (``$..._sigma`` params, off by default), so learned drift and stochastic shock
+  coexist.
 * **No log/exp**: AR(1) laws of motion in log-levels (eq. 51, 77, 81)
   become linear growth factors.
 
@@ -52,6 +57,7 @@ comparisons on unbound variables as false instead of erroring, so a
 COALESCE chain would bind the wrong arm.
 """
 
+import re
 from string import Template
 
 import polars as pl
@@ -61,11 +67,13 @@ from maplib import xsd
 EX_NS = "http://example.net/skabm#"
 DEF_NS = "urn:maplib_default:"
 PR_NS = "urn:pr:"  # polars-random UDFs, registered by register_polars_random
+SAC_NS = "urn:sac:"  # SAC-learning UDF, registered by register_sac
 
 _PREFIXES = (
     f"PREFIX ex:<{EX_NS}>\n"
     f"PREFIX def:<{DEF_NS}>\n"
     f"PREFIX pr:<{PR_NS}>\n"
+    f"PREFIX sac:<{SAC_NS}>\n"
     "PREFIX xsd:<http://www.w3.org/2001/XMLSchema#>\n"
 )
 
@@ -97,6 +105,89 @@ def register_polars_random(model) -> None:
 
     model.add_udf(PR_NS + "uniform", _uniform, xsd.double, [xsd.double, xsd.double])
     model.add_udf(PR_NS + "normal", _normal, xsd.double, [xsd.double, xsd.double])
+
+
+def register_sac(model) -> None:
+    """Expose SAC-learning (Sample Autocorrelation Learning) to SPARQL as a UDF.
+
+    ``sac:forecast(?t, ?x)`` is the Hommes & Zhu (2014) behavioral-learning
+    forecast the ``sac(...)`` inline helper calls: agents perceive an aggregate
+    as an AR(1) process and learn its two parameters from the realized sample —
+
+    * the **sample mean** ``a`` (the variable's long-run level), and
+    * the **first-order sample autocorrelation** ``b`` (its persistence,
+      ``b = Sum (x_t - a)(x_{t-1} - a) / Sum (x_t - a)^2``, clamped to
+      ``(-1, 1)`` for stationarity) —
+
+    returning the one-step forecast ``a + b * (x_last - a)``.
+
+    Called with **one row per history observation** (arg 0 = tick, arg 1 =
+    value): it reduces those rows to the scalar forecast and broadcasts it over
+    every row, so the caller collapses it with ``SAMPLE(...)`` in a sub-SELECT.
+    Fewer than two observations (or a constant series) has no autocorrelation to
+    learn, so it falls back to the last value.
+    """
+
+    def _sac_forecast(df: pl.DataFrame) -> pl.Series:
+        # columns arrive in argument order (tick, value); maplib names an
+        # integer-sourced argument "literal" not "0", so index by position.
+        tick, val = df.columns[0], df.columns[1]
+        dev = pl.col(val) - pl.col(val).mean()
+        s = (
+            df.sort(tick)
+            .select(
+                mean=pl.col(val).mean(),
+                last=pl.col(val).last(),
+                num=(dev * dev.shift(1)).sum(),
+                den=(dev * dev).sum(),
+                n=pl.len(),
+            )
+            .row(0, named=True)
+        )
+        if s["n"] < 2 or not s["den"]:
+            fc = s["last"]
+        else:
+            beta = max(-0.999, min(0.999, s["num"] / s["den"]))
+            fc = s["mean"] + beta * (s["last"] - s["mean"])
+        # explicit dtype so an empty input (maplib probes the UDF with zero
+        # rows) still returns an f64 column rather than a Null-typed one.
+        return pl.Series("out", [fc] * s["n"], dtype=pl.Float64)
+
+    model.add_udf(
+        SAC_NS + "forecast", _sac_forecast, xsd.double, [xsd.double, xsd.double]
+    )
+
+
+def sac(agg: str, klass: str, predicate: str, prior: str, out: str) -> str:
+    """Inline SAC-learning forecast, for splicing into an update rule's WHERE.
+
+    Drop ``+ sac("SUM", "Firm", "output", prior="growth_e", out="g_e") +`` into a
+    rule and use ``?g_e``: it binds ``?<out>`` to the one-step SAC-learning
+    forecast of the growth rate of ``<agg>`` over ``ex:<klass>``'s
+    ``def:<predicate>`` (e.g. total firm output), falling back to the ``$<prior>``
+    parameter until two observations exist.  The class scopes the aggregate —
+    several agent kinds may share a predicate (firms, households and government
+    all carry ``def:price``), so a predicate alone would measure the wrong
+    population.
+
+    The signal IRI it references — ``ex:sig__<agg>__<klass>__<predicate>`` — is
+    the detection hook: ``Ontology.expand_rules`` scans rule text for it and tops
+    up the graph with the matching measurement + history bookkeeping, so the
+    end-user never writes ``PROCESS_ACCOUNTING`` / ``MEASURE`` / clocks / obs.
+
+    ``xsd:double(?t)`` casts the integer tick (maplib passes an integer UDF
+    argument as an all-null column); every internal variable is namespaced by
+    ``out`` so several ``sac(...)`` calls (or the host rule's own variables)
+    never collide.
+    """
+    sig = _sig(agg, klass, predicate)
+    return f"""
+        {{ SELECT (SAMPLE(?{out}_f) AS ?{out}_raw) (COUNT(?{out}_v) AS ?{out}_n) WHERE {{
+            ?{out}_o def:of {sig} ; def:t ?{out}_t ; def:value ?{out}_v .
+            BIND(sac:forecast(xsd:double(?{out}_t), ?{out}_v) AS ?{out}_f)
+        }} }}
+        BIND(IF(?{out}_n >= 2e0, ?{out}_raw, ${prior}) AS ?{out})
+"""
 
 
 def dbl(x: float) -> str:
@@ -219,21 +310,126 @@ HOUSEHOLD_WEALTH = Template(
 
 
 # ---------------------------------------------------------------------------
+# SAC-learning bookkeeping — generated, not authored.  A
+# ``sac(agg, klass, pred, ...)`` call in any update rule references
+# ``ex:sig__<agg>__<klass>__<pred>``; ``Ontology.expand_rules`` finds those
+# signals and tops the graph up with the rules below, so the end-user never
+# writes history bookkeeping by hand.
+#
+# Each tracked signal is an ``ex:Signal`` node carrying ``def:level`` (this
+# tick's aggregate) and ``def:prev`` (last tick's); observations accumulate as
+# ``?o def:of ?sig ; def:t ?k ; def:value ?rate`` under a shared ``ex:clock``.
+# ---------------------------------------------------------------------------
+
+_SIGNAL_RE = re.compile(r"ex:sig__([A-Za-z]+)__([A-Za-z]+)__([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def parse_signal_specs(rule_texts: "list[str]") -> "list[tuple[str, str, str]]":
+    """The distinct ``(agg, klass, predicate)`` signals a rule set forecasts with ``sac()``.
+
+    Reads them straight off the ``ex:sig__<agg>__<klass>__<predicate>`` IRIs the
+    ``sac()`` fragments embed — no registry, purely a function of the rule text.
+    Sorted so generated rules (and tests) are deterministic.
+    """
+    specs = {m.groups() for text in rule_texts for m in _SIGNAL_RE.finditer(text)}
+    return sorted(specs)
+
+
+def _sig(agg: str, klass: str, predicate: str) -> str:
+    return f"ex:sig__{agg}__{klass}__{predicate}"
+
+
+def process_init(specs: "list[tuple[str, str, str]]") -> str:
+    """The init rule seeding ``ex:clock`` and one ``ex:Signal`` per spec.
+
+    Each signal's ``def:prev`` is primed with the t=0 aggregate (scoped to the
+    signal's class) so the first tick already has a lag to measure against.  An
+    aggregate over an absent population (e.g. income in a Firm-only run) is
+    unbound, so CONSTRUCT skips that ``def:prev`` — the signal stays dormant and
+    its ``sac()`` consumer falls back to the prior (pre-learning behavior).
+    """
+    decls, wheres = [], []
+    for i, (agg, klass, pred) in enumerate(specs):
+        decls.append(f"{_sig(agg, klass, pred)} a ex:Signal ; def:prev ?v{i} .")
+        wheres.append(
+            f"{{ SELECT ({agg}(?x{i}) AS ?v{i}) "
+            f"WHERE {{ ?a{i} a ex:{klass} ; def:{pred} ?x{i} }} }}"
+        )
+    return (
+        _PREFIXES
+        + '\n    CONSTRUCT {\n        ex:clock a ex:Clock ; def:t "0"^^xsd:integer .\n        '
+        + "\n        ".join(decls)
+        + "\n    }\n    WHERE {\n        "
+        + "\n        ".join(wheres)
+        + "\n    }\n"
+    )
+
+
+def measure_rule(agg: str, klass: str, predicate: str) -> str:
+    """Per-signal upsert materializing ``def:level`` = ``<agg>(ex:<klass> def:<predicate>)``.
+
+    Scoped to the signal's class: several agent kinds may share a predicate, so
+    the aggregate must name the class the ``sac()`` call meant.
+    """
+    sig = _sig(agg, klass, predicate)
+    return (
+        _PREFIXES
+        + f"""
+    DELETE {{ {sig} def:level ?old }}
+    INSERT {{ {sig} def:level ?v }}
+    WHERE {{
+        {sig} a ex:Signal .
+        OPTIONAL {{ {sig} def:level ?old }}
+        {{ SELECT ({agg}(?x) AS ?v) WHERE {{ ?a a ex:{klass} ; def:{predicate} ?x }} }}
+    }}
+    """
+    )
+
+
+# Generic history accounting (no variable names): for every signal, turn this
+# tick's level into a growth-rate observation, roll the lag forward, and bump
+# the shared clock.  ``(?level / ?prev) - 1e0`` is parenthesised — maplib
+# evaluates additive chains right-associatively (see maplib-gotchas memory).
+PROCESS_ACCOUNTING = (
+    _PREFIXES
+    + """
+    DELETE { ?sig def:prev ?prev . ex:clock def:t ?t . }
+    INSERT {
+        ?obs def:of ?sig ; def:t ?t ; def:value ?rate .
+        ?sig def:prev ?level .
+        ex:clock def:t ?tnext .
+    }
+    WHERE {
+        ex:clock def:t ?t .
+        ?sig a ex:Signal ; def:level ?level ; def:prev ?prev .
+        BIND((?level / ?prev) - 1e0 AS ?rate)
+        BIND(?t + "1"^^xsd:integer AS ?tnext)
+        BIND(IRI(CONCAT(STR(?sig), "_obs_", STR(?t))) AS ?obs)
+    }
+    """
+)
+
+
+# ---------------------------------------------------------------------------
 # Update rules — Model.update, every tick (upsert pattern)
 # ---------------------------------------------------------------------------
 
 # Supply choice (eq. 5) capped by labor capacity (eq. 12, Leontief):
-# output <- min(output * (1 + $growth_e + eps), alpha * size), eps an AR(1)
-# innovation eps ~ N(0, $growth_sigma) (eq. 6).  The intermediate-input and
-# capital legs of the Leontief nest are omitted.
+# output <- min(output * (1 + g_e + eps), alpha * size), eps an AR(1)
+# innovation eps ~ N(0, $growth_sigma) (eq. 6).  Expected growth ?g_e is
+# SAC-learned in-graph from the realized SUM(output) history (eq. 6 behavioral
+# learning), falling back to the $growth_e prior until two ticks exist.  The
+# intermediate-input and capital legs of the Leontief nest are omitted.
 FIRM_PRODUCTION = Template(
     _PREFIXES
     + """
     DELETE { ?f def:output ?y0 }
     INSERT { ?f def:output ?y1 }
     WHERE {
-        ?f a ex:Firm ; def:output ?y0 ; def:alpha ?alpha ; def:size ?n .
-        BIND(?y0 * (1e0 + $growth_e + pr:normal(0e0, $growth_sigma)) AS ?y_desired)
+        ?f a ex:Firm ; def:output ?y0 ; def:alpha ?alpha ; def:size ?n ."""
+    + sac("SUM", "Firm", "output", prior="growth_e", out="g_e")
+    + """
+        BIND(?y0 * (1e0 + ?g_e + pr:normal(0e0, $growth_sigma)) AS ?y_desired)
         BIND(?alpha * ?n AS ?y_capacity)
         BIND(IF(?y_desired < ?y_capacity, ?y_desired, ?y_capacity) AS ?y1)
     }
@@ -242,15 +438,18 @@ FIRM_PRODUCTION = Template(
 
 # Cost-push price setting (eq. 8), reduced to the expected-inflation
 # passthrough with an AR(1) innovation eps ~ N(0, $inflation_sigma):
-# price <- price * (1 + $inflation_e + eps).
+# price <- price * (1 + infl_e + eps).  Expected inflation ?infl_e is SAC-learned
+# from the realized AVG(price) history, else the $inflation_e prior.
 FIRM_PRICING = Template(
     _PREFIXES
     + """
     DELETE { ?f def:price ?p0 }
     INSERT { ?f def:price ?p1 }
     WHERE {
-        ?f a ex:Firm ; def:price ?p0 .
-        BIND(?p0 * (1e0 + $inflation_e + pr:normal(0e0, $inflation_sigma)) AS ?p1)
+        ?f a ex:Firm ; def:price ?p0 ."""
+    + sac("AVG", "Firm", "price", prior="inflation_e", out="infl_e")
+    + """
+        BIND(?p0 * (1e0 + ?infl_e + pr:normal(0e0, $inflation_sigma)) AS ?p1)
     }
     """
 )
@@ -277,9 +476,10 @@ HOUSEHOLD_INCOME_UPDATE = Template(
     """
 )
 
-# One household tick: consumption budget (eq. 40) out of stored def:income,
-# savings absorb the rest (eq. 50):
-# wealth <- wealth + income - psi * income / (1 + $vat_rate).
+# One household tick: consumption budget (eq. 40) out of *expected* income,
+# savings absorb the rest (eq. 50).  Expected income is current income grown by
+# ?ig_e, the SAC-learned growth of realized SUM(income) (else the
+# $income_growth_e prior): wealth <- wealth + income - psi*income*(1+ig_e)/(1+$vat_rate).
 # Run HOUSEHOLD_INCOME_UPDATE earlier in the tick so income is current.
 HOUSEHOLD_UPDATE = Template(
     _PREFIXES
@@ -290,9 +490,12 @@ HOUSEHOLD_UPDATE = Template(
         ?hh a ex:Household ;
             def:wealth ?w0 ;
             def:psi ?psi ;
-            def:income ?inc .
-        BIND(?psi * ?inc / (1e0 + $vat_rate) AS ?consumption)
-        BIND(?w0 + ?inc - ?consumption AS ?w1)
+            def:income ?inc ."""
+    + sac("SUM", "Household", "income", prior="income_growth_e", out="ig_e")
+    + """
+        BIND(?inc * (1e0 + ?ig_e) AS ?exp_income)
+        BIND(?psi * ?exp_income / (1e0 + $vat_rate) AS ?consumption)
+        BIND((?w0 + ?inc) - ?consumption AS ?w1)
     }
     """
 )
@@ -379,7 +582,9 @@ def state_extract(model) -> pl.DataFrame:
     One row per firm (price, output, tech_share), household (wealth), and
     central bank (policy_rate); the other columns are null.  Summary logic
     (GDP, price level, ...) belongs in polars expressions on the caller's
-    side.
+    side.  SAC-learned expectations are ephemeral (computed inline in the rules,
+    not stored); observe them via the obs history (``def:of``/``def:value``) or
+    by running ``sac:forecast`` yourself.
     """
     return model.query(
         _PREFIXES
@@ -407,8 +612,12 @@ POLEDNA_PARAMS = {
     "benefit_replacement": 0.3586,  # theta^UB
     "vat_rate": 0.1529,  # tau^VAT
     "total_deposits": 222_933.2e6,  # D^H, Austria 2010:Q4 (EUR); rescale for demos
+    # Expectation priors (eq. 6/9): the inline sac(...) forecasts fall back to
+    # these ($<name> in the fragment) until two history observations exist, so a
+    # run this short is unchanged by learning.
     "growth_e": 0.005,  # expected quarterly real growth
     "inflation_e": 0.005,  # expected quarterly inflation
+    "income_growth_e": 0.0,  # expected household-income growth (neutral prior)
     "gov_growth": 0.005,  # government consumption drift
     # AR(1) innovation std devs (eq. 6/8/51).  Default 0 => normal(0,0)=0 =>
     # deterministic drifts (backward-compatible); set > 0 with
@@ -425,6 +634,10 @@ POLEDNA_PARAMS = {
 
 DEFAULT_INIT_RULES = (FIRM_OWNERSHIP, HOUSEHOLD_INCOME, HOUSEHOLD_WEALTH)
 
+# Only the economic rules — no SAC/history bookkeeping.  FIRM_PRODUCTION,
+# FIRM_PRICING and HOUSEHOLD_UPDATE call sac(...) inline; Ontology.expand_rules
+# detects those signals and injects the matching PROCESS_INIT / measurement /
+# PROCESS_ACCOUNTING at fit time, so the default set stays purely behavioral.
 DEFAULT_UPDATE_RULES = (
     FIRM_PRODUCTION,  # (i) supply choice, eq. 5 + 12
     FIRM_PRICING,  # (i) price setting, eq. 8
