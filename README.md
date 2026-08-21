@@ -33,22 +33,41 @@ becomes a queryable, editable, shareable ontology.
 
 ```python
 import polars as pl
-from skabm.calibration import make_dataset, weighted_enum
+from skabm.calibration import make_dataset
+from skabm.behaviour.household import kinked_consume, household_income
+from skabm.behaviour.firm import firm_produce, firm_price
+from skabm.behaviour.macro import centralbank_rate
 from skabm.simulation import RDFSimulator
+
 
 # 1. Calibrate agent populations as DataFrames (marginals from real data)
 firms = make_dataset(samplers={...}, n_agents=300)
 households = make_dataset(samplers={...}, n_agents=10_000)
 
-# 2. Simulate: one DataFrame per agent kind; default rules are assembled
-#    from the kinds you pass (only Firm + Household -> only their dynamics)
-sim = RDFSimulator(n_periods=12)
+# 1. Choose (or build) the behavioural rules you want — each is a SPARQL
+#    Template imported from skabm.behaviour; the canonical Poledna parameter
+#    set lives in skabm.behaviour.params and is merged at fit time.
+rules = [firm_produce, firm_price, household_income, kinked_consume, centralbank_rate]
+
+
+# 2. Calibrate agent populations as DataFrames (marginals from real data)
+#    and simulate: the simulator only runs rules whose referenced agent classes
+#    are present, so a Firm + Household run executes exactly those dynamics.
+sim = RDFSimulator(n_periods=12, update_rules=rules)
 for state in sim.fit_iter(Firm=firms, Household=households):
     print(state.select((pl.col("price") * pl.col("output")).sum()))
 
-# 3. Post-fit, sim.model_ is a regular maplib model: SPARQL queries,
-#    interventions, visualization (explore()), serialization
-sim.model_.query("SELECT ?h ?w WHERE { ?h a ex:Household ; def:wealth ?w }")
+# 3. Post-fit, sim.model_ is a regular maplib Model — SPARQL queries,
+#    interventions (do-calculus style), visualization (explore()),
+#    and serialization all work on it directly.
+#    Here: a single do-calculus intervention — set every firm's price to a
+#    fixed value (Pearl-style do-operator), then resume simulation under
+#    warm_start.  The do-operator abstraction is public-domain notation;
+#    production-grade identification/estimation tooling is a 3rd-party
+#    (licensed) concern and out of scope for the core engine.
+sim.model_.update("DELETE { ?f ex:price ?p } INSERT { ?f ex:price 42e0 } WHERE { ?f a ex:Firm }")
+for state in sim.fit_iter(warm_start=True):
+    print(state.select((pl.col("price") * pl.col("output")).sum()))
 ```
 
 See [examples/poledna_maplib_demo.py](examples/poledna_maplib_demo.py) for
