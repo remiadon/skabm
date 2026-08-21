@@ -15,7 +15,9 @@ import polars as pl
 import pytest
 from sklearn.base import clone
 
-from skabm.rules import DEF_NS, FIRM_OWNERSHIP, FIRM_PRODUCTION, HOUSEHOLD_INCOME
+from skabm.rules import DEF_NS
+from skabm.behaviour.firm import firm_ownership, firm_produce
+from skabm.behaviour.household import household_income_init
 from skabm.simulation import RDFSimulator
 
 _PREFIX = f"PREFIX def:<{DEF_NS}>"
@@ -170,7 +172,7 @@ def test_upserts_do_not_duplicate_state():
 def test_production_respects_labor_capacity():
     sim = RDFSimulator(
         init_rules=[],
-        update_rules=[FIRM_PRODUCTION],
+        update_rules=[firm_produce],
         params={"growth_e": 0.5},
         n_periods=10,
     ).fit(Firm=FIRMS)
@@ -204,11 +206,11 @@ def test_income_by_activity_status():
 # household population is not actually inert (it receives the owns triples).
 @pytest.mark.filterwarnings("ignore:population 'Household'")
 def test_firm_ownership_assigned_in_graph():
-    # households carry NO owns column — FIRM_OWNERSHIP assigns it in-graph.
+    # households carry NO owns column — firm_ownership assigns it in-graph.
     # ratio = n_firms / n_households puts one distinct owner on each firm.
     households = pl.DataFrame({"id": [f"hh_{i}" for i in range(6)], "psi": [0.9] * 6})
     sim = RDFSimulator(
-        init_rules=[FIRM_OWNERSHIP],
+        init_rules=[firm_ownership],
         update_rules=[],
         params={"firm_ownership_ratio": 2 / 6},
         n_periods=0,
@@ -235,7 +237,7 @@ def test_firm_ownership_preserves_data_defined_owner():
         }
     )
     sim = RDFSimulator(
-        init_rules=[FIRM_OWNERSHIP],
+        init_rules=[firm_ownership],
         update_rules=[],
         params={"firm_ownership_ratio": 2 / 6},
         n_periods=0,
@@ -252,7 +254,7 @@ def test_firm_ownership_preserves_data_defined_owner():
 
 
 def test_class_free_rule_survives_kind_filter():
-    # HOUSEHOLD_WEALTH names no ex:Class (it reads derived def:income); the
+    # household_wealth_init names no ex:Class (it reads derived def:income); the
     # fit-time filter must keep it, else household wealth never materializes
     sim = RDFSimulator(params=PARAMS, n_periods=1).fit(Firm=FIRMS, Household=HOUSEHOLDS)
     wealth = sim.model_.query(f"{_PREFIX} SELECT ?h ?w WHERE {{ ?h def:wealth ?w }}")
@@ -267,9 +269,9 @@ def test_bare_link_resolves_from_model():
     # prefixes it, so the income rule traverses employer -> firm.
     firms = pl.DataFrame({"id": ["firm_0"], "w_bar": [30.0]})
     households = pl.DataFrame({"id": ["hh_0"], "employer": ["firm_0"], "psi": [0.9]})
-    sim = RDFSimulator(init_rules=[HOUSEHOLD_INCOME], update_rules=[], n_periods=0).fit(
-        Firm=firms, Household=households
-    )
+    sim = RDFSimulator(
+        init_rules=[household_income_init], update_rules=[], n_periods=0
+    ).fit(Firm=firms, Household=households)
     income = sim.model_.query(f"{_PREFIX} SELECT ?i WHERE {{ ?h def:income ?i }}")
     assert income["i"].to_list() == [30.0]
 
@@ -327,3 +329,25 @@ def test_get_params_and_clone():
         t.template for t in params["update_rules"]
     ]
     assert fresh.model_.query("SELECT ?s WHERE { ?s ?p ?o }").height == 0
+
+
+def test_inject_metadata_adds_triples():
+    # _inject_metadata is the SPARQL-free provenance path; exercise it
+    # directly so the insertion block is covered without a full cold fit.
+    from skabm.simulation import _inject_metadata
+    from skabm.behaviour.firm import firm_ownership
+
+    m = firm_ownership.metadata
+    assert m["@id"] == "firm_ownership"
+    assert m["agentClass"] == "ex:Firm"
+    assert m["source"].startswith("Poledna")
+    assert m["@type"] == "Behaviour"
+
+    from maplib import Model
+
+    model = Model()
+    _inject_metadata(model, [firm_ownership])
+    triples = model.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
+    assert triples.height >= 3  # class-behaviour, type, source
+    pvals = {str(p).replace("<", "").replace(">", "") for p in triples["p"]}
+    assert "http://example.net/skabm#behaviour" in pvals

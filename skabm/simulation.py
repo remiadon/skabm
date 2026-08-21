@@ -1,9 +1,9 @@
-"""RDFSimulator: run an ABM by applying SPARQL update rules to a maplib model.
+"""
+RDFSimulator: run an ABM by applying SPARQL update rules to a maplib model.
 
 The sklearn contract, adapted to ABM: in sklearn ``fit`` takes one array X,
 but an ABM needs heterogeneous agent populations laid out as DataFrames of
-different sizes.  X is therefore a set of keyword arguments to ``fit`` —
-one calibrated DataFrame per agent class::
+different sizes.  X is therefore a set of keyword arguments to ``fit`` —one calibrated DataFrame per agent class::
 
     sim = RDFSimulator(n_periods=12)          # Poledna rules by default
     sim.fit(Firm=firms, Household=households, CentralBank=central_bank)
@@ -11,17 +11,16 @@ one calibrated DataFrame per agent class::
 Everything else follows sklearn: ``init_rules`` and ``update_rules`` are
 ``__init__`` parameters (``string.Template`` SPARQL — serializable, so
 ``get_params`` / ``clone`` work), defaulting to the full Poledna rule sets
-(``rules.DEFAULT_INIT_RULES`` / ``rules.DEFAULT_UPDATE_RULES``).  Rule
-*logic* lives in the templates; rule *parameters* live in the ``params``
-dict, merged over ``rules.POLEDNA_PARAMS`` and substituted into the
-templates' ``$placeholders`` at fit time — overriding one number
-(``params={"total_deposits": 2.5e4}``) never means re-writing a rule.
-The defaults self-scope to the agent kinds actually passed: at fit time,
-rules whose referenced classes (``ex:Firm``, ``ex:CentralBank``, ...) are
-all absent from the populations are filtered out entirely, so a use-case
-with only ``Firm=`` and ``Household=`` gets exactly the firm and household
-dynamics.  Declaring a new economic ABM with newer data is just
-calibrating new DataFrames.
+(``behaviour.params.poledna_params``).  Rule *logic* lives in the templates;
+rule *parameters* live in the ``params`` dict, merged over the canonical
+Poledna values and substituted into the templates' ``$placeholders`` at fit
+time — overriding one number (``params={"total_deposits": 2.5e4}``) never
+means re-writing a rule.  The defaults self-scope to the agent kinds actually
+passed: at fit time, rules whose referenced classes (``ex:Firm``,
+``ex:CentralBank``, ...) are all absent from the populations are filtered out
+entirely, so a use-case with only ``Firm=`` and ``Household=`` gets exactly
+the firm and household dynamics.  Declaring a new economic ABM with newer data
+is just calibrating new DataFrames.
 
 ``fit_iter`` is the generator variant of ``fit``: it yields the raw
 per-agent state (``rules.state_extract``) after each tick, and summary
@@ -74,15 +73,89 @@ import polars_random as pr
 from maplib import Model
 from sklearn.base import BaseEstimator
 
-from skabm.rules import (
-    DEFAULT_INIT_RULES,
-    DEFAULT_UPDATE_RULES,
-    POLEDNA_PARAMS,
-    map_df,
-    register_polars_random,
-    render,
-    state_extract,
+from skabm.rules import EX_NS, map_df, render, state_extract, register_polars_random
+from skabm.behaviour.params import poledna_params as _BEHAVIOUR_PARAMS
+from skabm.behaviour.household import (
+    household_income_init,
+    household_income,
+    household_wealth_init,
+    satisificing_consume,
 )
+from skabm.behaviour.firm import (
+    firm_ownership,
+    firm_produce,
+    firm_price,
+    firm_sales,
+)
+from skabm.behaviour.macro import (
+    government_spend,
+    centralbank_rate,
+)
+
+# Canonical Poledna (2023) rule composition, sourced from behaviour/.
+# Users override via __init__(init_rules=..., update_rules=..., params=...).
+DEFAULT_INIT_RULES = (firm_ownership, household_income_init, household_wealth_init)
+DEFAULT_UPDATE_RULES = (
+    firm_produce,  # supply choice, eq. 5 + 12
+    firm_price,  # price setting, eq. 8
+    household_income,  # income refresh, eq. 49
+    satisificing_consume,  # consumption + savings, eqs. 40 + 50
+    firm_sales,  # goods market, eqs. 1-2 + 27 + 31
+    government_spend,  # AR(1), eq. 51
+    centralbank_rate,  # Taylor rule, eq. 69
+)
+
+
+def _inject_metadata(model: Model, rules: Sequence) -> None:
+    """Insert behaviour provenance triples into *model* for templates that carry metadata.
+
+    Covers the ``template.metadata`` injection path used by
+    ``RDFSimulator._fit_iter``.  Used directly by tests so the block is
+    exercised without a full cold-fit.
+    """
+    for rule in rules:
+        if hasattr(rule, "metadata"):
+            m = rule.metadata
+            kind = m.get("agentClass", "")
+            # Accept both ex:Firm and http://example.net/skabm#Firm forms
+            if kind.startswith("ex:"):
+                kind = EX_NS + kind[3:]
+            if kind.startswith(EX_NS):
+                kind_name = kind[len(EX_NS) :]
+                class_iri = EX_NS + kind_name
+                beh_iri = EX_NS + m["@id"]
+                model.map_triples(
+                    pl.DataFrame(
+                        {
+                            "subject": [class_iri],
+                            "predicate": [EX_NS + "behaviour"],
+                            "object": [beh_iri],
+                        }
+                    )
+                )
+                model.map_triples(
+                    pl.DataFrame(
+                        {
+                            "subject": [beh_iri],
+                            "predicate": [
+                                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+                            ],
+                            "object": [EX_NS + "Behaviour"],
+                        }
+                    )
+                )
+                if "source" in m:
+                    from rdflib import Literal
+
+                    model.map_triples(
+                        pl.DataFrame(
+                            {
+                                "subject": [beh_iri],
+                                "predicate": ["http://purl.org/dc/terms/source"],
+                                "object": [Literal(m["source"])],
+                            }
+                        )
+                    )
 
 
 class RDFSimulator(BaseEstimator):
@@ -92,7 +165,7 @@ class RDFSimulator(BaseEstimator):
     ----------
     init_rules : Sequence[Template | str]
         SPARQL CONSTRUCT rules applied once through ``Model.insert`` right
-        after the populations are mapped (e.g. ``rules.HOUSEHOLD_INCOME``).
+        after the populations are mapped (e.g. ``behaviour.household.household_income_init``).
         ``string.Template`` rules get their ``$placeholders`` substituted
         from ``params``; plain strings pass through.  Rules anchored on
         unmapped agent classes no-op harmlessly.
@@ -101,7 +174,7 @@ class RDFSimulator(BaseEstimator):
         each tick — the model's event sequence (Poledna Section 3.5).
     params : dict
         Substitutes for the rule templates' ``$placeholders``, merged over
-        ``rules.POLEDNA_PARAMS`` — pass only what differs (e.g.
+        ``behaviour.params.poledna_params`` — pass only what differs (e.g.
         ``{"total_deposits": 2.5e4}``).  Numeric values are injected as
         xsd:double literals.
     n_periods : int
@@ -132,7 +205,7 @@ class RDFSimulator(BaseEstimator):
         self,
         init_rules: Sequence[Template | str] = DEFAULT_INIT_RULES,
         update_rules: Sequence[Template | str] = DEFAULT_UPDATE_RULES,
-        params: dict = POLEDNA_PARAMS,
+        params: dict = _BEHAVIOUR_PARAMS,
         n_periods: int = 12,
         warm_start: bool = False,
         state_extract: Callable[[Model], pl.DataFrame] = state_extract,
@@ -151,7 +224,7 @@ class RDFSimulator(BaseEstimator):
         """Advance the model one tick per iteration (no extraction)."""
         if self.random_seed is not None:
             pr.set_random_seed(self.random_seed)
-        merged = {**POLEDNA_PARAMS, **self.params}
+        merged = {**_BEHAVIOUR_PARAMS, **self.params}
         init_rules = [render(rule, merged) for rule in self.init_rules]
         update_rules = [render(rule, merged) for rule in self.update_rules]
         if self.warm_start:
@@ -176,6 +249,7 @@ class RDFSimulator(BaseEstimator):
             register_polars_random(self.model_)
             for kind, df in populations.items():
                 map_df(self.model_, df, kind)
+            _inject_metadata(self.model_, (*self.init_rules, *self.update_rules))
             for rule in init_rules:
                 self.model_.insert(rule)
         for _ in range(self.n_periods):

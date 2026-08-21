@@ -9,7 +9,7 @@ is purely spatial (x/y + id), no random column.
 Randomness comes from the `pr:uniform` SPARQL UDF
 (`rules.register_polars_random`, maplib >= 0.20.26); `RDFSimulator(random_seed=)`
 pins it, so a whole run is reproducible to the last digit — see
-``test_reproducible_under_random_seed``.
+`test_reproducible_under_random_seed`.
 
 Covered: population derivation + user override, one-person-per-cell (the
 rank-join matching), the core segregation result, reproducibility, and the

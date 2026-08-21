@@ -1,0 +1,128 @@
+"""
+Household behaviour templates — income, wealth, and consumption.
+
+All templates anchor on ``ex:Household`` and read/write ``def:wealth``,
+``def:income``, ``def:psi``.
+
+Templates are ``string.Template`` objects with ``$placeholder`` references.
+"""
+
+from __future__ import annotations
+
+from string import Template
+
+from skabm.rules import _PREFIXES
+
+# ---------------------------------------------------------------------------
+# household_income_init — initial income by activity status (init CONSTRUCT)
+# ---------------------------------------------------------------------------
+# Poledna eq. 49.  Income priority: wage > dividend > unemployment benefit.
+# Run once after mapping.  Placeholders: ``dividend_ratio``, ``benefit_replacement``.
+
+household_income_init = Template(
+    _PREFIXES
+    + """
+CONSTRUCT { ?hh def:income ?income }
+WHERE {
+    { SELECT (AVG(?any_w) AS ?w_avg) WHERE { ?any_f def:w_bar ?any_w } }
+    ?hh a ex:Household .
+    OPTIONAL { ?hh def:employer ?f . ?f def:w_bar ?w . }
+    OPTIONAL { ?hh def:owns ?g . ?g def:profit ?p . }
+    BIND(
+        IF(BOUND(?w), ?w,
+        IF(BOUND(?p), $dividend_ratio * IF(?p > 0e0, ?p, 0e0),
+        $benefit_replacement * ?w_avg)) AS ?income)
+}
+"""
+)
+
+# ---------------------------------------------------------------------------
+# household_income — per-tick income refresh (update)
+# ---------------------------------------------------------------------------
+# Same logic as ``household_income_init`` but as an upsert, so dividends track
+# the owned firm's evolving profit.  Placeholders: ``dividend_ratio``,
+# ``benefit_replacement``.
+
+household_income = Template(
+    _PREFIXES
+    + """
+DELETE { ?hh def:income ?i0 }
+INSERT { ?hh def:income ?i1 }
+WHERE {
+    { SELECT (AVG(?any_w) AS ?w_avg) WHERE { ?any_f def:w_bar ?any_w } }
+    ?hh a ex:Household .
+    OPTIONAL { ?hh def:income ?i0 }
+    OPTIONAL { ?hh def:employer ?f . ?f def:w_bar ?w . }
+    OPTIONAL { ?hh def:owns ?g . ?g def:profit ?p . }
+    BIND(
+        IF(BOUND(?w), ?w,
+        IF(BOUND(?p), $dividend_ratio * IF(?p > 0e0, ?p, 0e0),
+        $benefit_replacement * ?w_avg)) AS ?i1)
+}
+"""
+)
+
+# ---------------------------------------------------------------------------
+# household_wealth_init — initial wealth proportional to initial income (init)
+# ---------------------------------------------------------------------------
+# Poledna Section 5.2: D_h(0) = total_deposits * Y_h(0) / sum Y_h(0).
+# Run once after ``household_income_init``.  Placeholder: ``total_deposits``.
+
+household_wealth_init = Template(
+    _PREFIXES
+    + """
+CONSTRUCT { ?hh def:wealth ?wealth }
+WHERE {
+    { SELECT (SUM(?any_i) AS ?total) WHERE { ?any_hh def:income ?any_i } }
+    ?hh def:income ?income .
+    BIND($total_deposits * ?income / ?total AS ?wealth)
+}
+"""
+)
+
+# ---------------------------------------------------------------------------
+# satisificing_consume — fixed fraction psi of income (update)
+# ---------------------------------------------------------------------------
+# Poledna eq. 40 + 50.  C = psi * income / (1 + vat_rate).  Placeholder:
+# ``vat_rate``.  ``psi`` is an agent attribute (def:psi), not a parameter.
+
+satisificing_consume = Template(
+    _PREFIXES
+    + """
+DELETE { ?hh def:wealth ?w0 }
+INSERT { ?hh def:wealth ?w1 }
+WHERE {
+    ?hh a ex:Household ;
+        def:wealth ?w0 ;
+        def:psi ?psi ;
+        def:income ?inc .
+    BIND(?psi * ?inc / (1e0 + $vat_rate) AS ?consumption)
+    BIND(?w0 + ?inc - ?consumption AS ?w1)
+}
+"""
+)
+
+# ---------------------------------------------------------------------------
+# kinked_consume — subsistence floor + higher propensity above it (update)
+# ---------------------------------------------------------------------------
+# CANVAS-style: households spend subsistence C0 first, then psi_2 on income
+# above the VAT-adjusted subsistence.  Placeholders: ``subsistence``,
+# ``vat_rate``, ``psi_2``.
+
+kinked_consume = Template(
+    _PREFIXES
+    + """
+DELETE { ?hh def:wealth ?w0 }
+INSERT { ?hh def:wealth ?w1 }
+WHERE {
+    ?hh a ex:Household ;
+        def:wealth ?w0 ;
+        def:income ?inc .
+    BIND($subsistence AS ?C0)
+    BIND(?C0 * (1e0 + $vat_rate) AS ?subs_real)
+    BIND(IF(?inc > ?subs_real, ?inc - ?subs_real, 0e0) AS ?above)
+    BIND(?C0 + $psi_2 * ?above AS ?consumption)
+    BIND(?w0 + ?inc - ?consumption AS ?w1)
+}
+"""
+)
