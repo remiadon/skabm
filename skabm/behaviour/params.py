@@ -30,5 +30,8 @@ poledna_params = {
     "pi_star":   0.005,    # inflation target
     "xi_pi":     0.3214,   # inflation gap weight
     "xi_gamma":  1.2994,   # growth gap weight
+    # Interbank contagion parameters (skabm extension — not in Poledna 2023)
+    "distress_threshold":     0.03,  # capital ratio below which a bank is distressed
+    "flee_amount_threshold":  10.0,  # amount (wealth/liquidity) above which a bank loses enough deposits to become distressed
 }
 # fmt: on

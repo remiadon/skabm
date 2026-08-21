@@ -172,11 +172,22 @@ class RDFSimulator(BaseEstimator):
     update_rules : Sequence[Template | str]
         SPARQL UPDATE rules (DELETE/INSERT upserts) applied in order within
         each tick — the model's event sequence (Poledna Section 3.5).
-    params : dict
-        Substitutes for the rule templates' ``$placeholders``, merged over
-        ``behaviour.params.poledna_params`` — pass only what differs (e.g.
-        ``{"total_deposits": 2.5e4}``).  Numeric values are injected as
-        xsd:double literals.
+    infer : str | Sequence[Template | str] | None
+        Optional Datalog or recursive SPARQL CONSTRUCT rules evaluated by
+        ``Model.infer`` (licensed feature: maplib commercial add-on, free for
+        academic / personal use) once per tick, **after** the update rules have
+        advanced state and **before** the next tick begins.  The inference runs
+        to a fixed point — derived triples feed back into the rule bodies until
+        nothing new is produced — so a single ``infer`` call propagates relational
+        effects (contagion, transitive closure, reachability) across the whole
+        graph without hand-tuned sub-tick passes.  ``infer=None`` (default) keeps
+        the simulator in its original Poledna (2023) configuration where banks
+        are passive and no multi-hop propagation exists.  Because the feature is
+        licensed, users must ensure their maplib installation carries the add-on;
+        calling ``infer`` on a build without it raises at the ``Model.infer`` call.
+        Pass a single rule string or a sequence of ``Template``/string rules;
+        templates get their ``$placeholders`` substituted from ``params`` exactly
+        like ``update_rules``, and plain strings pass through unrendered.
     n_periods : int
         Number of ticks ``fit`` runs (and ``fit_iter`` yields).
     warm_start : bool
@@ -205,6 +216,7 @@ class RDFSimulator(BaseEstimator):
         self,
         init_rules: Sequence[Template | str] = DEFAULT_INIT_RULES,
         update_rules: Sequence[Template | str] = DEFAULT_UPDATE_RULES,
+        infer: Sequence[Template | str] | None = None,
         params: dict = _BEHAVIOUR_PARAMS,
         n_periods: int = 12,
         warm_start: bool = False,
@@ -213,6 +225,7 @@ class RDFSimulator(BaseEstimator):
     ):
         self.init_rules = init_rules
         self.update_rules = update_rules
+        self.infer = infer
         self.params = params
         self.n_periods = n_periods
         self.warm_start = warm_start
@@ -227,6 +240,9 @@ class RDFSimulator(BaseEstimator):
         merged = {**_BEHAVIOUR_PARAMS, **self.params}
         init_rules = [render(rule, merged) for rule in self.init_rules]
         update_rules = [render(rule, merged) for rule in self.update_rules]
+        infer_rules: list[str] | None = None
+        if self.infer is not None:
+            infer_rules = [render(rule, merged) for rule in self.infer]
         if self.warm_start:
             if populations:
                 raise ValueError(
@@ -235,12 +251,12 @@ class RDFSimulator(BaseEstimator):
                 )
             register_polars_random(self.model_)
         else:
-            rules_text = "\n".join((*init_rules, *update_rules))
+            rules_text = "\\n".join((*init_rules, *update_rules, *(infer_rules or ())))
             for kind in populations:
                 if f"ex:{kind}" not in rules_text:
                     warnings.warn(
-                        f"population {kind!r} is not referenced by any init/update "
-                        f"rule (no 'ex:{kind}' pattern): it will be mapped into the "
+                        f"population {kind!r} is not referenced by any init/update/"
+                        "infer rule (no 'ex:' + kind pattern): it will be mapped into the "
                         "model but stay inert during simulation.",
                         UserWarning,
                         stacklevel=3,
@@ -249,12 +265,15 @@ class RDFSimulator(BaseEstimator):
             register_polars_random(self.model_)
             for kind, df in populations.items():
                 map_df(self.model_, df, kind)
-            _inject_metadata(self.model_, (*self.init_rules, *self.update_rules))
+            all_rules = (*self.init_rules, *self.update_rules, *(self.infer or ()))
+            _inject_metadata(self.model_, all_rules)
             for rule in init_rules:
                 self.model_.insert(rule)
         for _ in range(self.n_periods):
             for rule in update_rules:
                 self.model_.update(rule)
+            if self.infer is not None:
+                self.model_.infer(infer_rules)  # type: ignore[arg-type]
             yield
 
     def fit_iter(self, **populations: pl.DataFrame) -> Iterator[pl.DataFrame]:

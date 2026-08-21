@@ -312,6 +312,7 @@ def test_get_params_and_clone():
     assert set(params) == {
         "init_rules",
         "update_rules",
+        "infer",
         "params",
         "n_periods",
         "warm_start",

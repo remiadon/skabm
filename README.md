@@ -1,6 +1,6 @@
 # skabm
 
-![coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
 
 **scikit-learn-style agent-based modeling on a knowledge graph.**
 
