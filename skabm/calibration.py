@@ -1,12 +1,7 @@
 """
 Agent-population sampler and constraint calibrators for agent-based models.
 
-Calibration in ABM vs calibration in machine learning
-------------------------------------------------------
-In traditional ML, "calibration" refers to aligning predicted probabilities
-with empirical frequencies (e.g. Platt scaling, isotonic regression).
-
-Here the term carries its economic / ABM meaning: finding a synthetic
+Calibration in ABM means finding a synthetic
 micro-level population whose aggregate statistics reproduce observed macro-level
 stylized facts (IO-table coefficients, census shares, Basel III ratios, etc.).
 There is no training set, no label, and no generalisation error — the goal is
@@ -20,25 +15,6 @@ which gives a meaningful optimisation signal even though it is not a
 classification or regression metric.
 
 Public API
-----------
-    make_dataset(samplers, n_agents, seed)
-        Draw a synthetic population from marginal distributions.
-        Returns a polars DataFrame with a leading `id` column.
-        ABM equivalent of sklearn.datasets.make_*; no inter-column constraints.
-
-    GeneticConstraintCalibration(constraints, ...)
-        Fits by permuting rows of the population (OX1 crossover).
-        Learns samplers_ — the optimal per-column value pools (including anchor).
-
-    MetropolisHastingsConstraintCalibration(constraints, ...)
-        Fits by mutating individual cell values (MH / simulated annealing).
-        Proposals are drawn from the empirical distribution of X seen at fit.
-
-    weighted_enum(enum, weights) -> pl.Expr
-        CDF-inversion sampler for a pl.Enum with given weights.
-
-    energy(df, constraints) -> float
-        Total MSE energy of df against all (metric_expr, target) constraints.
 
 Fitted attributes (both calibrators)
 -------------------------------------

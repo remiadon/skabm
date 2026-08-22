@@ -1,73 +1,44 @@
-"""Schelling's spatial segregation model as a maplib knowledge graph.
+"""
+Schelling's spatial segregation model on the Poledna machinery.
 
-A deliberate stress test of the architecture built for the Poledna macro ABM
-(``skabm.rules`` + ``skabm.simulation.RDFSimulator``): same ``Template``
-rules, same ``map_df`` mapping, same ``fit_iter`` loop, an entirely
-different model family.  Nothing here is macro-economic, and nothing in
-``RDFSimulator`` had to learn about space.
+A stress test of ``skabm.rules`` + ``RDFSimulator``: same ``Template`` rules,
+same ``map_df`` mapping, same ``fit_iter`` loop, a different model family.
+Nothing in ``RDFSimulator`` knows about space.
 
-**The grid is a population, not a module.**  Where Mesa has
-``DiscreteSpace`` and AMBER has ``model.grid`` / ``model.empty_spots``,
-here a cell is just another agent class::
+**The grid is a population, not a module.**  A cell is just another agent
+class::
 
     sim.fit(Cell=cells, Person=persons)
 
 ``Cell`` carries ``x``/``y``; ``Person`` carries ``group`` and a
 ``location`` link into a cell.  Occupancy is the *absence* of an inbound
-``def:location`` edge (``FILTER NOT EXISTS``) rather than a sentinel ``-1``
-in a nested list, and the Moore neighbourhood is a ``def:neighbor``
-relation CONSTRUCTed once at init from the coordinates — topology as an
-init rule, exactly like ``rules.FIRM_OWNERSHIP`` constructs firm ownership.
-The consequence is that "space" gains nothing special: rules traverse
-``?p def:location ?c . ?c def:neighbor ?cn . ?n def:location ?cn`` the same
-way Poledna's traverse ``?hh def:employer ?f``.
+``def:location`` edge (``FILTER NOT EXISTS``), and the Moore neighbourhood
+is a ``def:neighbor`` relation CONSTRUCTed once at init — topology as an
+init rule, like ``rules.FIRM_OWNERSHIP``.
 
-Two things Schelling needs that Poledna did not, and that pure SPARQL does
-not give:
+Two things Schelling needs that pure SPARQL does not give:
 
-* **Randomness.**  Schelling is meaningless without it, and the graph gets
-  it straight from SPARQL: the ``pr:uniform`` UDF (polars-random behind
-  ``rules.register_polars_random``, maplib >= 0.20.26) is called in-rule via
-  ``BIND(pr:uniform(0e0, 1e0) AS ?u)``.  ``SETTLE`` draws occupancy and group
-  that way; the per-tick ``DRAW`` rule materialises a fresh ``def:draw`` per
-  agent for the move.  No seed column, no in-graph PRNG — just
-  ``RDFSimulator(random_seed=...)`` to make a run reproducible.
-* **One-to-one matching.**  Each mover must land on a *distinct* empty
-  cell.  This is the same wall ``rules`` hits with "no search-and-matching"
-  — and hitting it twice, in two unrelated model families, says the limit
-  is structural rather than Poledna-specific: SPARQL has no sequential
-  activation and no assignment operator.  ``RELOCATE`` works around it
-  with a **rank join**: movers are ranked by their ``def:draw``, vacant
-  cells by theirs, and rank *k* is paired with rank *k*.  Both orderings are
-  random, so the matching is a uniform random permutation — statistically
-  what AMBER's ``random.choice`` over ``empty_spots`` produces, obtained
-  declaratively and in one batch.  Ranking is a correlated
-  ``COUNT(<= mine)`` subquery, i.e. quadratic in the number of movers; fine
-  at 10^3 agents, not at 10^6.
+* **Randomness.**  ``pr:uniform`` UDF (polars-random behind
+  ``rules.register_polars_random``, maplib >= 0.20.26) called in-rule via
+  ``BIND(pr:uniform(0e0, 1e0) AS ?u)``.  ``SETTLE`` draws occupancy and group;
+  ``DRAW`` materialises a fresh ``def:draw`` per agent each tick.
+  ``RDFSimulator(random_seed=...)`` pins the whole run.
+* **One-to-one matching.**  ``RELOCATE`` works around SPARQL's lack of an
+  assignment operator with a **rank join**: movers ranked by ``def:draw``,
+  vacant cells by theirs, rank *k* paired with rank *k* — uniform random
+  matching in one batch.  Quadratic in movers; fine at 10^3, not at 10^6.
 
-Deliberate semantic differences versus the AMBER reference:
+Deliberate differences vs the AMBER reference:
 
-* **Simultaneous, not sequential, activation.**  AMBER moves unhappy
-  agents one at a time, so a cell vacated early in a sweep can be occupied
-  later in the same sweep.  ``RELOCATE`` is one batch upsert: the target
-  pool is the set of cells vacant at the *start* of the tick, and cells
-  freed by this tick's movers only become available next tick.
-* **No move cap.**  AMBER caps a sweep at 50 moves; every unhappy agent
-  that finds a partner moves here.
-* **No convergence stop.**  ``RDFSimulator`` runs exactly ``n_periods``;
-  AMBER sets ``simulation_finished`` when nobody is unhappy.  With
-  ``fit_iter`` the caller can ``break`` on the extracted state, which is
-  where that check belongs anyway (see the demo).
-* **share_similar is pre-move.**  ``HAPPINESS`` runs before ``RELOCATE``,
-  matching AMBER's ``update()``-then-``step()`` order, so the segregation
-  index yielded for tick *t* describes the configuration the movers were
-  reacting to.
+* **Simultaneous activation.**  ``RELOCATE`` is one batch upsert: target pool
+  is cells vacant at the *start* of the tick.
+* **No move cap.**  Every unhappy agent that finds a partner moves.
+* **share_similar is pre-move.**  ``HAPPINESS`` runs before ``RELOCATE``; the
+  segregation index for tick *t* describes the configuration movers reacted to.
 
-Everything is xsd:double — coordinates included.  SPARQL basic graph
-patterns join on RDF *terms*, not values, so an ``xsd:integer`` produced by
-``?x + ?dx`` would fail to match an ``xsd:long`` stored by maplib.  Keeping
-one numeric type sidesteps the whole class of bug (and the decimal-literal
-instability ``rules`` already warns about).
+Everything is xsd:double — coordinates included.  SPARQL BGPs join on RDF
+*terms*, not values, so an ``xsd:integer`` from ``?x + ?dx`` would fail to
+match an ``xsd:long`` stored by maplib.  One numeric type sidesteps the bug.
 """
 
 from string import Template

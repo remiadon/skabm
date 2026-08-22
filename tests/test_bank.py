@@ -1,13 +1,15 @@
-"""Minimal ingest test for skabm interbank contagion demo.
+"""
+Minimal ingest test for skabm interbank contagion demo.
 
 Tests that the bank module templates map correctly and that the simulator
-can run with the new infer hook, before running the full demo.
+can run with the new ``infer`` hook, before running the full demo.
 
 Catches:
+
 - Template metadata injection
-- bank_depositors CONSTRUCT (init)      — free maplib core
-- bank_capital UPDATE (per-tick)        — free maplib core
-- interbank_contagion CONSTRUCT via infer (per-tick) — licensed add-on
+- ``bank_depositors`` CONSTRUCT (init) - free maplib core
+- ``bank_capital`` UPDATE (per-tick) - free maplib core
+- ``interbank_contagion`` CONSTRUCT via ``infer`` (per-tick) - licensed add-on
 
 The first three run on the stock PyPI maplib; only ``test_infer_called``
 needs the licensed (academic) build and is skipped otherwise (see
@@ -26,12 +28,12 @@ from skabm.simulation import RDFSimulator
 def _infer_licensed() -> bool:
     """Probe whether this maplib build ships the ``infer`` reasoning add-on.
 
-    ``infer`` (Datalog / recursive CONSTRUCT) is a licensed maplib feature —
+    ``infer`` (Datalog / recursive CONSTRUCT) is a licensed maplib feature -
     free for academic use, but absent from the stock PyPI wheels, where the
     first call panics ``not implemented: Contact Data Treehouse``.  The panic
     is a pyo3 ``PanicException`` (subclasses ``BaseException``, so a plain
-    ``except Exception`` would miss it).  Everything else in ``skabm`` — the
-    ``bank_depositors`` / ``bank_capital`` rules included — runs on the free
+    ``except Exception`` would miss it).  Everything else in ``skabm`` - the
+    ``bank_depositors`` / ``bank_capital`` rules included - runs on the free
     core; only ``interbank_contagion`` via ``infer=`` needs the add-on.
     """
     from maplib import Model
@@ -102,7 +104,7 @@ def test_bank_depositors_maps():
     # on local names so the test never spells out the namespace.
     local = {iri.rsplit("#", 1)[-1].rstrip(">") for iri in holds["bank"].to_list()}
     assert local <= {"bank_0", "bank_1"}
-    print(f"  bank_depositors mapped {holds.height} agent→bank links")
+    print(f"  bank_depositors mapped {holds.height} agent->bank links")
 
 
 def test_bank_capital_updates():

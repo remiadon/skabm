@@ -4,11 +4,10 @@ No Eurostat access — populations are tiny hand-written DataFrames passed
 directly to fit()/fit_iter() as keyword arguments (auto-generated
 templates, predicates = column names).  Rules are the default
 string.Template objects; test-specific numbers come in through the params
-dict, merged over rules.POLEDNA_PARAMS.  Covered mechanics: iteration
-yielding per-agent state, cold-fit rebuild semantics, warm_start
-continuation, upsert semantics (no duplicate state triples), the paper's
-capacity cap, income by activity status, unreferenced-population warning,
-and sklearn get_params/clone compatibility.
+dict, merged over rules.POLEDNA_PARAMS.  Covered: iteration yielding
+per-agent state, cold-fit rebuild semantics, warm_start continuation,
+upsert semantics, the paper's capacity cap, income by activity status,
+unreferenced-population warning, and sklearn get_params/clone compatibility.
 """
 
 import polars as pl

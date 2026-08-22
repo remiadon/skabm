@@ -1,27 +1,26 @@
-"""
-Poledna et al. (2022) Austrian ABM calibration test suite.
+"""Poledna et al. (2022) Austrian ABM calibration test suite.
 
 Paper: "Economic forecasting with an agent-based model."
        European Economic Review 151, 104306.
 
 Six institutional sectors (Section 3.1):
-  1. Non-financial corporations (firms) — 62 industries, IO + BD
-  2. Households                          — census active/inactive
-  3. General government                  — 25% of domestic firms
-  4. Financial corporations (banks)      — Basel III capital regulation
-  5. Central bank                        — ECB Taylor rule (singleton, not a population)
-  6. Rest of world (foreign firms)       — 50% of domestic firms as importers
+  1. Non-financial corporations (firms) - 62 industries, IO + BD
+  2. Households                          - census active/inactive
+  3. General government                  - 25% of domestic firms
+  4. Financial corporations (banks)     - Basel III capital regulation
+  5. Central bank                        - ECB Taylor rule (singleton)
+  6. Rest of world (foreign firms)      - 50% of domestic firms as importers
 
 Coverage vs paper Table 2 (~70%):
   Census / demography  H^act, H^inact, I_s, J                100 %
-  IO table             ā_i, w̄_i, δ_i, tech_share             ~80 %  (κ_i missing)
-  Government stats     τ^INC, τ^FIRM, τ^VAT, τ^SIE/SIW,
-                       τ^CF, τ^G, θ^UB                        100 %
-  Banking / Basel III  ζ, ζ^LTV, ζ^b, θ, μ                  100 %
-  National accounts    ψ, ψ^H, θ^DIV, r^G                    100 %
+  IO table             a_i, w_i, delta_i, tech_share         ~80 %  (kappa_i missing)
+  Government stats     tau^INC, tau^FIRM, tau^VAT, tau^SIE/SIW,
+                       tau^CF, tau^G, theta^UB                 100 %
+  Banking / Basel III  zeta, zeta^LTV, zeta^b, theta, mu     100 %
+  National accounts    psi, psi^H, theta^DIV, r^G             100 %
   AR(1) / Taylor rule  exogenous process params               NOT YET
                        (simulation dynamics, not populations)
-  Gap: κ_i (capital productivity, needs nama_10_nfa_st loader).
+  Gap: kappa_i (capital productivity, needs nama_10_nfa_st loader).
 """
 
 from __future__ import annotations

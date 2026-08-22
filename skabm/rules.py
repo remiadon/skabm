@@ -92,7 +92,8 @@ def map_df(model, df: pl.DataFrame, kind: str) -> None:
 
     ``map_default`` generates the template from the DataFrame schema (every
     non-``id`` column becomes a ``def:`` predicate; IRI-valued and nullable
-    columns are detected) **and applies it to ``df`` in the same call** —\n    its return value is the template document for inspection only, and a
+    columns are detected) **and applies it to ``df`` in the same call** —
+    its return value is the template document for inspection only, and a
     follow-up ``model.map`` would map the rows a second time.
 
     The generated template emits no class triple, and the class is not

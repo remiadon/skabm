@@ -1,37 +1,35 @@
 """
-Bank behaviour templates — extensions to Poledna (2023) not present in the
+Bank behaviour templates - extensions to Poledna (2023) not present in the
 original paper.  Poledna et al. (2023, European Economic Review 151, 104306)
 calibrate 12 Basel III banks (capital_ratio, leverage, deposit_share) but
 leave them passive: no interbank market, no contagion, no deposit flight.
 This module adds:
 
-1. bank_depositors  — init CONSTRUCT: which agents hold deposits at which
-                       bank (structural, runs once at init).
-2. bank_capital     — update rule: capital ratio responds to deposit outflows
-                       (state, per-tick).
-3. interbank_contagion — recursive SPARQL CONSTRUCT rule (licensed
-                       ``Model.infer``): distress propagates through the
-                       depositor network to a fixed point, replacing hand-tuned
-                       sub-tick passes.
+1. ``bank_depositors``  - init CONSTRUCT: which agents hold deposits at which
+                          bank (structural, runs once at init).
+2. ``bank_capital``     - update rule: capital ratio responds to deposit outflows
+                          (state, per-tick).
+3. ``interbank_contagion`` - recursive SPARQL CONSTRUCT rule (licensed
+                          ``Model.infer``): distress propagates through the
+                          depositor network to a fixed point.
 
 Placeholders are parameterised in ``skabm.behaviour.params`` (or a user
 params dict); rule logic never contains numeric defaults.
 
 Licensing: ``bank_depositors`` (insert) and ``bank_capital`` (update) run on
-the free maplib core.  Only ``interbank_contagion`` — evaluated through
-``Model.infer`` — needs the licensed reasoning add-on (free for academic use,
+the free maplib core.  Only ``interbank_contagion`` - evaluated through
+``Model.infer`` - needs the licensed reasoning add-on (free for academic use,
 absent from the stock PyPI wheels).  So importing/using this module never
-requires a license; passing ``interbank_contagion`` to ``RDFSimulator(infer=)``
-does.
+requires a license; passing ``interbank_contagion`` to
+``RDFSimulator(infer=)`` does.
 
-IMPORTANT — engine choice:
+IMPORTANT - engine choice:
     The contagion rule is written as a SPARQL CONSTRUCT, not Datalog.  The
     Datalog triple-pattern form in maplib 0.20.29 does not support FILTER in
     the body or aggregation; recursive CONSTRUCT does.  ``RDFSimulator``
-    passes the string as-is to ``Model.infer`` — it accepts both forms.  See
-    ``skabm.simulation`` and the maplib SKILL.md for the two syntaxes.
+    passes the string as-is to ``Model.infer`` - it accepts both forms.
 
-IMPORTANT — CONSTRUCT/WHERE line break:
+IMPORTANT - CONSTRUCT/WHERE line break:
     Maplib's SPARQL parser (0.20.29) rejects a line break between the closing
     ``}`` of CONSTRUCT and the ``WHERE`` keyword.  Every CONSTRUCT rule here
     is written with ``CONSTRUCT { ... } WHERE { ... }`` on a single line so
@@ -45,12 +43,12 @@ from string import Template
 from skabm.rules import EX_NS, _PREFIXES
 
 # ---------------------------------------------------------------------------
-# bank_depositors — init CONSTRUCT, structural, runs once after mapping
+# bank_depositors - init CONSTRUCT, structural, runs once after mapping
 # ---------------------------------------------------------------------------
 # For every agent (firm or household) with deposits/wealth, assign them to a
 # bank weighted by the bank's ``def:deposit_share``.  The draw uses
 # ``pr:uniform`` so it is reproducible under ``RDFSimulator(random_seed=...)``
-# — same contract as ``schelling.SETTLE`` and ``firm.firm_ownership``.
+# - same contract as ``schelling.SETTLE`` and ``firm.firm_ownership``.
 # This is a one-time CONSTRUCT, NOT an update rule.
 
 bank_depositors = Template(
@@ -67,11 +65,11 @@ bank_depositors.metadata = {
     "@id": "bank_depositors",
     "@type": "Behaviour",
     "agentClass": "ex:Bank",
-    "source": "skabm extension — not in Poledna et al. (2023)",
+    "source": "skabm extension - not in Poledna et al. (2023)",
 }
 
 # ---------------------------------------------------------------------------
-# bank_capital — update rule, state, per-tick
+# bank_capital - update rule, state, per-tick
 # ---------------------------------------------------------------------------
 # Capital ratio deteriorates when depositors move money out (flight-to-safety
 # in a contagion round).  Placeholder: ``distress_threshold`` (the ratio below
@@ -100,11 +98,11 @@ bank_capital.metadata = {
     "@id": "bank_capital",
     "@type": "Behaviour",
     "agentClass": "ex:Bank",
-    "source": "skabm extension — not in Poledna et al. (2023)",
+    "source": "skabm extension - not in Poledna et al. (2023)",
 }
 
 # ---------------------------------------------------------------------------
-# interbank_contagion — recursive CONSTRUCT for ``Model.infer``
+# interbank_contagion - recursive CONSTRUCT for ``Model.infer``
 # ---------------------------------------------------------------------------
 # This is the rule that replaces a hand-tuned sub-tick propagation loop.
 #
@@ -120,16 +118,16 @@ bank_capital.metadata = {
 # The rule is written as a recursive SPARQL CONSTRUCT (not Datalog) because
 # maplib 0.20.29's Datalog engine does not support FILTER in the body or
 # aggregation; recursive CONSTRUCT does.  ``RDFSimulator`` passes the string
-# as-is to ``Model.infer`` — it accepts both forms.
+# as-is to ``Model.infer`` - it accepts both forms.
 #
-# Note on rendering: the rule string contains no ``$placeholder`` references —
+# Note on rendering: the rule string contains no ``$placeholder`` references -
 # parameters like ``distress_threshold`` and ``flee_amount_threshold`` are
 # embedded directly via Python f-string substitution so that ``render()`` is
 # a no-op.  This keeps the rule self-contained and avoidable of the
 # ``string.Template`` path, while still being substitutable through the
 # simulator's ``params`` dict if needed.  Users who want to override thresholds
 # at fit time should pass a custom rule string via ``infer=``.
-
+#
 # Each CONSTRUCT clause is on a single line (no line break between } and WHERE)
 # because maplib's SPARQL parser rejects it.
 #

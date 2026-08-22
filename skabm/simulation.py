@@ -1,16 +1,15 @@
 """
-RDFSimulator: run an ABM by applying SPARQL update rules to a maplib model.
+RDFSimulator: advance a maplib knowledge-graph ABM with SPARQL update rules.
 
-The sklearn contract, adapted to ABM: in sklearn ``fit`` takes one array X,
-but an ABM needs heterogeneous agent populations laid out as DataFrames of
-different sizes.  X is therefore a set of keyword arguments to ``fit`` —one calibrated DataFrame per agent class::
+The sklearn contract, adapted to ABM: X is a set of keyword DataFrames
+(one calibrated population per agent class)::
 
     sim = RDFSimulator(n_periods=12)          # Poledna rules by default
     sim.fit(Firm=firms, Household=households, CentralBank=central_bank)
 
-Everything else follows sklearn: ``init_rules`` and ``update_rules`` are
-``__init__`` parameters (``string.Template`` SPARQL — serializable, so
-``get_params`` / ``clone`` work), defaulting to the full Poledna rule sets
+``init_rules`` and ``update_rules`` are ``__init__`` parameters
+(``string.Template`` SPARQL — serializable, so ``get_params`` / ``clone``
+work), defaulting to the full Poledna rule sets
 (``behaviour.params.poledna_params``).  Rule *logic* lives in the templates;
 rule *parameters* live in the ``params`` dict, merged over the canonical
 Poledna values and substituted into the templates' ``$placeholders`` at fit
@@ -19,47 +18,39 @@ means re-writing a rule.  The defaults self-scope to the agent kinds actually
 passed: at fit time, rules whose referenced classes (``ex:Firm``,
 ``ex:CentralBank``, ...) are all absent from the populations are filtered out
 entirely, so a use-case with only ``Firm=`` and ``Household=`` gets exactly
-the firm and household dynamics.  Declaring a new economic ABM with newer data
-is just calibrating new DataFrames.
+the firm and household dynamics.
 
 ``fit_iter`` is the generator variant of ``fit``: it yields the raw
 per-agent state (``rules.state_extract``) after each tick, and summary
 logic stays in polars expressions on the caller's side.
 
 Lifecycle: an empty maplib ``Model`` is created at ``__init__`` and exposed
-as ``model_`` — the *fitted artifact*, where data and rules blend into one
-ontology-shaped world.  A cold ``fit``/``fit_iter`` rebuilds it from
-scratch (sklearn semantics: refitting restarts the world), maps each
-population with ``rules.map_df``, applies ``init_rules`` — necessarily
-*after* mapping, since init rules are CONSTRUCTs over agent patterns and
-insert nothing into an empty graph — then advances ``n_periods`` ticks of
-``update_rules`` upserts.  Population keywords not referenced by any rule
-are mapped but trigger a ``UserWarning``, since no rule will ever touch
-them.
+as ``model_`` — the *fitted artifact*.  A cold ``fit``/``fit_iter`` rebuilds
+it from scratch, maps each population with ``rules.map_df``, applies
+``init_rules`` (necessarily *after* mapping), then advances ``n_periods``
+ticks of ``update_rules`` upserts.  Population keywords not referenced by any
+rule are mapped but trigger a ``UserWarning``.
 
-``warm_start=True`` skips the rebuild/map/init phase entirely and keeps
-ticking the existing ``model_`` — possibly under *different* update rules,
-after a do-calculus style intervention (``model_.update``), or on a model
-built by hand (assign ``model_`` yourself).  Passing populations together
-with ``warm_start=True`` is an error: the world already exists.
+``warm_start=True`` skips the rebuild/map/init phase and keeps ticking the
+existing ``model_`` — possibly under *different* update rules, after a
+do-calculus style intervention (``model_.update``), or on a model built by
+hand.  Passing populations together with ``warm_start=True`` is an error.
 
 The graph's content splits into **structure** (predicates no update rule
 DELETEs/INSERTs: links, coefficients, classes — written at fit, immutable
-during simulation, editable only by explicit user intervention) and
-**state** (predicates the update rules upsert: output, price, wealth, ...
-— owned by the rules after t=0).  The partition is derivable from the rule
-strings themselves; keep interventions on structure between passes.
+during simulation) and **state** (predicates the update rules upsert: output,
+price, wealth, ... — owned by the rules after t=0).  The partition is
+derivable from the rule strings themselves; keep interventions on structure
+between passes.
 
-Users never need to know maplib to run a simulation — but ``model_`` is a
-regular maplib model they can embrace post-fit: SPARQL queries,
-interventions, ``explore()`` visualization, or serialization.
+``model_`` is a regular maplib model post-fit: SPARQL queries, interventions,
+``explore()`` visualization, and serialization all work on it directly.
 
 TODO: numerical backends — compile the graph to polars frames
 (``Model.query`` -> ``pl.DataFrame`` -> polars expressions, or ``.to_jax()``
 for differentiable kernels), step in frame-land, and re-map at observation
 points.  The SPARQL path below then becomes the slow, semantically
-transparent reference implementation the fast kernels are validated
-against.
+transparent reference implementation the fast kernels are validated against.
 """
 
 from __future__ import annotations

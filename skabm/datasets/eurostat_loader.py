@@ -1,7 +1,7 @@
 """
 Eurostat data loaders for ABM calibration.
 
-Two public functions:
+Two public functions::
 
   fetch_io_components(geo, year)
       Fetches NAIO_10_CP1700 (symmetric IO table at basic prices) and returns
@@ -14,9 +14,9 @@ Two public functions:
       Falls back to the nearest available year when the requested year has
       no data for a given industry.
 
-Both return a pl.DataFrame keyed on `industry` (CPA code string, e.g.
-"CPA_C10-12").  Joining them on that key gives the full input needed to
-build a firm-population spec for make_heterogeneous_agents.
+Both return a pl.DataFrame keyed on ``industry`` (CPA code string, e.g.
+``"CPA_C10-12"``).  Joining them on that key gives the full input needed to
+build a firm-population spec for ``make_dataset``.
 """
 
 from __future__ import annotations
