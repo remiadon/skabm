@@ -31,6 +31,16 @@ it from scratch, maps each population with ``rules.map_df``, applies
 ticks of ``update_rules`` upserts.  Population keywords not referenced by any
 rule are mapped but trigger a ``UserWarning``.
 
+Rules that depend on the model's own past declare it by naming an
+``ex:sig__<agg>__<Class>__<predicate>`` signal (see ``skabm.history``).  When
+any rule does, the fit also opens a DuckDB history, records every declared
+signal at t=0 and after each tick, and re-runs ``history_rules`` over the
+accumulated series — SPARQL SELECTs whose result columns are upserted back into
+``model_`` as ``def:`` predicates.  That is the whole memory mechanism, and it
+is agnostic about what the rules compute: Poledna's SAC-learned expectations
+are one query plus one polars UDF (``behaviour.learning``).  A rule set naming
+no signal opens no database.
+
 ``warm_start=True`` skips the rebuild/map/init phase and keeps ticking the
 existing ``model_`` — possibly under *different* update rules, after a
 do-calculus style intervention (``model_.update``), or on a model built by
@@ -64,7 +74,16 @@ import polars_random as pr
 from maplib import Model
 from sklearn.base import BaseEstimator
 
-from skabm.rules import EX_NS, map_df, render, state_extract, register_polars_random
+from skabm.history import TABLE as HISTORY_TABLE
+from skabm.history import (
+    apply_history_rules,
+    build_learner,
+    connect,
+    parse_signals,
+    record,
+)
+from skabm.rules import EX_NS, map_df, register_polars_random, render, state_extract
+from skabm.behaviour.learning import register_sac, sac_learning
 from skabm.behaviour.params import poledna_params as _BEHAVIOUR_PARAMS
 from skabm.behaviour.household import (
     household_income_init,
@@ -95,6 +114,10 @@ DEFAULT_UPDATE_RULES = (
     government_spend,  # AR(1), eq. 51
     centralbank_rate,  # Taylor rule, eq. 69
 )
+# Expectations are learned rather than assumed: firm_produce, firm_price and
+# satisificing_consume read ex:sig__* forecasts, and this rule re-estimates them
+# from the recorded history each tick (behaviour.learning).
+DEFAULT_HISTORY_RULES = (sac_learning,)
 
 
 def _inject_metadata(model: Model, rules: Sequence) -> None:
@@ -196,22 +219,49 @@ class RDFSimulator(BaseEstimator):
         small, so a rule needing anything beyond it (a random draw, ``exp``)
         depends on a registrar having run first — which makes *which UDFs exist*
         a property of the rule set, exactly like ``state_extract``, and therefore
-        a hyperparameter rather than a hard-coded call.  Defaults to
-        ``(rules.register_polars_random,)`` — the Poledna and Schelling rules need
-        ``pr:uniform`` / ``pr:normal`` and nothing more.  The labour-market rules
-        (``behaviour.labour``) additionally need ``rules.register_math``; see
-        ``behaviour.labour.LABOUR_UDFS``.
+        a hyperparameter rather than a hard-coded call.  Registered on ``model_``
+        and, when there is one, on the history learner.  Defaults to
+        ``pr:uniform`` / ``pr:normal`` for the Poledna rules plus ``sac:forecast``
+        for the default history rule.  Schelling needs only
+        ``rules.register_polars_random``; the labour-market rules additionally
+        need ``rules.register_math`` (``behaviour.labour.LABOUR_UDFS``).
     random_seed : int | None
         When set, ``pr.set_random_seed`` is called at the start of each
         ``fit``/``fit_iter`` so the ``pr:uniform`` / ``pr:normal`` SPARQL UDFs
         (registered on ``model_`` via ``rules.register_polars_random``) draw a
         reproducible sequence.  Leave None for entropy-seeded stochastic runs.
+    history_rules : Sequence[Template | str]
+        SPARQL SELECT queries evaluated once per tick against the *history* —
+        the DuckDB table of per-tick aggregates, virtualized into a dedicated
+        model (``skabm.history``).  Each projects a subject IRI first and any
+        number of value columns after it, which are upserted onto that subject
+        as ``def:`` predicates, so a quantity derived from the model's own past
+        becomes an ordinary triple the update rules read.  Which aggregates get
+        recorded is detected from the rule text (``ex:sig__<agg>__<Class>__<pred>``),
+        so a rule set that never mentions one opens no database at all.
+
+        This is the generic seam for any history-dependent behaviour: the
+        simulator knows only "run these queries, write back their columns".
+        Defaults to ``(behaviour.learning.sac_learning,)`` — Poledna's
+        Sample-Autocorrelation-learned expectations (eq. 6/9), whose entire
+        implementation is that query plus the ``sac:forecast`` UDF in ``udfs``.
+    duckdb_connection : str | duckdb.DuckDBPyConnection | None
+        Where the recorded state history is kept.  ``None`` (default) opens a
+        fresh ``:memory:`` database per fit; a string is a file path, so a long
+        run persists tick by tick and can be inspected after the process exits;
+        an already-open connection is used as given and never closed here.
 
     Attributes
     ----------
     model_ : maplib.Model
         The world state: empty after ``__init__``, populated and evolved by
         ``fit`` / ``fit_iter``.
+    connection_ : duckdb.DuckDBPyConnection | None
+        The DuckDB connection holding the realized series behind the learned
+        expectations — one row per tracked signal per tick, virtualized into
+        ``model_`` so SPARQL SELECT queries span graph and history at once.
+        ``None`` when no rule reads an expectation.  ``history.state_frame``
+        returns the whole table as polars.
     """
 
     def __init__(
@@ -223,8 +273,13 @@ class RDFSimulator(BaseEstimator):
         n_periods: int = 12,
         warm_start: bool = False,
         state_extract: Callable[[Model], pl.DataFrame] = state_extract,
-        udfs: Sequence[Callable[[Model], None]] = (register_polars_random,),
+        udfs: Sequence[Callable[[Model], None]] = (
+            register_polars_random,
+            register_sac,
+        ),
         random_seed: int | None = None,
+        history_rules: Sequence[Template | str] = DEFAULT_HISTORY_RULES,
+        duckdb_connection: "str | object | None" = None,
     ):
         self.init_rules = init_rules
         self.update_rules = update_rules
@@ -235,7 +290,11 @@ class RDFSimulator(BaseEstimator):
         self.state_extract = state_extract
         self.udfs = udfs
         self.random_seed = random_seed
+        self.history_rules = history_rules
+        self.duckdb_connection = duckdb_connection
         self.model_ = Model()
+        self.connection_ = None
+        self.learner_ = None
 
     def _cold_start(
         self,
@@ -243,11 +302,17 @@ class RDFSimulator(BaseEstimator):
         init_rules: list[str],
         update_rules: list[str],
         infer_rules: list[str] | None,
+        signals: list,
     ) -> None:
         """Rebuild model_, map populations, inject provenance, apply init rules.
 
         Runs only on a cold ``fit``/``fit_iter`` (warm_start=False).  The tick
         loop in ``_fit_iter`` is shared by both paths.
+
+        When the rules read expectations, this also opens the DuckDB history,
+        virtualizes it into the fresh model, seeds each signal's prior, and
+        records the t=0 state — so the first tick already has a base period to
+        measure growth against and a forecast to read.
         """
         rules_text = "\n".join((*init_rules, *update_rules, *(infer_rules or ())))
         for kind in populations:
@@ -267,6 +332,15 @@ class RDFSimulator(BaseEstimator):
         _inject_metadata(self.model_, all_rules)
         for rule in init_rules:
             self.model_.insert(rule)
+        if signals:
+            # a cold fit restarts the world, memory included: a fresh in-memory
+            # database starts empty, and a file the user pointed us at is
+            # cleared of this model's signals rather than silently continued.
+            self.connection_ = connect(self.duckdb_connection)
+            self.connection_.execute(f"DELETE FROM {HISTORY_TABLE}")
+            self.learner_ = build_learner(self.connection_, signals)
+            self._register_udfs(self.learner_)
+            self._observe(signals, t=0)
 
     def _fit_iter(self, **populations: pl.DataFrame) -> Iterator[None]:
         """Advance the model one tick per iteration (no extraction)."""
@@ -278,6 +352,8 @@ class RDFSimulator(BaseEstimator):
         infer_rules: list[str] | None = None
         if self.infer is not None:
             infer_rules = [render(rule, merged) for rule in self.infer]
+        # which aggregates need a history is a property of the rule text alone
+        signals = parse_signals([*init_rules, *update_rules, *(infer_rules or ())])
         if self.warm_start:
             if populations:
                 raise ValueError(
@@ -285,19 +361,76 @@ class RDFSimulator(BaseEstimator):
                     "populations (assign model_ directly instead)."
                 )
             self._register_udfs()
+            if signals and self.connection_ is None:
+                # a hand-built or externally-assigned model_ gains the history
+                # machinery here, continuing from whatever the database holds.
+                self.connection_ = connect(self.duckdb_connection)
+                self.learner_ = build_learner(self.connection_, signals)
+                self._register_udfs(self.learner_)
+                self._observe(signals, t=self._next_tick())
         else:
-            self._cold_start(populations, init_rules, update_rules, infer_rules)
+            self._cold_start(
+                populations, init_rules, update_rules, infer_rules, signals
+            )
         for _ in range(self.n_periods):
             for rule in update_rules:
                 self.model_.update(rule)
             if self.infer is not None:
                 self.model_.infer(infer_rules)  # type: ignore[arg-type]
+            if signals:
+                # record what the tick produced, then re-run the history rules
+                # over everything so far, so the next tick's update rules read
+                # values derived from every period to date and not just this one
+                self._observe(signals, t=self._next_tick())
             yield
 
-    def _register_udfs(self) -> None:
-        """Install every UDF registrar in ``self.udfs`` on the current model_."""
+    def _register_udfs(self, model: Model | None = None) -> None:
+        """Install every UDF registrar in ``self.udfs`` on the current model_.
+
+        Applied to ``model_`` by default, and to the history learner when one is
+        built — a history rule is evaluated against the learner, so any UDF it
+        calls has to be registered there too.
+        """
         for register in self.udfs:
-            register(self.model_)
+            register(model if model is not None else self.model_)
+
+    def _next_tick(self) -> int:
+        """One past the last tick in the history — where the next row belongs.
+
+        Read from the table rather than counted in Python so a warm start
+        continues a run (or a persisted file) at the right period instead of
+        overwriting its opening ticks.
+        """
+        last = self.connection_.execute(
+            f"SELECT MAX(t) FROM {HISTORY_TABLE}"
+        ).fetchone()[0]
+        return 0 if last is None else int(last) + 1
+
+    def _observe(self, signals: list, t: int) -> None:
+        """Record this period, then re-run the history rules over everything so far.
+
+        The two halves of one step, and the only place the simulator touches the
+        history: ``record`` writes what actually happened into DuckDB, then each
+        ``history_rules`` query reads the accumulated series back through the
+        virtualization and its result columns are upserted into ``model_`` for
+        the next tick's update rules to read.
+
+        Skipped while the table is still empty — there is nothing to derive from
+        no observations, and maplib panics resolving a UDF projection over a
+        zero-row frame.
+        """
+        record(self.connection_, self.model_, signals, t)
+        if self.connection_.execute(f"SELECT COUNT(*) FROM {HISTORY_TABLE}").fetchone()[
+            0
+        ]:
+            apply_history_rules(
+                self.model_,
+                self.learner_,
+                [
+                    render(rule, {**_BEHAVIOUR_PARAMS, **self.params})
+                    for rule in self.history_rules
+                ],
+            )
 
     def fit_iter(self, **populations: pl.DataFrame) -> Iterator[pl.DataFrame]:
         """Map the populations, apply init rules, then yield per-agent state

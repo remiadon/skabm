@@ -17,8 +17,10 @@ poledna_params = {
     "benefit_replacement":   0.3586, # theta^UB
     "vat_rate":              0.1529, # tau^VAT
     "total_deposits":        222_933.2e6,  # D^H, rescale for demos
-    "growth_e":              0.005,  # expected quarterly real growth
-    "inflation_e":           0.005,  # expected quarterly inflation
+    # Expected growth and inflation are no longer parameters: the default rule
+    # set learns them from the model's own history (behaviour.learning), so
+    # eq. 6/9 expectations are estimated, not assumed.  gov_growth stays a
+    # parameter because eq. 51 is an exogenous process, not an expectation.
     "gov_growth":            0.005,  # government consumption drift
     # AR(1) innovation std devs — default 0 => deterministic drifts
     "growth_sigma":          0.0,    # firm output growth shock

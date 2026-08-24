@@ -70,10 +70,18 @@ for state in sim.fit_iter(warm_start=True):
     print(state.select((pl.col("price") * pl.col("output")).sum()))
 ```
 
-See [examples/poledna_maplib_demo.py](examples/poledna_maplib_demo.py) for
-the full six-sector economy (~10,000 agents, 120 quarters in ~5 seconds),
-[examples/schelling.py](examples/schelling.py) for spatial segregation, and
-[examples/labour_automation.py](examples/labour_automation.py) for
+Three notebooks build the Poledna model up in `notebooks/poledna/`:
+[01_base_model](notebooks/poledna/01_base_model.ipynb) runs the seven-rule quarter
+and intervenes on the fitted graph;
+[02_interbank_contagion](notebooks/poledna/02_interbank_contagion.ipynb) adds a
+banking layer whose distress propagates to a fixed point through `infer=`;
+[03_sac_learning](notebooks/poledna/03_sac_learning.ipynb) opens up the learned
+expectations — a DuckDB history, virtualized back into SPARQL — and swaps the
+estimator to show the seam is generic.
+[poledna.py](poledna.py) is the same model calibrated on live Eurostat data.
+
+Elsewhere, [examples/schelling.py](examples/schelling.py) covers spatial segregation
+and [notebooks/labour_automation.ipynb](notebooks/labour_automation.ipynb)
 occupational mobility under an automation shock — a labour-flow network where
 the model's central quantity lives on the *edge*.
 
@@ -84,7 +92,8 @@ the model's central quantity lives on the *edge*.
 | `skabm.datasets` | Eurostat loaders (IO tables, business demography) |
 | `skabm.calibration` | Population samplers + constraint calibrators (GA, Metropolis–Hastings) with a sklearn estimator API |
 | `skabm.rules` | `map_df` (DataFrame → graph, auto-generated templates) + SPARQL `string.Template` rules + `render` (param substitution) + UDF registrars |
-| `skabm.behaviour` | The rule library, grouped by economic function: `firm`, `household`, `macro`, `bank`, `labour` |
+| `skabm.behaviour` | The rule library, grouped by economic function: `firm`, `household`, `macro`, `bank`, `labour`, `learning` |
+| `skabm.history` | State history in DuckDB, virtualized back into SPARQL (chrontext) — the graph's memory |
 | `skabm.simulation` | `RDFSimulator`: fit/fit_iter over SPARQL update rules |
 
 Design decisions, in sklearn vocabulary:
@@ -154,11 +163,27 @@ Beveridge curve. Where a model needs one-to-one assignment,
 `schelling.RELOCATE`'s rank join does it in a single batch. The wall is
 agent-by-agent *ordering*, not matching.
 
-**No in-graph estimation.** The paper's agents re-estimate their AR(1)
-expectation rules on the model's own history every quarter (behavioral
-learning); SPARQL cannot run regressions, so the *expectation parameters*
-are constants (the exogenous processes do carry `pr:normal` innovations —
-see "Randomness is a UDF" above — they just aren't re-fit from history).
+**Estimation on the model's own history is a database, not a rule.** The
+paper's agents re-estimate their AR(1) expectation rules on the model's own
+history every quarter (behavioral learning, eq. 6/9). A SPARQL update rule
+sees one time slice — the present — so history lives in a DuckDB table that
+gains one row per tracked aggregate per tick, virtualized back into SPARQL
+through maplib's chrontext (`skabm.history`). Sample-Autocorrelation learning
+is then exactly two things the simulator already accepts: a polars UDF passed
+through `udfs=`, and a SPARQL `SELECT` passed through `history_rules=` that
+runs it over the virtualized series (`behaviour.learning`). Behaviour rules
+themselves stay graph-local — `firm_produce` reads one `def:forecast` triple
+and falls back to its `$growth_e` parameter until enough history exists.
+Nothing in `skabm.history` knows what is being learned, so a moving average or
+an RL update is another query and another UDF and no engine change.
+
+Two chrontext properties shape that design, and both fail *silently*: only
+`Model.query` federates (`update` and `insert` see virtualized data as empty,
+and CONSTRUCT panics), and registering a virtualization makes every
+graph-local aggregate on that model return `None` — which is why the
+virtualization lives on a separate learner model and results are written back
+as triples. `tests/test_history.py` pins both.
+
 SPARQL also has no `log`/`exp` of its own, so the Poledna rules turn
 log-level laws of motion into linear growth factors — but that is a choice,
 not a limit: `rules.register_math` supplies `math:exp` / `math:log` on the

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from string import Template
 
+from skabm.behaviour.learning import expect
 from skabm.rules import EX_NS, _PREFIXES
 
 # ---------------------------------------------------------------------------
@@ -45,9 +46,14 @@ firm_ownership.metadata = {
 # ---------------------------------------------------------------------------
 # firm_produce — supply choice with capacity cap (update)
 # ---------------------------------------------------------------------------
-# Y_i(t+1) = min(Y_i(t) * (1 + growth_e + eps), alpha * size)
+# Y_i(t+1) = min(Y_i(t) * (1 + g_e + eps), alpha * size)
 # Poledna eq. 5 + 12.  AR(1) innovation eps ~ N(0, growth_sigma) via UDF.
-# Placeholder: ``growth_e``, ``growth_sigma``.
+#
+# Expected growth ?g_e is *learned*, not assumed: eq. 6 makes it a regression on
+# the model's own realized output series, which the ``expect(...)`` line below
+# reads off the graph.  ``RDFSimulator`` measures SUM(def:output) over ex:Firm
+# every tick into its history table and re-estimates the AR(1) by Sample-
+# Autocorrelation Learning.  Placeholder: ``growth_sigma``.
 
 firm_produce = Template(
     _PREFIXES
@@ -58,8 +64,10 @@ WHERE {
     ?f a ex:Firm ;
         def:output ?y0 ;
         def:alpha ?alpha ;
-        def:size ?n .
-    BIND(?y0 * (1e0 + $growth_e + pr:normal(0e0, $growth_sigma)) AS ?y_desired)
+        def:size ?n ."""
+    + expect("SUM", "Firm", "output", out="g_e")
+    + """
+    BIND(?y0 * (1e0 + ?g_e + pr:normal(0e0, $growth_sigma)) AS ?y_desired)
     BIND(?alpha * ?n AS ?y_capacity)
     BIND(IF(?y_desired < ?y_capacity, ?y_desired, ?y_capacity) AS ?y1)
 }
@@ -77,7 +85,13 @@ firm_produce.metadata = {
 # ---------------------------------------------------------------------------
 # P_i(t+1) = P_i(t) * (1 + inflation_e + eps)
 # Poledna eq. 8.  AR(1) innovation eps ~ N(0, inflation_sigma) via UDF.
-# Placeholder: ``inflation_e``, ``inflation_sigma``.
+#
+# Expected inflation ?inflation_e is SAC-learned from the realized AVG(def:price)
+# series exactly as ``firm_produce``'s growth expectation is.  Note the
+# aggregate is AVG, not SUM: the price *level* is what agents form a belief
+# about, and summing prices across firms would make it depend on how many firms
+# exist.
+# Placeholder: ``inflation_sigma``.
 
 firm_price = Template(
     _PREFIXES
@@ -86,8 +100,10 @@ DELETE { ?f def:price ?p0 }
 INSERT { ?f def:price ?p1 }
 WHERE {
     ?f a ex:Firm ;
-        def:price ?p0 .
-    BIND(?p0 * (1e0 + $inflation_e + pr:normal(0e0, $inflation_sigma)) AS ?p1)
+        def:price ?p0 ."""
+    + expect("AVG", "Firm", "price", out="inflation_e")
+    + """
+    BIND(?p0 * (1e0 + ?inflation_e + pr:normal(0e0, $inflation_sigma)) AS ?p1)
 }
 """
 )

@@ -12,6 +12,18 @@ dependencies = [
     "scikit-learn>=1.6.0",
 ]
 
+# State history (skabm.history) is the only thing that needs a database, and
+# only a rule set that declares an ex:sig__ signal ever opens one — Schelling,
+# the labour market and the interbank rules run on the core install.  maplib's
+# virtualization takes a SQLAlchemy Select (it calls .subquery() on it), so
+# both are needed together or not at all; the imports are function-scoped so
+# the package imports fine without them.
+[project.optional-dependencies]
+history = [
+    "duckdb>=1.5.5",
+    "sqlalchemy>=2.0.52",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["skabm*"]

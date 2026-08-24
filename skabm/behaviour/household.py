@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from string import Template
 
+from skabm.behaviour.learning import expect
 from skabm.rules import _PREFIXES
 
 # ---------------------------------------------------------------------------
@@ -83,8 +84,15 @@ WHERE {
 # ---------------------------------------------------------------------------
 # satisificing_consume — fixed fraction psi of income (update)
 # ---------------------------------------------------------------------------
-# Poledna eq. 40 + 50.  C = psi * income / (1 + vat_rate).  Placeholder:
-# ``vat_rate``.  ``psi`` is an agent attribute (def:psi), not a parameter.
+# Poledna eq. 40 + 50.  C = psi * expected_income / (1 + vat_rate); savings
+# absorb the rest.  Placeholder: ``vat_rate``.  ``psi`` is an agent attribute
+# (def:psi), not a parameter.
+#
+# Eq. 40 budgets out of *expected* income, not realized income: households
+# smooth consumption against where they think their income is heading.  ?ig_e is
+# the SAC-learned growth of realized SUM(def:income) over ex:Household — the
+# same learning machinery firms use for output and prices — so expected income
+# is this quarter's income carried forward one step.
 
 satisificing_consume = Template(
     _PREFIXES
@@ -95,9 +103,12 @@ WHERE {
     ?hh a ex:Household ;
         def:wealth ?w0 ;
         def:psi ?psi ;
-        def:income ?inc .
-    BIND(?psi * ?inc / (1e0 + $vat_rate) AS ?consumption)
-    BIND(?w0 + ?inc - ?consumption AS ?w1)
+        def:income ?inc ."""
+    + expect("SUM", "Household", "income", out="ig_e")
+    + """
+    BIND(?inc * (1e0 + ?ig_e) AS ?exp_income)
+    BIND(?psi * ?exp_income / (1e0 + $vat_rate) AS ?consumption)
+    BIND(?w0 + (?inc - ?consumption) AS ?w1)
 }
 """
 )

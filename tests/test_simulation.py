@@ -66,12 +66,19 @@ PARAMS = {
     "benefit_replacement": 0.4,
     "total_deposits": 3000.0,
     "vat_rate": 0.15,
-    "growth_e": 0.01,
     "rho": 0.9,
     "r_star": 0.0,
     "xi_pi": 0.5,
     "xi_gamma": 0.5,
 }
+
+
+# Expectations are learned, not parameterised, so nothing makes output move on
+# its own: with a cold (empty) history the first forecast is zero, the realized
+# growth it then learns from is zero, and the model sits at a steady state.
+# Shocks are what give the AR(1) something to estimate, so tests that need a
+# non-flat trajectory use these params together with a fixed random_seed.
+SHOCKED = {**PARAMS, "growth_sigma": 0.02}
 
 
 def gdp(state: pl.DataFrame) -> float:
@@ -81,7 +88,7 @@ def gdp(state: pl.DataFrame) -> float:
 
 
 def test_fit_iter_yields_state_per_tick():
-    sim = RDFSimulator(params=PARAMS, n_periods=4)
+    sim = RDFSimulator(params=SHOCKED, n_periods=4, random_seed=11)
 
     gdp_path = [
         gdp(state)
@@ -90,8 +97,8 @@ def test_fit_iter_yields_state_per_tick():
         )
     ]
     assert len(gdp_path) == 4
-    # below the capacity cap, GDP = sum P*Y*(1 - tech_share) grows every tick
-    assert gdp_path == sorted(gdp_path) and gdp_path[0] < gdp_path[-1]
+    # GDP = sum P*Y*(1 - tech_share); shocks move it, so the path is not flat
+    assert len(set(gdp_path)) == 4
 
     # a cold refit rebuilds the world from scratch: same trajectory again
     gdp_path_2 = [
@@ -104,7 +111,7 @@ def test_fit_iter_yields_state_per_tick():
 
 
 def test_warm_start_continues_the_world():
-    sim = RDFSimulator(params=PARAMS, n_periods=2).fit(
+    sim = RDFSimulator(params=SHOCKED, n_periods=2, random_seed=5).fit(
         Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK
     )
     gdp_after_cold = gdp(
@@ -114,11 +121,11 @@ def test_warm_start_continues_the_world():
         )
     )
 
-    warm = RDFSimulator(params=PARAMS, n_periods=2, warm_start=True)
+    warm = RDFSimulator(params=SHOCKED, n_periods=2, warm_start=True, random_seed=5)
     warm.model_ = sim.model_
     states = list(warm.fit_iter())
     assert len(states) == 2
-    assert gdp(states[-1]) > gdp_after_cold  # advanced beyond the cold fit
+    assert gdp(states[-1]) != gdp_after_cold  # advanced beyond the cold fit
 
     with pytest.raises(ValueError, match="warm_start"):
         warm.fit(Firm=FIRMS)
@@ -137,11 +144,11 @@ def test_default_rules_scoped_to_passed_kinds():
     # only firms: default rules anchored on absent classes (Household,
     # CentralBank) match nothing and no-op — SPARQL pattern matching scopes
     # the full default rule set to the kinds actually mapped
-    sim = RDFSimulator(params=PARAMS, n_periods=2).fit(Firm=FIRMS)
+    sim = RDFSimulator(params=SHOCKED, n_periods=2, random_seed=5).fit(Firm=FIRMS)
 
     outputs = sim.model_.query(f"{_PREFIX} SELECT ?f ?y WHERE {{ ?f def:output ?y }}")
     assert outputs.height == 2
-    assert (outputs["y"] > FIRMS["output"]).all()  # production rule did run
+    assert (outputs["y"] != FIRMS["output"]).all()  # production rule did run
     incomes = sim.model_.query(f"{_PREFIX} SELECT ?h ?i WHERE {{ ?h def:income ?i }}")
     assert incomes.height == 0  # no household rules without Household=
 
@@ -318,6 +325,8 @@ def test_get_params_and_clone():
         "state_extract",
         "udfs",
         "random_seed",
+        "history_rules",
+        "duckdb_connection",
     }
     assert params["n_periods"] == 7
     assert params["params"]["total_deposits"] == 3000.0
