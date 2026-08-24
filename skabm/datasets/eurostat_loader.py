@@ -60,9 +60,13 @@ def _is_leaf(code: str, all_codes: set[str]) -> bool:
         s = other.removeprefix("CPA_")
         # s is a sub-code of stripped when stripped is a range that contains s
         m = re.match(r"^([A-Z])(\d+)-(\d+)$", stripped)
-        if m and s.startswith(m.group(1)) and s[1:].isdigit():
-            if int(m.group(2)) <= int(s[1:]) <= int(m.group(3)):
-                return False
+        if (
+            m
+            and s.startswith(m.group(1))
+            and s[1:].isdigit()
+            and int(m.group(2)) <= int(s[1:]) <= int(m.group(3))
+        ):
+            return False
     return True
 
 

@@ -1,6 +1,6 @@
 # skabm
 
-![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
 
 **scikit-learn-style agent-based modeling on a knowledge graph.**
 
@@ -71,7 +71,11 @@ for state in sim.fit_iter(warm_start=True):
 ```
 
 See [examples/poledna_maplib_demo.py](examples/poledna_maplib_demo.py) for
-the full six-sector economy (~10,000 agents, 120 quarters in ~5 seconds).
+the full six-sector economy (~10,000 agents, 120 quarters in ~5 seconds),
+[examples/schelling.py](examples/schelling.py) for spatial segregation, and
+[examples/labour_automation.py](examples/labour_automation.py) for
+occupational mobility under an automation shock — a labour-flow network where
+the model's central quantity lives on the *edge*.
 
 ## Architecture
 
@@ -79,7 +83,8 @@ the full six-sector economy (~10,000 agents, 120 quarters in ~5 seconds).
 |---|---|
 | `skabm.datasets` | Eurostat loaders (IO tables, business demography) |
 | `skabm.calibration` | Population samplers + constraint calibrators (GA, Metropolis–Hastings) with a sklearn estimator API |
-| `skabm.rules` | `map_df` (DataFrame → graph, auto-generated templates) + SPARQL `string.Template` rules + `render` (param substitution) |
+| `skabm.rules` | `map_df` (DataFrame → graph, auto-generated templates) + SPARQL `string.Template` rules + `render` (param substitution) + UDF registrars |
+| `skabm.behaviour` | The rule library, grouped by economic function: `firm`, `household`, `macro`, `bank`, `labour` |
 | `skabm.simulation` | `RDFSimulator`: fit/fit_iter over SPARQL update rules |
 
 Design decisions, in sklearn vocabulary:
@@ -130,21 +135,45 @@ The current simulation backend is **pure SPARQL** — deliberately, as a
 stress test of how far a declarative, set-based rule engine carries an
 economic ABM. The walls we hit are documented here on purpose.
 
-**No search-and-matching.** The paper's goods, labor, and credit markets
-are *random sequential* algorithms: consumers visit firms in random order,
-first-come-first-served, until stocks run out. Declarative SPARQL can only
-express the simultaneous approximation (demand allocated proportionally to
-supply shares). Consequently employment links are static — hiring and
-firing would require rewiring `employer` triples under per-firm vacancy
-quotas, which needs an ordering no single UPDATE can express.
+**No *sequential* search-and-matching.** The paper's goods, labor, and
+credit markets are *random sequential* algorithms: consumers visit firms in
+random order, first-come-first-served, until stocks run out. Declarative
+SPARQL can only express the simultaneous approximation (demand allocated
+proportionally to supply shares). Consequently Poledna's employment links are
+static — hiring and firing would require rewiring `employer` triples under
+per-firm vacancy quotas, which needs an ordering no single UPDATE can
+express.
+
+What is *not* out of reach is search-and-matching as such. Where a model
+specifies matching as a closed form rather than a queue, SPARQL states it
+directly: `behaviour.labour` implements del Rio-Chanona et al. (2021) — an
+occupational mobility network where unemployed workers apply across a
+weighted job-transition graph and vacancies draw from their applicant pools —
+in seven rules, urn-ball matching function included, and reproduces the
+Beveridge curve. Where a model needs one-to-one assignment,
+`schelling.RELOCATE`'s rank join does it in a single batch. The wall is
+agent-by-agent *ordering*, not matching.
 
 **No in-graph estimation.** The paper's agents re-estimate their AR(1)
 expectation rules on the model's own history every quarter (behavioral
 learning); SPARQL cannot run regressions, so the *expectation parameters*
 are constants (the exogenous processes do carry `pr:normal` innovations —
 see "Randomness is a UDF" above — they just aren't re-fit from history).
-Likewise SPARQL has no `log`/`exp`, so log-level laws of motion become
-linear growth factors.
+SPARQL also has no `log`/`exp` of its own, so the Poledna rules turn
+log-level laws of motion into linear growth factors — but that is a choice,
+not a limit: `rules.register_math` supplies `math:exp` / `math:log` on the
+same `add_udf` seam as the random draws, which is how `behaviour.labour`
+states its urn-ball matching function and its S-curve technology shock
+verbatim. Which UDFs a rule set needs is the `udfs=` hyperparameter.
+
+**Right-associative arithmetic in maplib's SPARQL.** Operators of equal
+precedence associate to the right, against the SPARQL grammar: `?a - ?b + ?c`
+evaluates as `?a - (?b + ?c)` and `?a / ?b * ?c` as `?a / (?b * ?c)`, silently
+and with no error. Chains led by `+` or `*` survive it algebraically, which is
+why the Poledna and Schelling rules are unaffected — but bracket every mixed
+chain explicitly, and give any conservation law a test that pins its invariant
+(`tests/test_labour.py::test_labour_force_is_conserved` exists for exactly
+this reason).
 
 **Activation is synchronous and staged — and there is no scheduler, on
 purpose.** ABM "schedulers" do two jobs: ordering behavioral *phases*
@@ -185,6 +214,9 @@ pools, so a population is reproducible only when each `pr.*` sampler (and
 
 - Poledna, Miess, Hommes & Rabitsch (2023). Economic forecasting with an
   agent-based model. *European Economic Review* 151, 104306.
+- del Rio-Chanona, Mealy, Beguerisse-Díaz, Lafond & Farmer (2021).
+  Occupational mobility and automation: a data-driven network model.
+  *J. R. Soc. Interface* 18(174), 20200898.
 - Hommes & Zhu (2014). Behavioral learning equilibria. *JET* 150.
 - Huberman & Glance (1993). Evolutionary games and computer simulations.
   *PNAS* 90(16).

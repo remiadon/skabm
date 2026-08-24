@@ -190,6 +190,17 @@ class RDFSimulator(BaseEstimator):
         Poledna columns); a different model family passes its own (e.g.
         ``schelling.state_extract``).  Which predicates are observable is a
         property of the rule set, not of the simulator.
+    udfs : Sequence[Callable[[Model], None]]
+        Registrars called on ``model_`` before mapping, each installing SPARQL
+        UDFs via ``Model.add_udf``.  SPARQL's built-in function set is fixed and
+        small, so a rule needing anything beyond it (a random draw, ``exp``)
+        depends on a registrar having run first — which makes *which UDFs exist*
+        a property of the rule set, exactly like ``state_extract``, and therefore
+        a hyperparameter rather than a hard-coded call.  Defaults to
+        ``(rules.register_polars_random,)`` — the Poledna and Schelling rules need
+        ``pr:uniform`` / ``pr:normal`` and nothing more.  The labour-market rules
+        (``behaviour.labour``) additionally need ``rules.register_math``; see
+        ``behaviour.labour.LABOUR_UDFS``.
     random_seed : int | None
         When set, ``pr.set_random_seed`` is called at the start of each
         ``fit``/``fit_iter`` so the ``pr:uniform`` / ``pr:normal`` SPARQL UDFs
@@ -212,6 +223,7 @@ class RDFSimulator(BaseEstimator):
         n_periods: int = 12,
         warm_start: bool = False,
         state_extract: Callable[[Model], pl.DataFrame] = state_extract,
+        udfs: Sequence[Callable[[Model], None]] = (register_polars_random,),
         random_seed: int | None = None,
     ):
         self.init_rules = init_rules
@@ -221,8 +233,40 @@ class RDFSimulator(BaseEstimator):
         self.n_periods = n_periods
         self.warm_start = warm_start
         self.state_extract = state_extract
+        self.udfs = udfs
         self.random_seed = random_seed
         self.model_ = Model()
+
+    def _cold_start(
+        self,
+        populations: dict[str, pl.DataFrame],
+        init_rules: list[str],
+        update_rules: list[str],
+        infer_rules: list[str] | None,
+    ) -> None:
+        """Rebuild model_, map populations, inject provenance, apply init rules.
+
+        Runs only on a cold ``fit``/``fit_iter`` (warm_start=False).  The tick
+        loop in ``_fit_iter`` is shared by both paths.
+        """
+        rules_text = "\n".join((*init_rules, *update_rules, *(infer_rules or ())))
+        for kind in populations:
+            if f"ex:{kind}" not in rules_text:
+                warnings.warn(
+                    f"population {kind!r} is not referenced by any init/update/"
+                    "infer rule (no 'ex:' + kind pattern): it will be mapped into the "
+                    "model but stay inert during simulation.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+        self.model_ = Model()
+        self._register_udfs()
+        for kind, df in populations.items():
+            map_df(self.model_, df, kind)
+        all_rules = (*self.init_rules, *self.update_rules, *(self.infer or ()))
+        _inject_metadata(self.model_, all_rules)
+        for rule in init_rules:
+            self.model_.insert(rule)
 
     def _fit_iter(self, **populations: pl.DataFrame) -> Iterator[None]:
         """Advance the model one tick per iteration (no extraction)."""
@@ -240,32 +284,20 @@ class RDFSimulator(BaseEstimator):
                     "warm_start=True continues the existing model_; do not pass "
                     "populations (assign model_ directly instead)."
                 )
-            register_polars_random(self.model_)
+            self._register_udfs()
         else:
-            rules_text = "\\n".join((*init_rules, *update_rules, *(infer_rules or ())))
-            for kind in populations:
-                if f"ex:{kind}" not in rules_text:
-                    warnings.warn(
-                        f"population {kind!r} is not referenced by any init/update/"
-                        "infer rule (no 'ex:' + kind pattern): it will be mapped into the "
-                        "model but stay inert during simulation.",
-                        UserWarning,
-                        stacklevel=3,
-                    )
-            self.model_ = Model()
-            register_polars_random(self.model_)
-            for kind, df in populations.items():
-                map_df(self.model_, df, kind)
-            all_rules = (*self.init_rules, *self.update_rules, *(self.infer or ()))
-            _inject_metadata(self.model_, all_rules)
-            for rule in init_rules:
-                self.model_.insert(rule)
+            self._cold_start(populations, init_rules, update_rules, infer_rules)
         for _ in range(self.n_periods):
             for rule in update_rules:
                 self.model_.update(rule)
             if self.infer is not None:
                 self.model_.infer(infer_rules)  # type: ignore[arg-type]
             yield
+
+    def _register_udfs(self) -> None:
+        """Install every UDF registrar in ``self.udfs`` on the current model_."""
+        for register in self.udfs:
+            register(self.model_)
 
     def fit_iter(self, **populations: pl.DataFrame) -> Iterator[pl.DataFrame]:
         """Map the populations, apply init rules, then yield per-agent state

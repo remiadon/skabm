@@ -19,6 +19,12 @@ include = ["skabm*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff.lint]
+extend-select = ["PLR0911", "PLR0912", "SIM", "C4"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
 [tool.uv]
 package = true
 
@@ -38,4 +44,7 @@ dev = [
     "prek>=0.4.6",
     "pytest>=9.1.1",
     "ruff>=0.15.20",
+    "matplotlib>=3.11.1",
+    "nbclient>=0.11.0",
+    "ipykernel>=7.3.0",
 ]

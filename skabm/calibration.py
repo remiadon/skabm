@@ -438,7 +438,7 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
         best_energy_val, best_genome = scored[0]
 
         EPS = 1e-9
-        for gen in range(self.n_generations):
+        for _ in range(self.n_generations):
             if best_energy_val <= EPS:
                 break  # pragma: no cover
             next_pop = [g for _, g in scored[:n_elite]]

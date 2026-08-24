@@ -7,8 +7,8 @@ the behaviour templates (``skabm.behaviour.*``) and the simulator
 
 SPARQL rule *logic* lives in ``skabm.behaviour`` (firm.py, household.py,
 macro.py).  This module carries only the plumbing: namespaces, ``render()``,
-``map_df()``, ``register_polars_random()``, ``state_extract()`` (Poledna
-variant), and ``dbl()``.
+``map_df()``, ``register_polars_random()``, ``register_math()``,
+``state_extract()`` (Poledna variant), and ``dbl()``.
 """
 
 from __future__ import annotations
@@ -22,11 +22,13 @@ from maplib import xsd
 EX_NS = "http://example.net/skabm#"
 DEF_NS = "urn:maplib_default:"
 PR_NS = "urn:pr:"  # polars-random UDFs, registered by register_polars_random
+MATH_NS = "urn:math:"  # transcendental UDFs, registered by register_math
 
 _PREFIXES = (
     f"PREFIX ex:<{EX_NS}>\n"
     f"PREFIX def:<{DEF_NS}>\n"
     f"PREFIX pr:<{PR_NS}>\n"
+    f"PREFIX math:<{MATH_NS}>\n"
     "PREFIX xsd:<http://www.w3.org/2001/XMLSchema#>\n"
 )
 
@@ -58,6 +60,42 @@ def register_polars_random(model) -> None:
 
     model.add_udf(PR_NS + "uniform", _uniform, xsd.double, [xsd.double, xsd.double])
     model.add_udf(PR_NS + "normal", _normal, xsd.double, [xsd.double, xsd.double])
+
+
+def register_math(model) -> None:
+    """Expose the transcendental functions SPARQL lacks as UDFs.
+
+    Registers ``math:exp(x)`` and ``math:log(x)`` — callable in any rule via
+    ``BIND(math:exp(?x) AS ?y)``.  Plain SPARQL has no ``EXP``/``LOG`` (only
+    the four arithmetic operators plus ``ABS``/``ROUND``/``FLOOR``/``CEIL``),
+    which is what forces log-level laws of motion into linear growth factors
+    in the Poledna rule set.  Models whose *specification* is transcendental —
+    the urn-ball matching function and the S-curve technology shock of
+    del Rio-Chanona et al. (2021) — need the real thing, so it is registered
+    here on the same ``Model.add_udf`` seam as the random draws.
+
+    Pass alongside ``register_polars_random`` via
+    ``RDFSimulator(udfs=(register_polars_random, register_math))``.
+    """
+
+    def _exp(df: pl.DataFrame) -> pl.Series:
+        return df["0"].exp().alias("out")
+
+    def _log(df: pl.DataFrame) -> pl.Series:
+        return df["0"].log().alias("out")
+
+    model.add_udf(MATH_NS + "exp", _exp, xsd.double, [xsd.double])
+    model.add_udf(MATH_NS + "log", _log, xsd.double, [xsd.double])
+
+
+# maplib SPARQL gotcha, worth knowing before writing any rule: arithmetic
+# operators of equal precedence associate to the *right*, against the SPARQL
+# grammar.  ``?a - ?b + ?c`` evaluates as ``?a - (?b + ?c)`` and ``?a / ?b * ?c``
+# as ``?a / (?b * ?c)``; both are silently wrong, with no error and no warning.
+# Chains that start with ``+`` or ``*`` happen to survive (``a + (b - c)`` and
+# ``a * (b / c)`` are algebraically what you meant), which is why the Poledna
+# and Schelling rules are unaffected — but a chain led by ``-`` or ``/`` is a
+# live bug.  Bracket every mixed chain explicitly.
 
 
 def dbl(x: float) -> str:

@@ -316,6 +316,7 @@ def test_get_params_and_clone():
         "n_periods",
         "warm_start",
         "state_extract",
+        "udfs",
         "random_seed",
     }
     assert params["n_periods"] == 7
