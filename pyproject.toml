@@ -23,6 +23,14 @@ history = [
     "duckdb>=1.5.5",
     "sqlalchemy>=2.0.52",
 ]
+# Model calibration (searching `params` to match macro series) is a different
+# problem from the population calibration in skabm.calibration, and black-it
+# already solves it — see chapter 4 of notebooks/poledna/poledna.ipynb.  Its
+# numpy pin is conservative rather than real (black-it runs unchanged on 2.4.6),
+# hence the override below; its own `python <3.13` bound applies to this extra.
+model-calibration = [
+    "black-it>=0.3.3",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -39,6 +47,9 @@ max-complexity = 10
 
 [tool.uv]
 package = true
+# black-it pins numpy<1.27; skabm asks for >=2.4.6.  Without this, resolving the
+# model-calibration extra is unsatisfiable.
+override-dependencies = ["numpy>=2.4.6"]
 
 # The `infer` reasoning used by skabm.behaviour.bank (Datalog / recursive
 # SPARQL CONSTRUCT) is a licensed maplib add-on — free for academic / personal
@@ -55,6 +66,7 @@ dev = [
     "ipython>=9.15.0",
     "prek>=0.4.6",
     "pytest>=9.1.1",
+    "pytest-markdown-docs>=0.9.2",
     "ruff>=0.15.20",
     "matplotlib>=3.11.1",
     "nbclient>=0.11.0",

@@ -1,6 +1,6 @@
 # skabm
 
-![coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-97%25-brightgreen)
 
 **scikit-learn-style agent-based modeling on a knowledge graph.**
 
@@ -31,54 +31,95 @@ becomes a queryable, editable, shareable ontology.
 
 ## Quickstart
 
+A population calibrated from real Eurostat data, then simulated:
+
 ```python
 import polars as pl
-from skabm.calibration import make_dataset
-from skabm.behaviour.household import kinked_consume, household_income
-from skabm.behaviour.firm import firm_produce, firm_price
-from skabm.behaviour.macro import centralbank_rate
+import polars_random as pr
+
+from skabm.calibration import GeneticConstraintCalibration, make_dataset, weighted_enum
+from skabm.datasets import build_firm_io_df
 from skabm.simulation import RDFSimulator
 
+# 1. Real data: Austrian input-output table + business demography (Poledna §4.1).
+io = build_firm_io_df("AT", 2010).drop_nulls(["n_firms", "alpha_s"])
+by_industry = lambda v: pl.col("industry").replace_strict(io["industry"], v, return_dtype=pl.Float64)  # noqa: E731
 
-# 1. Calibrate agent populations as DataFrames (marginals from real data)
-firms = make_dataset(samplers={...}, n_agents=300)
-households = make_dataset(samplers={...}, n_agents=10_000)
+# 2. Marginals: industry in proportion to real enterprise counts, size log-normal (§4.1.1).
+firms = make_dataset(
+    samplers={
+        "industry": weighted_enum(pl.Enum(io["industry"].to_list()), io["n_firms"], seed=100),
+        "size": pr.normal(3.0, 1.0, seed=101).exp().cast(pl.Int64).clip(1, None),
+    },
+    n_agents=300,
+    seed=0,
+)
 
-# 1. Choose (or build) the behavioural rules you want — each is a SPARQL
-#    Template imported from skabm.behaviour; the canonical Poledna parameter
-#    set lives in skabm.behaviour.params and is merged at fit time.
-rules = [firm_produce, firm_price, household_income, kinked_consume, centralbank_rate]
+# 3. Population calibration: industry and size were drawn independently, but Eurostat
+#    reports persons per enterprise per industry — a joint fact no marginal encodes.
+observed = by_industry((io["n_employed"] / io["n_firms"]).log())
+shift = firms.select(pl.col("size").log().mean() - observed.mean()).item()
+firms = pl.DataFrame(
+    GeneticConstraintCalibration(
+        constraints=[(pl.col("size").log().mean().over("industry"), observed + shift)],
+        n_generations=600,
+        seed=7,
+    ).fit(firms).samplers_
+).with_row_index("id")
 
+# 4. IO coefficients are functions of industry, attached after calibration.
+firms = firms.with_columns(
+    pl.format("firm_{}", pl.col("id")).alias("id"), pl.col("industry").cast(pl.String),
+    alpha=by_industry(io["alpha_s"]), w_bar=by_industry(io["w_bar_s"]),
+    delta=by_industry(io["delta_s"]), tech_share=by_industry(io["tech_share_s"]),
+    price=pl.lit(1.0), margin=pl.lit(0.2), liquidity=pl.lit(0.0),
+).with_columns(output=0.9 * pl.col("alpha") * pl.col("size"))
 
-# 2. Calibrate agent populations as DataFrames (marginals from real data)
-#    and simulate: the simulator only runs rules whose referenced agent classes
-#    are present, so a Firm + Household run executes exactly those dynamics.
-sim = RDFSimulator(n_periods=12, update_rules=rules)
+# 5. Households: census active/inactive shares, and an `employer` *link* column whose
+#    values name firms — it becomes a graph edge at map time, not a join you maintain.
+households = make_dataset(
+    samplers={
+        "status": weighted_enum(pl.Enum(["active", "inactive"]), [4_729_215, 4_130_385], seed=110),
+        "employer": weighted_enum(pl.Enum(firms["id"].to_list()), firms["size"], seed=111),
+    },
+    n_agents=10_000,
+    seed=1,
+).with_columns(
+    pl.format("hh_{}", pl.col("id")).alias("id"),
+    psi=pl.lit(0.9394),                             # propensity to consume, Table 2
+    employer=pl.when(pl.col("status") == "active")  # inactive households supply no labour
+              .then(pl.col("employer").cast(pl.String)).otherwise(None),
+).drop("status")
+
+# 6. Simulate. The default rule set is the full Poledna economy and self-scopes to the
+#    populations passed, so a Firm + Household run executes exactly those dynamics.
+sim = RDFSimulator(n_periods=12, params={"firm_ownership_ratio": 300 / 10_000,
+                                         "growth_sigma": 0.02, "inflation_sigma": 0.01})
 for state in sim.fit_iter(Firm=firms, Household=households):
-    print(state.select((pl.col("price") * pl.col("output")).sum()))
-
-# 3. Post-fit, sim.model_ is a regular maplib Model — SPARQL queries,
-#    interventions (do-calculus style), visualization (explore()),
-#    and serialization all work on it directly.
-#    Here: a single do-calculus intervention — set every firm's price to a
-#    fixed value (Pearl-style do-operator), then resume simulation under
-#    warm_start.  The do-operator abstraction is public-domain notation;
-#    production-grade identification/estimation tooling is a 3rd-party
-#    (licensed) concern and out of scope for the core engine.
-sim.model_.update("DELETE { ?f ex:price ?p } INSERT { ?f ex:price 42e0 } WHERE { ?f a ex:Firm }")
-for state in sim.fit_iter(warm_start=True):
-    print(state.select((pl.col("price") * pl.col("output")).sum()))
+    active = state.drop_nulls("output")
+    print((active["price"] * active["output"] * (1 - active["tech_share"])).sum())
 ```
 
-Three notebooks build the Poledna model up in `notebooks/poledna/`:
-[01_base_model](notebooks/poledna/01_base_model.ipynb) runs the seven-rule quarter
-and intervenes on the fitted graph;
-[02_interbank_contagion](notebooks/poledna/02_interbank_contagion.ipynb) adds a
-banking layer whose distress propagates to a fixed point through `infer=`;
-[03_sac_learning](notebooks/poledna/03_sac_learning.ipynb) opens up the learned
+Step 3 is the part a marginal sampler cannot do. `size` and `industry` are drawn
+independently, so their joint structure is whatever the draw happened to produce;
+the calibrator permutes rows until per-industry mean size matches Eurostat, and
+because permutation leaves each column's multiset untouched, both marginals survive
+exactly. That invariance also fixes the `shift`: the global mean of `log(size)` cannot
+move, so only *relative* sizes across industries are imposable — the absolute scale
+stays the sampler's. Pass the calibrator only the columns its constraint mentions;
+each free column is permuted independently, so a derived column handed to it (`alpha`
+here) would be shuffled away from the industry it belongs to.
+
+[notebooks/poledna/poledna.ipynb](notebooks/poledna/poledna.ipynb) builds the
+model up in five chapters on one shared population. **Chapter 0** is the
+calibration above at notebook scale; **1** runs the seven-rule quarter and
+intervenes on the fitted graph; **2** adds a banking layer whose distress
+propagates to a fixed point through `infer=`; **3** opens up the learned
 expectations — a DuckDB history, virtualized back into SPARQL — and swaps the
-estimator to show the seam is generic.
-[poledna.py](poledna.py) is the same model calibrated on live Eurostat data.
+estimator to show the seam is generic; **4** hands the behavioural parameters to
+[black-it](https://github.com/bancaditalia/black-it) and reads the result as an
+identification test on the rule set. [poledna.py](poledna.py) is the same model
+as a plain script.
 
 Elsewhere, [examples/schelling.py](examples/schelling.py) covers spatial segregation
 and [notebooks/labour_automation.ipynb](notebooks/labour_automation.ipynb)
@@ -90,11 +131,28 @@ the model's central quantity lives on the *edge*.
 | Module | Role |
 |---|---|
 | `skabm.datasets` | Eurostat loaders (IO tables, business demography) |
-| `skabm.calibration` | Population samplers + constraint calibrators (GA, Metropolis–Hastings) with a sklearn estimator API |
+| `skabm.calibration.population` | Population samplers + constraint calibrators (GA, Metropolis–Hastings) with a sklearn estimator API |
+| `skabm.calibration.parameters` | Model calibration: `RDFSimulator` as a black-it `model(theta, N, seed)`, plus the `noise_floor` diagnostic |
 | `skabm.rules` | `map_df` (DataFrame → graph, auto-generated templates) + SPARQL `string.Template` rules + `render` (param substitution) + UDF registrars |
 | `skabm.behaviour` | The rule library, grouped by economic function: `firm`, `household`, `macro`, `bank`, `labour`, `learning` |
 | `skabm.history` | State history in DuckDB, virtualized back into SPARQL (chrontext) — the graph's memory |
 | `skabm.simulation` | `RDFSimulator`: fit/fit_iter over SPARQL update rules |
+
+**Two senses of "calibration".** The word means different things in the
+microsimulation and ABM literatures, so `skabm.calibration` is split in two and
+re-exports both. `calibration.population` fits the agent *rows* to accounting
+identities and known margins — IO coefficients, census shares, Basel III ratios
+— which is Poledna §4's usage and survey sampling's (Deville & Särndal 1992,
+calibration estimators). `calibration.parameters` fits the *behavioural
+parameters* to macro time series, the ABM literature's usual sense (Fagiolo et
+al. 2019); skabm supplies the adapter and
+[black-it](https://github.com/bancaditalia/black-it) supplies the search, via
+`uv sync --extra model-calibration`.
+
+The two compose in the sklearn way — population calibration is a transformer on
+`X`, model calibration is a search over `get_params()` — and the ordering
+follows: the population is calibrated once, *outside* the search loop, and held
+frozen while `θ` moves inside it.
 
 Design decisions, in sklearn vocabulary:
 
@@ -245,6 +303,13 @@ pools, so a population is reproducible only when each `pr.*` sampler (and
 - Hommes & Zhu (2014). Behavioral learning equilibria. *JET* 150.
 - Huberman & Glance (1993). Evolutionary games and computer simulations.
   *PNAS* 90(16).
+- Deville & Särndal (1992). Calibration estimators in survey sampling.
+  *JASA* 87(418).
+- Fagiolo, Guerini, Lamperti, Moneta & Roventini (2019). Validation of
+  agent-based models in economics and finance. In *Computer Simulation
+  Validation*, Springer.
+- [black-it](https://github.com/bancaditalia/black-it) — Banca d'Italia's ABM
+  parameter-calibration toolbox.
 - [maplib](https://github.com/DataTreehouse/maplib) — Rust knowledge-graph
   toolkit with polars-native OTTR templates and SPARQL.
 - [AMBER](https://github.com/a11to1n3/AMBER) — polars-based ABM framework.

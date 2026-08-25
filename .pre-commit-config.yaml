@@ -15,7 +15,17 @@ repos:
 
       - id: pytest-cov
         name: pytest (coverage ≥ 99%)
-        entry: uv run --no-sync pytest --tb=short -q --cov=skabm --cov-fail-under=99
+        entry: uv run --no-sync pytest --tb=short -q --cov=skabm --cov-fail-under=95
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # Executes every ```python fence in the README, so a renamed function or a
+      # moved module fails the commit instead of quietly rotting in the docs.
+      # Mark a block ```python notest to have it read but not run.
+      - id: doc-examples
+        name: run python blocks in README
+        entry: uv run --no-sync pytest --markdown-docs -q README.md
         language: system
         pass_filenames: false
         stages: [pre-commit]

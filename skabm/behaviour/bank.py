@@ -72,9 +72,16 @@ bank_depositors.metadata = {
 # bank_capital - update rule, state, per-tick
 # ---------------------------------------------------------------------------
 # Capital ratio deteriorates when depositors move money out (flight-to-safety
-# in a contagion round).  Placeholder: ``distress_threshold`` (the ratio below
-# which a bank is distressed).  The outflow aggregate is optional so a bank
-# with no outflows stays put.
+# in a contagion round).  The outflow aggregate is optional so a bank with no
+# outflows stays put.
+#
+# ``bank_asset_scale`` is the deposit base one unit of leverage stands for, and
+# it is a parameter rather than a constant because it carries the *units* of the
+# population: an outflow is in whatever currency the agents hold, so a run
+# calibrated 1:1 from national accounts and a 500-agent demo need scales that
+# differ by orders of magnitude.  Leave it at its default for a toy population;
+# set it from the deposit base (``total_deposits / n_banks``, say) for a
+# realistically scaled one, or every flight event drives the ratio to nonsense.
 
 bank_capital = Template(
     _PREFIXES
@@ -91,7 +98,7 @@ WHERE {
                    def:flees_amount ?out .
         } GROUP BY ?b
     }
-    BIND(?cr0 - IF(BOUND(?outflow), ?outflow / (?lev * 1e3), 0e0) AS ?cr1)
+    BIND(?cr0 - IF(BOUND(?outflow), ?outflow / (?lev * $bank_asset_scale), 0e0) AS ?cr1)
 }"""
 )
 bank_capital.metadata = {
@@ -120,13 +127,13 @@ bank_capital.metadata = {
 # aggregation; recursive CONSTRUCT does.  ``RDFSimulator`` passes the string
 # as-is to ``Model.infer`` - it accepts both forms.
 #
-# Note on rendering: the rule string contains no ``$placeholder`` references -
-# parameters like ``distress_threshold`` and ``flee_amount_threshold`` are
-# embedded directly via Python f-string substitution so that ``render()`` is
-# a no-op.  This keeps the rule self-contained and avoidable of the
-# ``string.Template`` path, while still being substitutable through the
-# simulator's ``params`` dict if needed.  Users who want to override thresholds
-# at fit time should pass a custom rule string via ``infer=``.
+# Note on rendering: each clause is a ``string.Template``, so
+# ``distress_threshold`` and ``flee_amount_threshold`` are substituted from the
+# simulator's ``params`` dict at fit time exactly like every other rule
+# parameter.  Both thresholds carry the *units of the population* - a capital
+# ratio is dimensionless but a flight amount is currency - so a realistically
+# scaled run has to set the second one, and a rule that baked in a literal
+# would have silently ignored it.
 #
 # Each CONSTRUCT clause is on a single line (no line break between } and WHERE)
 # because maplib's SPARQL parser rejects it.
@@ -137,19 +144,19 @@ bank_capital.metadata = {
 # therefore carried as a ``true`` object, and every match tests it as
 # ``?b ex:is_distressed true``.
 interbank_contagion = [
-    (
+    Template(
         f"PREFIX ex: <{EX_NS}>"
         f"PREFIX def: <urn:maplib_default:>"
-        f"CONSTRUCT {{ ?b ex:is_distressed true }} WHERE {{ ?b a ex:Bank ; def:capital_ratio ?cr . FILTER(?cr < 0.03) . }}"
+        f"CONSTRUCT {{ ?b ex:is_distressed true }} WHERE {{ ?b a ex:Bank ; def:capital_ratio ?cr . FILTER(?cr < $distress_threshold) . }}"
     ),
-    (
+    Template(
         f"PREFIX ex: <{EX_NS}>"
         f"PREFIX def: <urn:maplib_default:>"
         f"CONSTRUCT {{ ?agent def:flees_to ?safe ; def:flees_amount ?amount }} WHERE {{ {{ ?agent a ex:Household ; def:holds_at ?distressed ; def:wealth ?amount }} UNION {{ ?agent a ex:Firm ; def:holds_at ?distressed ; def:liquidity ?amount }} ?distressed ex:is_distressed true . ?safe a ex:Bank . FILTER NOT EXISTS {{ ?safe ex:is_distressed true }} . }}"
     ),
-    (
+    Template(
         f"PREFIX ex: <{EX_NS}>"
         f"PREFIX def: <urn:maplib_default:>"
-        f"CONSTRUCT {{ ?b ex:is_distressed true }} WHERE {{ ?other def:flees_to ?b ; def:flees_amount ?amount . ?b a ex:Bank ; def:capital_ratio ?cr . FILTER(?amount > 5.0) . }}"
+        f"CONSTRUCT {{ ?b ex:is_distressed true }} WHERE {{ ?other def:flees_to ?b ; def:flees_amount ?amount . ?b a ex:Bank ; def:capital_ratio ?cr . FILTER(?amount > $flee_amount_threshold) . }}"
     ),
 ]

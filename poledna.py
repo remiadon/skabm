@@ -3,7 +3,7 @@
 All six institutional sectors of Poledna et al. (2023) are instantiated with
 `skabm.calibration.make_dataset` from the same Eurostat-calibrated samplers
 as tests/test_poledna_calibration.py (IO table NAIO_10_CP1700 + business
-demography BD_9PM_R2, Austria 2010):
+demography BD_9BD_SZ_CL_R2, Austria 2010):
 
   1. non-financial corporations (firms)   IO table + business demography
   2. households                           census active/inactive shares

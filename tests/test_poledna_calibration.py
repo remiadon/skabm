@@ -87,7 +87,7 @@ def firm_samplers(io_df) -> dict:
     industry_enum = pl.Enum(industries.to_list())
     return {
         # Industry ∝ n_firms (Section 4.1.1): each firm belongs to one industry,
-        # count calibrated from business demography data (BD_9PM_R2).
+        # count calibrated from business demography data (BD_9BD_SZ_CL_R2).
         "industry": weighted_enum(industry_enum, io_df["n_firms"], seed=100),
         # Firm size ~ LogNormal(3, 1): mean(log(size)) = 3.0, Pareto tail (Section 4.1.1).
         "size": pr.normal(3.0, 1.0, seed=101).exp().cast(pl.Int64).clip(1, None),
@@ -275,9 +275,24 @@ def test_foreign_firms(io_df):
 # This is a joint fact about (size, industry) that no marginal encodes.
 # Constraint tuple: (metric_expr, target_expr)
 #   metric = mean(log(size)) per sector (windowed)
-#   target = 3.5 for manufacturing, 2.5 for services
+#   target = a large value for manufacturing, the residual for services
 # After GA, we evaluate the metric and check it is near the target.
+#
+# The service target is *derived*, not chosen, and that is load-bearing.  The GA
+# permutes rows, so the per-column multiset — and hence the global mean of
+# log(size) — is invariant.  A pair of sector targets is therefore reachable
+# only when it respects
+#
+#     n_manuf * t_manuf + n_service * t_service == n * mean(log(size))
+#
+# Austria's real business demography is 293:7 services:manufacturing by firm
+# count (retail, construction and professional services dominate), so a
+# hand-picked pair like (3.5, 2.5) is arithmetically unreachable and the GA
+# plateaus at a positive energy no budget clears.  Deriving one target from the
+# other keeps the test measuring the optimiser rather than the infeasibility.
 # ---------------------------------------------------------------------------
+
+T_MANUF = 4.5  # manufacturing firms are the large ones
 
 
 def test_firm_sector_size_ga(io_df):
@@ -294,13 +309,6 @@ def test_firm_sector_size_ga(io_df):
         ind_keys, sec_vals, return_dtype=pl.String
     )
 
-    constraints = [
-        (
-            pl.col("size").log().mean().over(sector_of),
-            pl.when(sector_of == "manuf").then(3.5).otherwise(2.5),
-        )
-    ]
-
     population = make_dataset(
         samplers={
             "industry": weighted_enum(industry_enum, n_firms, seed=150),
@@ -309,6 +317,23 @@ def test_firm_sector_size_ga(io_df):
         n_agents=300,
         seed=5,
     )
+
+    # Derive the service target from the invariant the permutation preserves.
+    n = population.height
+    n_manuf = (
+        population.select(sector_of.alias("s")).filter(pl.col("s") == "manuf").height
+    )
+    mean_log_size = float(population["size"].log().mean())
+    t_service = (n * mean_log_size - n_manuf * T_MANUF) / (n - n_manuf)
+    assert t_service < T_MANUF  # manufacturing really is the larger sector
+
+    constraints = [
+        (
+            pl.col("size").log().mean().over(sector_of),
+            pl.when(sector_of == "manuf").then(T_MANUF).otherwise(t_service),
+        )
+    ]
+
     cal = GeneticConstraintCalibration(
         constraints=constraints,
         population_size=40,

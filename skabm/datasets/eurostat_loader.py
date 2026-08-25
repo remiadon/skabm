@@ -9,8 +9,9 @@ Two public functions::
       depreciation, and intermediate consumption in millions of EUR.
 
   fetch_firm_demographics(geo, year)
-      Fetches BD_9PM_R2 (business demography) and returns one row per CPA
-      industry with the number of active enterprises and persons employed.
+      Fetches BD_9BD_SZ_CL_R2 (business demography by size class) and returns
+      one row per CPA industry with the number of active enterprises and
+      persons employed.
       Falls back to the nearest available year when the requested year has
       no data for a given industry.
 
@@ -31,7 +32,12 @@ import polars as pl
 # ---------------------------------------------------------------------------
 
 _IO_DATASET = "NAIO_10_CP1700"
-_BD_DATASET = "BD_9PM_R2"
+# Business demography by size class and NACE Rev. 2 activity.  This is the
+# dataset that carries the *population of active enterprises*; BD_9PM_R2, which
+# this loader used to read, only publishes high-growth-enterprise counts
+# (V11960 / V16961), so every firm count and every per-person coefficient
+# derived from it was measured on a small, fast-growing subsample.
+_BD_DATASET = "BD_9BD_SZ_CL_R2"
 
 # Value-added component codes that appear as prd_ava (column) dimension.
 _IO_COMPONENTS = {
@@ -43,8 +49,8 @@ _IO_COMPONENTS = {
 }
 
 # Business demography indicators we need.
-_BD_FIRMS = "V11960"  # number of active enterprises
-_BD_EMPLOYED = "V16961"  # persons employed
+_BD_FIRMS = "V11910"  # population of active enterprises in t
+_BD_EMPLOYED = "V16910"  # persons employed in the population of active enterprises
 
 
 def _is_leaf(code: str, all_codes: set[str]) -> bool:
@@ -96,10 +102,16 @@ def _fetch_io_raw(geo: str, year: str) -> pl.DataFrame:
 def _fetch_bd_raw(geo: str) -> pl.DataFrame:
     import eurostat
 
-    """Cached raw fetch of business demography for one country."""
+    """Cached raw fetch of business demography for one country.
+
+    ``sizeclas`` is a dimension of this dataset; only the TOTAL slice is the
+    whole population, the rest are employment-size bands that would be summed
+    twice if kept.
+    """
     filter_pars = {
         "geo": [geo],
         "indic_sb": [_BD_FIRMS, _BD_EMPLOYED],
+        "sizeclas": ["TOTAL"],
     }
     raw = eurostat.get_data_df(_BD_DATASET, filter_pars=filter_pars)
     return (
@@ -107,6 +119,29 @@ def _fetch_bd_raw(geo: str) -> pl.DataFrame:
         .rename({"geo\\TIME_PERIOD": "geo"})
         .select(["indic_sb", "nace_r2"] + [c for c in raw.columns if c.isdigit()])
     )
+
+
+def _nace_codes(cpa: str) -> list[str]:
+    """CPA product code -> the NACE activity codes business demography reports.
+
+    The IO table names industries at mixed granularity, and three shapes occur::
+
+        CPA_C16     -> ["C16"]          a single activity
+        CPA_C31_32  -> ["C31", "C32"]   an aggregate of a contiguous range
+        CPA_L68A    -> ["L68"]          a CPA-only split of one activity
+
+    The old implementation iterated the *characters* of the code, so "C16" asked
+    business demography for "C", "1" and "6" — handing every manufacturing
+    industry the same section-level total.  Note that CPA_L68A and CPA_L68B
+    (real estate excluding / including imputed rents) both resolve to L68 and so
+    share its firm count: NACE has no matching split.
+    """
+    code = cpa.removeprefix("CPA_")
+    m = re.match(r"^([A-Z])(\d+)[_-](\d+)$", code)
+    if m:
+        letter, lo, hi = m.groups()
+        return [f"{letter}{n}" for n in range(int(lo), int(hi) + 1)]
+    return [re.sub(r"^([A-Z]\d+)[A-Z]$", r"\1", code)]
 
 
 def _nearest_year(
@@ -178,7 +213,7 @@ def fetch_firm_demographics(geo: str = "AT", year: int = 2010) -> pl.DataFrame:
 
     rows: list[dict] = []
     for industry in io_df["industry"].to_list():
-        nace_codes = industry.removeprefix("CPA_")
+        nace_codes = _nace_codes(industry)
         n_firms_total = 0
         n_employed_total = 0
         best_year = year

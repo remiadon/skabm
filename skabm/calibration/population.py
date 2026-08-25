@@ -1,18 +1,23 @@
 """
-Agent-population sampler and constraint calibrators for agent-based models.
+Population calibration — agent-population samplers and constraint calibrators.
 
-Calibration in ABM means finding a synthetic
-micro-level population whose aggregate statistics reproduce observed macro-level
-stylized facts (IO-table coefficients, census shares, Basel III ratios, etc.).
-There is no training set, no label, and no generalisation error — the goal is
-internal consistency of a simulated economy, not predictive accuracy on held-out
-data.
+*Population* calibration finds a synthetic micro-level population whose
+aggregate statistics reproduce observed macro-level facts: IO-table
+coefficients, census shares, Basel III ratios.  There is no training set, no
+label, and no generalisation error — the goal is internal consistency of a
+simulated economy, not predictive accuracy on held-out data.  This is Poledna
+et al. (2023) §4's sense of the word, and survey sampling's (Deville & Särndal
+1992, *calibration estimators*).
 
-The two concepts share the sklearn estimator interface purely for
-interoperability with pipelines, parameter search, and cross-validation
-scaffolding.  score() returns -energy (higher = better fit to constraints),
-which gives a meaningful optimisation signal even though it is not a
-classification or regression metric.
+It is **not** the ABM literature's more common sense — fitting behavioural
+parameters so the model reproduces macro time series.  That is
+``skabm.calibration.parameters``, and the two compose: a population is fitted
+once, *outside* any parameter search, and held fixed while ``θ`` moves.
+
+The estimators here share the sklearn interface for interoperability with
+pipelines, parameter search, and cross-validation scaffolding.  score() returns
+-energy (higher = better fit to constraints), which gives a meaningful
+optimisation signal even though it is not a classification or regression metric.
 
 Public API
 

@@ -34,6 +34,7 @@ poledna_params = {
     "xi_gamma":  1.2994,   # growth gap weight
     # Interbank contagion parameters (skabm extension — not in Poledna 2023)
     "distress_threshold":     0.03,  # capital ratio below which a bank is distressed
+    "bank_asset_scale":       1e3,   # deposit base per unit of leverage; scale with the population
     "flee_amount_threshold":  10.0,  # amount (wealth/liquidity) above which a bank loses enough deposits to become distressed
 }
 # fmt: on
