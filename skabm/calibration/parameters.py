@@ -43,8 +43,9 @@ __all__ = ["simulator_model", "noise_floor"]
 def simulator_model(
     populations: dict[str, pl.DataFrame],
     free: Sequence[str],
-    summarise: Callable[[pl.DataFrame], Sequence[float]],
+    summarise: Callable[[pl.DataFrame], Sequence[float]] | None = None,
     params: dict | None = None,
+    stop: Callable[[list[list[float]]], bool] | None = None,
     **simulator_kwargs,
 ) -> Callable[[Sequence[float], int, int], np.ndarray]:
     """Build a ``model(theta, N, seed) -> (N, D)`` callable from a simulator setup.
@@ -59,10 +60,39 @@ def simulator_model(
         Names of the parameters ``θ`` indexes, in order.  Each must already
         exist in the merged parameter dict — a name no rule template reads would
         be searched over silently and change nothing, so it is rejected here.
-    summarise : Callable[[pl.DataFrame], Sequence[float]]
+    summarise : Callable[[pl.DataFrame], Sequence[float]], optional
         One per-tick state frame (as yielded by ``fit_iter``) to the ``D``
-        observables.  Ordinary polars on the caller's side, exactly as in a
-        hand-written run loop.
+        observables.  **Usually unnecessary.**  The default (``None``) uses the
+        observables the rule set already implies — every state predicate under
+        the aggregate its own rules apply to it, plus the share of agents at
+        each binding constraint — which is exactly the vector of per-tick
+        summary statistics a method-of-moments loss consumes.  Their names, in
+        column order, land on ``model.observables_``.
+
+        Pass one only for a statistic the recorded set cannot express: anything
+        distributional (a Gini coefficient, a percentile ratio) needs the
+        per-agent frame, because the recorded observables are class-level
+        scalars.
+    stop : Callable[[list[list[float]]], bool], optional
+        Early stopping.  Called with every summarised row so far (so
+        ``rows[-1]`` is the newest); returning True ends that candidate's run
+        and the result is padded back to ``N`` rows by carrying the last one
+        forward.  A parameter search spends most of its time on candidates that
+        were never going to fit, and a diverging one is usually detectable in a
+        handful of ticks — on the Poledna rules an implausible ``growth_sigma``
+        drives output negative by tick 5 of 60.
+
+        The *criterion* stays yours, deliberately: "this run has gone bad" is a
+        modelling claim, in the same category as naming a series GDP.  What is
+        handled here is the mechanics, because the ``(N, D)`` contract is not
+        optional and every caller would otherwise write the same pad.
+
+        Carrying the last row forward is chosen over a sentinel so the loss
+        stays finite and the diverged values remain in it — the candidate is
+        then penalised on its own numbers rather than by a magic constant.  A
+        criterion that fires too eagerly silently truncates good runs, which is
+        worse than slow ones; ``model.ticks_`` reports how far the last call
+        actually got, so a search can be checked rather than trusted.
     params : dict, optional
         Base parameters the search perturbs.  Defaults to the canonical Poledna
         values; a partial dict is merged over them.
@@ -77,7 +107,9 @@ def simulator_model(
     Callable
         ``model(theta, N, seed)`` returning an ``(N, D)`` float array — one row
         per tick, so a caller that differences the series must ask for ``N + 1``
-        ticks and drop one.  Fits are always cold.
+        ticks and drop one.  Fits are always cold.  ``model.ticks_`` is how many
+        ticks the last call ran before ``stop`` ended it, or ``N`` when it did
+        not; ``model.free`` is the searched parameter names.
 
     Examples
     --------
@@ -98,6 +130,14 @@ def simulator_model(
             "N and seed come from the calibrator, and fits are always cold."
         )
 
+    if summarise is None and simulator_kwargs.get("track") is False:
+        raise ValueError(
+            "summarise=None reads the recorded observables, which track=False "
+            "switches off. Pass a summarise callable, or leave track alone."
+        )
+    if summarise is None:
+        simulator_kwargs["track"] = True
+
     base = {**poledna_params, **(params or {})}
     unknown = [name for name in free if name not in base]
     if unknown:
@@ -116,12 +156,46 @@ def simulator_model(
             random_seed=int(seed),
             **simulator_kwargs,
         )
-        return np.asarray(
-            [summarise(state) for state in sim.fit_iter(**populations)], dtype=float
-        )
+        rows: list[list[float]] = []
+        for tick, state in enumerate(sim.fit_iter(**populations), start=1):
+            if summarise is None:
+                names, values = _recorded(sim, tick)
+                model.observables_ = names  # type: ignore[attr-defined]
+                rows.append(values)
+            else:
+                rows.append([float(v) for v in summarise(state)])
+            if stop is not None and stop(rows):
+                break
+        model.ticks_ = len(rows)  # type: ignore[attr-defined]
+        if rows:
+            rows += [rows[-1]] * (int(N) - len(rows))
+        return np.asarray(rows, dtype=float).reshape(len(rows), -1)
 
     model.free = free  # type: ignore[attr-defined]
+    model.ticks_ = 0  # type: ignore[attr-defined]
+    model.observables_ = ()  # type: ignore[attr-defined]
     return model
+
+
+def _recorded(sim, tick: int) -> tuple[tuple[str, ...], list[float]]:
+    """Tick *tick*'s recorded observables, name-sorted so columns line up.
+
+    The simulator has already measured them — ``_observe`` writes one row per
+    signal per tick — so this is a read, not a second pass over the graph.
+    Sorting by name is what makes column ``j`` mean the same thing on every
+    tick and across every candidate.
+    """
+    from skabm.history import TABLE
+
+    if sim.connection_ is None:
+        raise RuntimeError(
+            "summarise=None needs recorded observables, and this rule set "
+            "opened no history. It implies none, so pass a summarise callable."
+        )
+    rows = sim.connection_.execute(
+        f"SELECT signal, level FROM {TABLE} WHERE t = ? ORDER BY signal", [int(tick)]
+    ).fetchall()
+    return tuple(name for name, _ in rows), [float(level) for _, level in rows]
 
 
 def noise_floor(

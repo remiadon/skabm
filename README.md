@@ -1,6 +1,6 @@
 # skabm
 
-![coverage](https://img.shields.io/badge/coverage-97%25-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
 
 **scikit-learn-style agent-based modeling on a knowledge graph.**
 
@@ -28,6 +28,172 @@ structure explicit: agents are RDF nodes, relations are triples, and
 behavior is SPARQL over those triples. What used to be a DataFrame `join`
 becomes graph traversal; what used to be a hard-coded interaction matrix
 becomes a queryable, editable, shareable ontology.
+
+## What skabm gives researchers
+
+You bring behavioural rules and data. Six things come back that you did not write.
+
+**1 — Populations from public data, calibrated two ways.** `skabm.datasets` pulls
+Eurostat IO tables and business demography; `calibration.population` fits the agent
+*rows* to accounting identities and known margins by permutation (so every marginal
+survives exactly); `calibration.parameters` fits the *behavioural parameters* to macro
+series through [black-it](https://github.com/bancaditalia/black-it). Both are sklearn
+estimators, so they compose the sklearn way — the population is calibrated once,
+outside the search loop, and held frozen while θ moves inside it.
+
+**2 — Behaviour is data, not code.** A rule is a SPARQL `string.Template` passed to
+`__init__`, so `get_params()` / `clone()` work and a rule set is serialisable, diffable
+and shareable. Rule *logic* lives in the template, rule *numbers* in `params`. The
+default set covers the full Poledna economy and self-scopes: pass only `Firm=` and
+`Household=` and the rules referencing absent classes are filtered out at fit time.
+
+**3 — The model tells you what to measure.** Mesa makes you declare `model_reporters`;
+Agents.jl makes you declare `adata`/`mdata`; NetLogo's BehaviorSpace makes you list
+metrics. They have to: their rules are opaque host-language functions. skabm's rules are
+SPARQL, so it parses them — through a real algebra, not a regex — and derives the
+`(class, predicate, aggregate)` triples they imply.
+
+```python
+import polars as pl
+
+from skabm.simulation import RDFSimulator
+
+firms = pl.DataFrame({"id": ["firm_0", "firm_1"], "output": [100.0, 120.0],
+                      "price": [1.0, 1.1], "alpha": [10.0, 10.0], "size": [12.0, 13.0],
+                      "margin": [0.1, 0.1], "liquidity": [50.0, 60.0], "profit": [1.0, 1.0]})
+households = pl.DataFrame({"id": ["hh_0", "hh_1"], "wealth": [100.0, 200.0],
+                          "income": [10.0, 12.0], "psi": [0.9, 0.9],
+                          "employer": ["firm_0", "firm_1"]})
+
+sim = RDFSimulator(n_periods=8, random_seed=0).fit(Firm=firms, Household=households)
+
+len(sim.extract().columns)   # 18 per-agent columns, none of them named by hand
+len(sim.observables_)        # 19 aggregates recorded every tick, none of them declared
+sim.history()                # signal | t | level — the telemetry, long
+```
+
+The analysis behind that is machinery, not an interface. It reads the rules to work out
+which predicates the extract projects and which aggregates are worth recording; there is
+no IR object to learn.
+
+Each state predicate is measured under the aggregate the rules themselves apply to it —
+`centralbank_rate` takes `AVG(?price)`, so the price signal is a mean and not a sum —
+and every binding constraint the rules impose becomes a *regime indicator*. The `min`
+in Poledna's eq. 5 means "the share of firms pinned at `alpha * size`" is a series the
+model implies; the `max` in the Taylor rule means the share of quarters at the zero
+lower bound is another. Nobody wrote either down. Both get recorded and plotted.
+
+**What is *not* derivable, and why the line is there.** `SUM(def:output)` follows from the
+rules; calling it *GDP* is a modelling claim. And a **distributional** statistic — a Gini
+coefficient, a percentile ratio, a dispersion measure — is not derivable at all: no rule
+mentions one, and it cannot be composed from class-level scalars either. Both stay with
+you, and both are written the same way, in polars.
+
+What skabm removes is not the statistic but the plumbing. `fit_iter` yields the per-agent
+frame each tick, and that frame is itself derived — `sim.extract()` projects exactly the
+predicates the rules touch plus whatever the populations carried, one UNION branch per
+agent class. Nothing below names a column to collect:
+
+```python continuation
+def gini(column: str) -> pl.Expr:
+    x = pl.col(column).drop_nulls().sort()
+    n = x.len()
+    return 2 * (pl.int_range(1, n + 1, dtype=pl.Int64) * x).sum() / (n * x.sum()) - (n + 1) / n
+
+panel = pl.concat(
+    state.with_columns(t=pl.lit(t))
+    for t, state in enumerate(sim.fit_iter(Firm=firms, Household=households), start=1)
+)
+panel.lazy().group_by("t").agg(gini("wealth")).sort("t").collect()
+```
+
+Written as an expression rather than a function over a Series, Gini composes like any
+other aggregate — inside `group_by().agg()`, inside `over()`, and lazily — so every
+tick is one grouped pass instead of a Python loop.
+[notebooks/extraction.ipynb](notebooks/extraction.ipynb) has the full version, plus the
+telemetry going into JAX.
+
+**4 — The graph has a memory.** Rules that depend on the model's own past say so by
+naming an `ex:sig__<agg>__<Class>__<predicate>` signal. When one does, the fit opens a
+DuckDB history, records every observable each tick (batched — one query per agent class,
+not one per signal), and re-runs `history_rules` over the accumulated series, upserting
+the results back as triples. Poledna's sample-autocorrelation learning is one SPARQL
+`SELECT` plus one polars UDF; a moving average or an RL update is another, with no
+engine change.
+
+**5 — Multi-hop propagation runs to a fixed point.** `infer=` hands recursive CONSTRUCT
+rules to maplib's reasoner, so contagion, transitive closure and reachability propagate
+across the whole graph in one call rather than in hand-tuned sub-tick passes. Every head
+predicate of an inference rule is emergent by construction — nothing gave it to an agent
+— which makes its count a free observable.
+
+**6 — Interventions are first-class.** `model_` is a regular maplib model post-fit.
+Rewire an ownership edge, delete a bank, halve one sector's demand with
+`model_.update(...)`, then continue with `warm_start=True`. Because the IR separates
+structure from state, you can see at a glance which predicates an intervention is safe
+to touch between passes.
+
+### Three things are the frontend
+
+In the order anyone needs them: **`fit_iter()`** for statistics over per-agent state,
+**`history()`** for telemetry a calibrator or JAX takes as-is, and **`model_`** itself for
+interventions and queries. Calibration is where this pays off, because the derived observables *are* the per-tick
+summary statistics a method-of-moments loss consumes — so `simulator_model` needs no
+`summarise` at all:
+
+```python notest
+model = simulator_model(populations, free=["growth_sigma"])
+model(theta, 120, seed)    # (120, D)
+model.observables_         # the D column names, derived and name-sorted
+```
+
+Early stopping plugs into the same call. skabm ships **no criterion** — `flax`'s
+`EarlyStopping` already is that algorithm, with `min_delta`, `patience` and a tested
+notion of improvement — so all skabm provides is the seam and the mechanics:
+
+```python notest
+model = simulator_model(populations, free=["growth_sigma"], stop=settled(patience=10))
+model.ticks_               # 13 of 120: the run had settled
+```
+
+Because a calibrator's `(N, D)` contract is not optional, a stopped run is padded by
+carrying the last row forward — the loss stays finite and the candidate is judged on its
+own numbers. On this model that is 9.2s of candidates down to 1.0s.
+[notebooks/extraction.ipynb](notebooks/extraction.ipynb) §4–5 has it end to end,
+including what flax's "stopped improving" actually means for a stochastic run.
+
+### Two models: the world, and what skabm knows about it
+
+`model_` is the world — agents and nothing else, so a `?s ?p ?o` scan returns what a
+modeller expects and the graph stays portable. `meta_` is the sidecar: the rule IR as
+triples, the behaviour metadata, the signal nodes, the virtualized history, and any UDF a
+history rule calls.
+
+The split is forced, not stylistic. Registering a virtualization silently nulls every
+graph-local aggregate on the model carrying it, and the behaviour rules are built out of
+those aggregates. The price: maplib has no cross-graph join — `GRAPH ?g { … }` is
+unimplemented and a query is scoped to one graph — so combining the two sides means two
+queries and a polars join.
+
+`meta_` is also the extension seam. A researcher bringing their own forecasting module or
+RL update registers it with `Model.add_udf` and names it in SPARQL like any built-in;
+`sac:forecast` has no privileged status. That is what `RDFSimulator(udfs=…)` installs, and
+it is installed on `meta_` precisely because history rules are evaluated there.
+
+### JAX and black-it are ecosystem, not architecture
+
+skabm is JAX-compatible the way it is black-it-compatible: through the telemetry.
+`history()` is a long frame of every recorded observable; pivoted it is a plain numeric
+table, which `polars.DataFrame.to_jax` turns into arrays — `signature()` is what tells you
+the dtypes. Differentiable losses over simulated-versus-observed series, gradient-based
+calibration on summary statistics, and neural surrogates all follow from there.
+
+What skabm deliberately does **not** claim is a differentiable tick. A tick is a sequence
+of SPARQL `DELETE`/`INSERT` round trips, and every one of them materialises the graph and
+breaks the trace. Registering a JAX function as a maplib UDF makes a rule's inner
+arithmetic fast; it does not make `grad` work through a simulation. The honest boundary is
+the telemetry frame.
+
 
 ## Quickstart
 
@@ -121,9 +287,13 @@ estimator to show the seam is generic; **4** hands the behavioural parameters to
 identification test on the rule set. [poledna.py](poledna.py) is the same model
 as a plain script.
 
-Elsewhere, [examples/schelling.py](examples/schelling.py) covers spatial segregation
-and [notebooks/labour_automation.ipynb](notebooks/labour_automation.ipynb)
-occupational mobility under an automation shock — a labour-flow network where
+[notebooks/extraction.ipynb](notebooks/extraction.ipynb) is the other half of the story:
+what to *do* with the derived state — a Gini coefficient as one polars expression, an
+intervention that moves it, and the recorded telemetry handed to JAX.
+
+Elsewhere, [examples/schelling.py](examples/schelling.py) covers spatial segregation and
+[notebooks/labour_automation.ipynb](notebooks/labour_automation.ipynb)
+covers occupational mobility under an automation shock — a labour-flow network where
 the model's central quantity lives on the *edge*.
 
 ## Architecture
@@ -135,8 +305,21 @@ the model's central quantity lives on the *edge*.
 | `skabm.calibration.parameters` | Model calibration: `RDFSimulator` as a black-it `model(theta, N, seed)`, plus the `noise_floor` diagnostic |
 | `skabm.rules` | `map_df` (DataFrame → graph, auto-generated templates) + SPARQL `string.Template` rules + `render` (param substitution) + UDF registrars |
 | `skabm.behaviour` | The rule library, grouped by economic function: `firm`, `household`, `macro`, `bank`, `labour`, `learning` |
+| `skabm.ir` | Rule IR: read/write sets off the SPARQL algebra, the state/structure partition, the per-class schema, and the observables they imply |
 | `skabm.history` | State history in DuckDB, virtualized back into SPARQL (chrontext) — the graph's memory |
 | `skabm.simulation` | `RDFSimulator`: fit/fit_iter over SPARQL update rules |
+
+The hooks are split by what they cost. **Per commit**: `ruff`, every ```python fence in
+this README (so a renamed function fails the commit rather than rotting in the docs), and
+`pytest --testmon` — only the tests that touch what changed, which is ~0.3s on an
+untouched tree and never the full minute. **Per push**: the full suite with the coverage
+gate, plus `pytest --nbmake notebooks/`, which executes the notebooks and so gives the
+long-form documentation the same guarantee the README gets.
+
+`notebooks/poledna` is excluded from that hook — at 3m24 it is four fifths of the runtime
+and the only notebook that reaches the network on a cold cache. Run it in CI or by hand
+with `pytest --nbmake notebooks/poledna`. The others still want `notebooks/data` warm; a
+cold one fetches from Zenodo.
 
 **Two senses of "calibration".** The word means different things in the
 microsimulation and ABM literatures, so `skabm.calibration` is split in two and
@@ -186,7 +369,20 @@ Design decisions, in sklearn vocabulary:
   coefficients, classes) are *structure*, written at fit and edited only
   by explicit intervention; predicates the rules upsert (output, price,
   wealth, ...) are *state*, owned by the rules after t=0. The partition is
-  derivable from the rule strings.
+  not asserted but *derived* — `skabm.ir` reads it off the rules' SPARQL
+  algebra at fit time, and it is what settles the extract's columns and the
+  recorded observables. It is internal: there is no IR object in the API.
+- **Observables are derived, names are declared**: which aggregates a rule
+  set implies follows from the rules; which of them is *GDP* does not.
+  `observables_` is the first; naming and anything distributional is the
+  second, written in polars over `history()` or over the per-agent frame
+  `fit_iter` yields. That line is the one place the framework deliberately
+  stops.
+- **Two models**: `model_` is the world (agents only, portable); `meta_` is
+  the sidecar the simulator keeps about the run — rule IR, behaviour
+  metadata, signal nodes, the virtualized history, and the UDFs a history
+  rule calls. Forced by maplib: a virtualization nulls graph-local
+  aggregates on whichever model carries it.
 - **Randomness is a UDF**: SPARQL has no `RAND`, so skabm registers
   polars-random as SPARQL functions (`rules.register_polars_random`,
   maplib ≥ 0.20.26): `pr:uniform`/`pr:normal`, called in-rule via
@@ -288,8 +484,19 @@ pools, so a population is reproducible only when each `pr.*` sampler (and
   reference implementation the fast kernels are validated against — and
   the home of search-and-matching, activation regimes, and gradient-based
   calibration.
-- **Rule-scoped validation**: each rule knows the predicates it traverses;
-  check coverage against the graph at fit time (eventually SHACL shapes).
+- **Rule-scoped validation**: `skabm.ir` already knows the predicates each
+  rule traverses; the remaining step is checking coverage against the graph
+  at fit time and emitting SHACL shapes from the same read/write sets.
+- **Sensitivity-ranked observables**: 19 recorded series is more than a
+  figure needs. Ranking them by paired-seed ε-shocks (common random numbers,
+  so the difference is signal and not RNG) would order the panels and give
+  calibration a divergence detector for early stopping. Deliberately not
+  built: it costs k+1 simulations per k parameters, and it is only valid
+  once every draw in a tick is provably seeded.
+- **Per-agent signals**: `ex:sig__` records class-level aggregates only, so a
+  rule wanting "this firm versus its own past" has nowhere to put one. The
+  history table and the write-back would carry it unchanged; the signal
+  grammar is what needs widening.
 - **Self-describing export**: serialize `model_` together with its rule
   strings — world and behavior in a single shareable artifact.
 

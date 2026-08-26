@@ -7,8 +7,11 @@ the behaviour templates (``skabm.behaviour.*``) and the simulator
 
 SPARQL rule *logic* lives in ``skabm.behaviour`` (firm.py, household.py,
 macro.py).  This module carries only the plumbing: namespaces, ``render()``,
-``map_df()``, ``register_polars_random()``, ``register_math()``,
-``state_extract()`` (Poledna variant), and ``dbl()``.
+``map_df()``, ``register_polars_random()``, ``register_math()`` and ``dbl()``.
+
+There is no ``state_extract`` here any more: what a model's per-agent frame
+should contain is derivable from the rules themselves, and ``skabm.ir`` derives
+it (``ModelIR.extract``).
 """
 
 from __future__ import annotations
@@ -151,29 +154,4 @@ def map_df(model, df: pl.DataFrame, kind: str) -> None:
     model.map_triples(
         df.select(subject="id").with_columns(object=pl.lit(EX_NS + kind)),
         predicate=_RDF_TYPE,
-    )
-
-
-def state_extract(model) -> pl.DataFrame:
-    """Per-agent state as a sparse wide frame — no aggregation in SPARQL.
-
-    One row per firm (price, output, tech_share), household (wealth), and
-    central bank (policy_rate); the other columns are null.  Summary logic
-    (GDP, price level, ...) belongs in polars expressions on the caller's
-    side.
-
-    This is the Poledna (2023) column set.  Other model families pass their
-    own extract function (e.g. ``skabm.schelling.state_extract``).
-    """
-    return model.query(
-        _PREFIXES
-        + """
-    SELECT ?agent ?price ?output ?tech_share ?wealth ?policy_rate
-    WHERE {
-        { ?agent a ex:Firm ; def:price ?price ; def:output ?output ;
-                 def:tech_share ?tech_share }
-        UNION { ?agent a ex:Household ; def:wealth ?wealth }
-        UNION { ?agent a ex:CentralBank ; def:policy_rate ?policy_rate }
-    }
-    """
     )

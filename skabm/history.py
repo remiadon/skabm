@@ -15,12 +15,13 @@ SQLAlchemy ``Select``s, and one OTTR template per resource.
     sig__SUM__Firm__output     1   4514.3
     sig__AVG__Firm__price      0   1.0
 
-**Nothing here knows what the history is used for.**  Recording is driven by
-``ex:sig__<agg>__<Class>__<predicate>`` IRIs found in the rule text, and what
-gets computed from the recorded series is an ordinary SPARQL SELECT the caller
-supplies (``RDFSimulator(history_rules=...)``), with any polars reduction it
-needs registered as a UDF through the existing ``udfs`` seam.  Sample-
-autocorrelation learning is one such pair of a query and a UDF and lives in
+**Nothing here knows what the history is used for.**  *What* to record is
+decided in ``skabm.ir`` — the signals the rules read back (``ex:sig__`` IRIs)
+plus every observable the rule set implies — and what gets computed from the
+recorded series is an ordinary SPARQL SELECT the caller supplies
+(``RDFSimulator(history_rules=...)``), with any polars reduction it needs
+registered as a UDF through the existing ``udfs`` seam.  Sample-autocorrelation
+learning is one such pair of a query and a UDF and lives in
 ``behaviour.learning``; a moving average, a volatility estimate or a
 reinforcement-learning update would be another, with no change to this file.
 
@@ -54,8 +55,15 @@ def:output ?x }`` returns ``None`` where it returned 4500.0 before — including
 aggregates nested in sub-SELECTs, which ``behaviour.firm.firm_sales`` (four of
 them), ``macro.centralbank_rate`` and ``household.household_wealth_init`` are
 built out of.  So the virtualization never touches the simulation graph:
-``build_learner`` puts it on a small dedicated ``Model`` holding only the signal
-nodes, and ``model_`` keeps working aggregates.
+``attach_history`` puts it on ``RDFSimulator.meta_`` — the sidecar model that
+also carries the rule IR, the behaviour metadata and any UDF a history rule
+calls — and ``model_`` keeps working aggregates.
+
+A consequence worth stating: maplib has no cross-graph join
+(``GRAPH ?g { ... }`` is not implemented, and a query is scoped to one graph),
+so nothing can select over the sidecar and the simulation graph at once.  That
+is why history rules run against ``meta_`` alone and their results are written
+back as ordinary triples.
 
 Rows reach a UDF in database order, *not* time order, so a history rule that
 cares about sequence must say so in SPARQL — ``ORDER BY ?ext ?t`` inside a
@@ -64,8 +72,7 @@ sub-SELECT, which chrontext pushes down.  See ``behaviour.learning``.
 
 from __future__ import annotations
 
-import re
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import polars as pl
 
@@ -84,29 +91,17 @@ RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 # day per tick from this epoch; only the ordering carries meaning.
 EPOCH = "2000-01-01"
 
-# A signal is (aggregate, agent class, predicate) — what to measure and over
-# whom.  The class is part of the key because several kinds share a predicate
+# A signal's key is (aggregate, agent class, predicate) — what to measure and
+# over whom.  The class is part of it because several kinds share a predicate
 # (firms, households and government all carry a price), so a predicate alone
-# would aggregate the wrong population.
-Signal = tuple[str, str, str]
-
+# would aggregate the wrong population.  ``skabm.ir.Observable.signal`` builds
+# the same string from the other direction.
 signal_name = "sig__{}__{}__{}".format
-_SIGNAL_RE = re.compile(r"ex:sig__([A-Za-z]+)__([A-Za-z][A-Za-z0-9]*)__([A-Za-z_]\w*)")
 
 
 def signal_iri(*signal: str) -> str:
     """Full IRI of a signal node; ``ex:`` + the same name used as its DB key."""
     return EX_NS + signal_name(*signal)
-
-
-def parse_signals(rule_texts: Iterable[str]) -> list[Signal]:
-    """The distinct signals a rule set records, read off its ``ex:sig__`` IRIs.
-
-    Purely a function of the rule text — no registry, no decorators — so a rule
-    carries its own data requirements wherever it travels.  Sorted, so recording
-    order (and therefore the tests) are deterministic.
-    """
-    return sorted({m.groups() for t in rule_texts for m in _SIGNAL_RE.finditer(t)})
 
 
 def connect(connection: "str | object | None" = None):
@@ -156,18 +151,21 @@ class StateDB:
         return self.con.execute(sql).pl()
 
 
-def build_learner(con, signals: Sequence[Signal]):
-    """A dedicated ``Model`` carrying the virtualization and nothing else.
+def attach_history(meta, con, signals: Sequence[str]) -> None:
+    """Register the virtualized history onto the simulator's sidecar model.
 
-    Holds the signal nodes and their chrontext intermediate nodes — without
+    Adds the signal nodes and their chrontext intermediate nodes — without
     ``ct:hasExternalId`` (matching the SQL ``id`` column) and ``ct:hasResource``
     (matching the ``resource_sql_map`` key) chrontext returns zero rows and no
-    error.  History rules are queried against this model; the simulation graph
-    never has a virtualization registered on it, for the reason in the module
-    docstring (it would silently null every aggregate the behaviour rules use).
+    error — then registers the virtualization itself.
+
+    *meta* must not be the simulation graph.  Registering a virtualization
+    silently nulls every graph-local aggregate on the model that carries it
+    (see the module docstring), and the behaviour rules are built out of those
+    aggregates.  That constraint is the whole reason ``RDFSimulator`` keeps a
+    separate ``meta_`` model, and it is verified in ``tests/test_history.py``.
     """
     from maplib import (
-        Model,
         Parameter,
         Prefix,
         RDFType,
@@ -180,20 +178,19 @@ def build_learner(con, signals: Sequence[Signal]):
     from sqlalchemy import Column, MetaData, Table, literal_column, select
 
     ct = Prefix(CT_NS)
-    iris = [signal_iri(*s) for s in signals]
+    iris = [EX_NS + name for name in signals]
     ts_nodes = [iri + "__ts" for iri in iris]
 
-    learner = Model()
-    learner.map_triples(
+    meta.map_triples(
         pl.DataFrame({"subject": iris, "object": [EX_NS + "Signal"] * len(iris)}),
         predicate=RDF_TYPE,
     )
     for subjects, predicate, objects in (
         (iris, "hasTimeseries", ts_nodes),
-        (ts_nodes, "hasExternalId", [signal_name(*s) for s in signals]),
+        (ts_nodes, "hasExternalId", list(signals)),
         (ts_nodes, "hasResource", [RESOURCE] * len(iris)),
     ):
-        learner.map_triples(
+        meta.map_triples(
             pl.DataFrame({"subject": subjects, "object": objects}),
             predicate=CT_NS + predicate,
         )
@@ -222,7 +219,7 @@ def build_learner(con, signals: Sequence[Signal]):
         Variable("value"),
         Variable("dp"),
     )
-    learner.add_virtualization(
+    meta.add_virtualization(
         virtualized_database=VirtualizedDatabase(
             database=StateDB(con),
             resource_sql_map={RESOURCE: resource_sql},
@@ -244,34 +241,38 @@ def build_learner(con, signals: Sequence[Signal]):
             )
         },
     )
-    return learner
 
 
-def record(con, model, signals: Sequence[Signal], t: int) -> None:
-    """Measure each signal out of *model* and append it to the table at tick *t*.
+def record(con, model, observables: Sequence, t: int) -> None:
+    """Measure every observable out of *model* and append it to the table at *t*.
 
-    One small SPARQL aggregate per signal, evaluated graph-locally against the
-    tick's fresh state.  A signal whose class is absent from the populations
-    (household income in a Firm-only run) aggregates to nothing and is skipped,
-    so no row is written and the rules referencing it — which anchor on that
-    same absent class — stay inert in step.
+    One SPARQL query **per agent class**, not per signal: ``ir.ModelIR`` batches
+    a class's aggregates into a single projection, which is what makes it
+    affordable to record everything a rule set implies rather than only the two
+    or three aggregates the rules read back.  The result frame's columns are
+    already the table's signal keys, so recording is an unpivot.
+
+    A class absent from the populations (households in a Firm-only run)
+    aggregates to nothing; its nulls are dropped, no row is written, and the
+    rules referencing it — which anchor on that same absent class — stay inert
+    in step.
     """
-    rows = []
-    for agg, klass, predicate in signals:
-        level = model.query(
-            _PREFIXES + f"SELECT ({agg}(?x) AS ?level) "
-            f"WHERE {{ ?a a ex:{klass} ; def:{predicate} ?x }}"
-        )
-        if level.height and level["level"][0] is not None:
-            rows.append(
-                (signal_name(agg, klass, predicate), int(t), float(level["level"][0]))
-            )
+    from skabm.ir import measure_queries
+
+    frames = [model.query(q) for q in measure_queries(observables).values()]
+    rows = [
+        (signal, int(t), float(level))
+        for frame in frames
+        if frame.height
+        for signal, level in zip(frame.columns, frame.row(0))
+        if level is not None
+    ]
     if rows:
         con.executemany(f"INSERT INTO {TABLE} VALUES (?, ?, ?)", rows)
 
 
-def apply_history_rules(model, learner, rules: Sequence[str]) -> None:
-    """Run each history rule against *learner* and upsert its results into *model*.
+def apply_history_rules(model, meta, rules: Sequence[str]) -> None:
+    """Run each history rule against *meta* and upsert its results into *model*.
 
     A rule is a SELECT whose first projected variable is a subject IRI and whose
     remaining variables become ``def:`` predicates on it, exactly as
@@ -282,7 +283,7 @@ def apply_history_rules(model, learner, rules: Sequence[str]) -> None:
     behaviour rule to fall back to its own default.
     """
     for rule in rules:
-        result = learner.query(rule)
+        result = meta.query(rule)
         if not result.height:
             continue
         subject, *columns = result.columns

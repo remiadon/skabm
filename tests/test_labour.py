@@ -31,7 +31,6 @@ from skabm.behaviour.labour import (
     mobility_network,
     occupations,
     reallocate_demand,
-    state_extract,
 )
 from skabm.rules import _PREFIXES
 from skabm.simulation import RDFSimulator
@@ -73,13 +72,13 @@ def world(n: int = 8, employment: float = 1000.0, **overrides):
         update_rules=LABOUR_UPDATE_RULES,
         params={**labour_params, "shock_start": NEVER, **overrides.pop("params", {})},
         udfs=LABOUR_UDFS,
-        state_extract=state_extract,
         **overrides,
     )
     return sim, {"Occupation": occ, "Edge": ring(n), "Clock": clock()}
 
 
 def macro(state: pl.DataFrame) -> dict:
+    """The paper's aggregates, off the IR-derived per-agent extract."""
     e, u, v, ltu = state.select(
         pl.col("employment").sum(),
         pl.col("unemployment").sum(),
@@ -241,12 +240,10 @@ def shock_outcome(edges: pl.DataFrame, n: int) -> tuple[dict, dict]:
         update_rules=LABOUR_UPDATE_RULES,
         params={**labour_params, "shock_start": NEVER},
         udfs=LABOUR_UDFS,
-        state_extract=state_extract,
         n_periods=60,
     )
-    for _ in sim.fit_iter(Occupation=occ, Edge=edges, Clock=clock()):
-        pass
-    before = macro(state_extract(sim.model_))
+    sim.fit(Occupation=occ, Edge=edges, Clock=clock())
+    before = macro(sim.extract())
 
     sim.model_.update(
         _PREFIXES
@@ -262,9 +259,8 @@ def shock_outcome(edges: pl.DataFrame, n: int) -> tuple[dict, dict]:
     sim.set_params(
         n_periods=200, warm_start=True, params={**labour_params, "shock_start": 0.0}
     )
-    for state in sim.fit_iter():
-        pass
-    return before, macro(state)
+    sim.fit()
+    return before, macro(sim.extract())
 
 
 def test_network_structure_decides_what_the_shock_costs():

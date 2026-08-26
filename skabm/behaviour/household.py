@@ -19,6 +19,13 @@ from skabm.rules import _PREFIXES
 # ---------------------------------------------------------------------------
 # Poledna eq. 49.  Income priority: wage > dividend > unemployment benefit.
 # Run once after mapping.  Placeholders: ``dividend_ratio``, ``benefit_replacement``.
+#
+# The ``FILTER NOT EXISTS`` is load-bearing, for the same reason it is in
+# ``firm_ownership``: an init rule is a CONSTRUCT applied through ``insert``,
+# which *adds* triples.  Without the guard, a population that already carries an
+# ``income`` column ends up with two ``def:income`` values on every household —
+# silently, permanently, and double-counted by every aggregate and extract
+# afterwards.  Initial conditions fill in only what the data left undefined.
 
 household_income_init = Template(
     _PREFIXES
@@ -27,6 +34,7 @@ CONSTRUCT { ?hh def:income ?income }
 WHERE {
     { SELECT (AVG(?any_w) AS ?w_avg) WHERE { ?any_f def:w_bar ?any_w } }
     ?hh a ex:Household .
+    FILTER NOT EXISTS { ?hh def:income ?given }
     OPTIONAL { ?hh def:employer ?f . ?f def:w_bar ?w . }
     OPTIONAL { ?hh def:owns ?g . ?g def:profit ?p . }
     BIND(
@@ -68,6 +76,7 @@ WHERE {
 # ---------------------------------------------------------------------------
 # Poledna Section 5.2: D_h(0) = total_deposits * Y_h(0) / sum Y_h(0).
 # Run once after ``household_income_init``.  Placeholder: ``total_deposits``.
+# Guarded like ``household_income_init`` above — see the note there.
 
 household_wealth_init = Template(
     _PREFIXES
@@ -76,6 +85,7 @@ CONSTRUCT { ?hh def:wealth ?wealth }
 WHERE {
     { SELECT (SUM(?any_i) AS ?total) WHERE { ?any_hh def:income ?any_i } }
     ?hh def:income ?income .
+    FILTER NOT EXISTS { ?hh def:wealth ?given }
     BIND($total_deposits * ?income / ?total AS ?wealth)
 }
 """

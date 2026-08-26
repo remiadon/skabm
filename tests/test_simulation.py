@@ -19,7 +19,7 @@ from skabm.behaviour.firm import firm_ownership, firm_produce
 from skabm.behaviour.household import household_income_init
 from skabm.simulation import RDFSimulator
 
-_PREFIX = f"PREFIX def:<{DEF_NS}>"
+_PREFIX = f"PREFIX def:<{DEF_NS}> PREFIX ex:<http://example.net/skabm#>"
 
 
 def local(iri: str) -> str:
@@ -323,6 +323,7 @@ def test_get_params_and_clone():
         "n_periods",
         "warm_start",
         "state_extract",
+        "track",
         "udfs",
         "random_seed",
         "history_rules",
@@ -361,3 +362,74 @@ def test_inject_metadata_adds_triples():
     assert triples.height >= 3  # class-behaviour, type, source
     pvals = {str(p).replace("<", "").replace(">", "") for p in triples["p"]}
     assert "http://example.net/skabm#behaviour" in pvals
+
+
+def test_the_world_and_the_sidecar_stay_separate():
+    """``model_`` is agents; ``meta_`` is everything the simulator knows about them.
+
+    The split is load-bearing rather than tidy: a virtualization registered on a
+    model silently nulls every graph-local aggregate on it, and the behaviour
+    rules are built out of those aggregates.  Keeping it also means a plain
+    ``?s ?p ?o`` over ``model_`` returns the world, so the simulation graph
+    stays portable.
+    """
+    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(Firm=FIRMS, Household=HOUSEHOLDS)
+
+    world = sim.model_.query(f"{_PREFIX} SELECT ?p WHERE {{ ?s ?p ?o }}")["p"]
+    assert world.len() > 0
+    # the rules' own provenance does not live in the world
+    assert not any("behaviour" in p for p in world)
+
+    side = sim.meta_.query(f"{_PREFIX} SELECT ?p WHERE {{ ?s ?p ?o }}")["p"]
+    assert any("behaviour" in p for p in side)  # provenance
+    assert any("chrontext" in p for p in side)  # the virtualized signal nodes
+    # ... and no agent leaked into the sidecar
+    assert sim.meta_.query(f"{_PREFIX} SELECT ?f WHERE {{ ?f a ex:Firm }}").height == 0
+
+
+def test_the_ir_decides_what_the_frontend_shows():
+    """The IR is machinery: it is never exposed, but it settles both frontends.
+
+    ``extract()``'s columns and ``history()``'s signals are both consequences of
+    the state / structure partition, which is why nothing in either has to be
+    named by hand.  Pinned through the public surface, not through ``_ir``.
+    """
+    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(Firm=FIRMS, Household=HOUSEHOLDS)
+    assert not hasattr(sim, "ir_"), "the IR is machinery, not an interface"
+
+    columns = set(sim.extract().columns)
+    assert {"output", "price", "wealth"} <= columns  # state, written by the rules
+    assert {"alpha", "size", "psi"} <= columns  # structure, carried by the data
+
+    signals = {o.signal for o in sim.observables_}
+    assert "sig__SUM__Firm__output" in signals  # state is measured
+    assert not any("__alpha" in s for s in signals)  # structure never moves
+
+
+def test_init_rules_fill_in_rather_than_pile_on():
+    """A CONSTRUCT applied through ``insert`` adds; initial conditions must not.
+
+    Passing a column an init rule also computes used to leave *two* values on
+    every household — no error, and every later aggregate and extract silently
+    double-counted.  The ``FILTER NOT EXISTS`` guards make the data win.
+    """
+    carried = HOUSEHOLDS.with_columns(income=pl.lit(3.0), wealth=pl.lit(7.0))
+    sim = RDFSimulator(params=PARAMS, n_periods=0).fit(Firm=FIRMS, Household=carried)
+
+    for predicate in ("income", "wealth"):
+        rows = sim.model_.query(
+            f"{_PREFIX} SELECT ?h ?v WHERE {{ ?h a ex:Household ; def:{predicate} ?v }}"
+        )
+        assert rows.height == carried.height, f"{predicate} duplicated"
+    # the data won, so the derived values were not written over it
+    wealth = sim.model_.query(f"{_PREFIX} SELECT ?v WHERE {{ ?h def:wealth ?v }}")["v"]
+    assert wealth.to_list() == [7.0] * carried.height
+
+    # and with nothing carried, the init rules still populate both
+    bare = HOUSEHOLDS.drop("income", "wealth", strict=False)
+    fresh = RDFSimulator(params=PARAMS, n_periods=0).fit(Firm=FIRMS, Household=bare)
+    filled = fresh.model_.query(f"{_PREFIX} SELECT ?v WHERE {{ ?h def:wealth ?v }}")
+    # one value per household, summing to the deposits they were meant to share
+    # (a household whose only income would be a loss-making dividend gets zero)
+    assert filled.height == bare.height
+    assert filled["v"].sum() == pytest.approx(PARAMS["total_deposits"])

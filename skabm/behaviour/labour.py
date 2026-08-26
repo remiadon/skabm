@@ -484,30 +484,6 @@ def reallocate_demand(demand, automation):
     return hours * demand.sum() / hours.sum()
 
 
-def state_extract(model) -> pl.DataFrame:
-    """Per-occupation state: the three stocks, the target being chased, and
-    the long-term share of the queue.
-
-    One row per occupation, no aggregation — the unemployment rate, the
-    vacancy rate and the Beveridge curve are polars expressions on the
-    caller's side, same contract as ``rules.state_extract``.
-    """
-    return model.query(
-        _PREFIXES
-        + """
-    SELECT ?agent ?employment ?unemployment ?vacancies ?target_demand ?ltu
-    WHERE {
-        ?agent a ex:Occupation ;
-               def:employment ?employment ;
-               def:unemployment ?unemployment ;
-               def:vacancies ?vacancies ;
-               def:target_demand ?target_demand ;
-               def:ltu ?ltu .
-    }
-    """
-    )
-
-
 def occupations(
     employment: pl.DataFrame, unemployment_rate: float = 0.05
 ) -> pl.DataFrame:

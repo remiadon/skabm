@@ -16,6 +16,7 @@ import polars as pl
 import pytest
 
 from skabm import history as H
+from skabm import ir as IR
 from skabm.behaviour.learning import expect, register_sac, sac_learning
 from skabm.rules import DEF_NS
 from skabm.simulation import RDFSimulator
@@ -56,7 +57,7 @@ def sac_by_numpy(levels) -> float:
 
 @pytest.fixture
 def learner_over():
-    """A learner over a hand-written series, inserted in whatever order is asked."""
+    """A sidecar over a hand-written series, inserted in whatever order is asked."""
 
     def build(levels, order=None):
         con = H.connect(None)
@@ -68,9 +69,12 @@ def learner_over():
                 for t in (range(len(levels)) if order is None else order)
             ],
         )
-        learner = H.build_learner(con, [OUTPUT])
-        register_sac(learner)
-        return learner
+        from maplib import Model
+
+        meta = Model()
+        H.attach_history(meta, con, [H.signal_name(*OUTPUT)])
+        register_sac(meta)
+        return meta
 
     return build
 
@@ -80,28 +84,59 @@ def learner_over():
 # ---------------------------------------------------------------------------
 
 
+PLAIN = f"""{_PREFIX}
+DELETE {{ ?f def:output ?y0 }} INSERT {{ ?f def:output ?y1 }}
+WHERE {{ ?f a ex:Firm ; def:output ?y0 . BIND(?y0 * 1.1e0 AS ?y1) }}"""
+
+
 def test_signals_drive_recording_and_nothing_else_opens_a_database():
-    """Naming ``ex:sig__`` in rule text is the whole opt-in mechanism."""
-    assert H.parse_signals([expect(*OUTPUT, out="g_e")]) == [OUTPUT]
-    assert H.parse_signals(["no signals here"]) == []
+    """Naming ``ex:sig__`` in rule text is the whole opt-in mechanism.
 
-    plain = f"""{_PREFIX}
-    DELETE {{ ?f def:output ?y0 }} INSERT {{ ?f def:output ?y1 }}
-    WHERE {{ ?f a ex:Firm ; def:output ?y0 . BIND(?y0 * 1.1e0 AS ?y1) }}"""
+    The IR reads the dependency off the parsed algebra, so a rule set that names
+    no signal opens no database — which is what keeps the core install free of
+    duckdb.  ``track=True`` is the deliberate override.
+    """
+    assert IR.analyse(
+        [("e", f"{_PREFIX} SELECT * WHERE {{ {expect(*OUTPUT, out='g')} }}")]
+    ).consumed == {OUTPUT}
+    assert IR.analyse([("plain", PLAIN)]).consumed == frozenset()
+
     bare = RDFSimulator(
-        init_rules=(), update_rules=(plain,), history_rules=(), n_periods=2
+        init_rules=(), update_rules=(PLAIN,), history_rules=(), n_periods=2
     ).fit(Firm=FIRMS)
-    assert bare.connection_ is None and bare.learner_ is None
+    assert bare.connection_ is None and bare.virtualized_ is False
+
+    tracked = RDFSimulator(
+        init_rules=(), update_rules=(PLAIN,), history_rules=(), n_periods=2, track=True
+    ).fit(Firm=FIRMS)
+    assert tracked.virtualized_ is False  # nothing consumes history, nothing learns
+    assert set(tracked.history()["signal"]) == {
+        "sig__SUM__Firm__output",
+        "sig__AVG__Firm__output",
+    }
 
 
-def test_recording_covers_every_declared_signal_that_has_a_population():
-    """One row per signal per tick, and an absent class is skipped, not faked."""
-    # Firm-only: the default rule set also declares Household income, which has
-    # no population here and so aggregates to nothing
+def test_recording_covers_every_observable_whose_class_has_a_population():
+    """One row per observable per tick, and an absent class is skipped, not faked.
+
+    Firm-only, so every Household / Government / CentralBank observable the
+    default rule set implies aggregates to nothing and writes no row — while the
+    Firm ones are all recorded, not just the two the rules read back.
+    """
     sim = RDFSimulator(params=PARAMS, n_periods=4).fit(Firm=FIRMS)
     history = H.state_frame(sim.connection_)
+    recorded = set(history["signal"])
 
-    assert set(history["signal"]) == {"sig__SUM__Firm__output", "sig__AVG__Firm__price"}
+    assert {o.signal for o in sim.observables_ if o.klass == "Firm"} == recorded
+    assert recorded > {"sig__SUM__Firm__output", "sig__AVG__Firm__price"}
+    assert not any(s.startswith("sig__SUM__Household") for s in recorded)
+    # the binding constraint nobody declared: alpha is far above output here
+    assert (
+        history.filter(pl.col("signal") == "sig__AVG__Firm__binds__output")[
+            "level"
+        ].to_list()
+        == [0.0] * 5
+    )
     # t=0 is recorded before the first tick, so four ticks leave five rows
     assert history.filter(pl.col("signal") == "sig__SUM__Firm__output").height == 5
 
@@ -219,3 +254,19 @@ def test_expectations_are_learned_end_to_end_from_an_empty_history():
 
     assert len(set(shocked)) > 1
     assert published == pytest.approx(sac_by_numpy(shocked))
+
+
+def test_aggregates_on_the_sidecar_are_the_price_of_the_split():
+    """The gotcha that forces two models, pinned from the other direction.
+
+    ``test_virtualization_is_kept_off_the_simulation_graph`` shows ``model_``
+    keeps working aggregates.  This shows why that took an effort: on the model
+    that *does* carry the virtualization, the same aggregate returns None — no
+    error, no warning.  Anything reading ``meta_`` counts rows in Python.
+    """
+    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(Firm=FIRMS)
+    assert sim.virtualized_
+
+    every = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"
+    assert sim.meta_.query(every).height > 0  # the triples are there
+    assert sim.meta_.query("SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }")["n"][0] is None
