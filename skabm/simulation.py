@@ -93,7 +93,7 @@ def _inject_metadata(model: Model, rules: Sequence) -> None:
     """Insert behaviour provenance triples into *model* for templates that carry metadata.
 
     Covers the ``template.metadata`` injection path used by
-    ``RDFSimulator._fit_iter``.  Used directly by tests so the block is
+    ``RDFSimulator.fit_iter``.  Used directly by tests so the block is
     exercised without a full cold-fit.
     """
     for rule in rules:
@@ -298,7 +298,7 @@ class RDFSimulator(BaseEstimator):
         """Adopt the world, inject provenance, apply init rules.
 
         Runs only on a cold ``fit``/``fit_iter`` (warm_start=False); the tick
-        loop in ``_fit_iter`` is shared by both paths.  *world* is a maplib
+        loop in ``fit_iter`` is shared by both paths.  *world* is a maplib
         ``Model`` — used as given, and advanced in place — or a mapping of
         populations, which ``ottr.map_populations`` puts into a fresh one.
         Everything after is the same either way, which is the point: how the
@@ -348,8 +348,21 @@ class RDFSimulator(BaseEstimator):
             self._attach_history()
             self._observe(t=0)
 
-    def _fit_iter(self, world) -> Iterator[dict]:
-        """Advance the model one tick per iteration, yielding what it measured."""
+    def fit_iter(self, X=None) -> Iterator[dict]:
+        """Take the world, apply init rules, then yield one ``{signal: level}``
+        row after each of the ``n_periods`` ticks, ``t`` included.
+
+        *X* is a maplib ``Model`` — advanced in place, so whatever it already
+        holds is the opening state — or a ``{class: DataFrame}`` mapping that
+        ``ottr.map_populations`` puts into a fresh one.  ``None`` continues
+        ``model_``, which is what ``warm_start`` is for.
+
+        The row is ``observables_``, settled at fit time and so the same width
+        every tick: a whole run is ``pl.DataFrame(sim.fit_iter(...))``.  For
+        per-agent state call ``sim.extract()`` in the loop body — ``model_`` is
+        current at each yield, and a loop that does not need the frame pays
+        nothing.
+        """
         if self.random_seed is not None:
             pr.set_random_seed(self.random_seed)
         merged = {
@@ -371,9 +384,9 @@ class RDFSimulator(BaseEstimator):
             )
         )
         if self.warm_start:
-            if isinstance(world, Model):
-                self.model_ = world
-            elif world:
+            if isinstance(X, Model):
+                self.model_ = X
+            elif X:
                 raise ValueError(
                     "warm_start=True continues a model that already exists; pass a "
                     "maplib Model to continue that one, or drop warm_start to map "
@@ -397,7 +410,7 @@ class RDFSimulator(BaseEstimator):
                 self._tick += 1
                 self._observe(t=self._tick)
         else:
-            self._cold_start(world, init_rules, update_rules, infer_rules)
+            self._cold_start(X, init_rules, update_rules, infer_rules)
         for _ in range(self.n_periods):
             for rule in update_rules:
                 self.model_.update(rule)
@@ -530,25 +543,8 @@ class RDFSimulator(BaseEstimator):
             )
         return state_frame(self.connection_)
 
-    def fit_iter(self, X=None) -> Iterator[dict]:
-        """Take the world, apply init rules, then yield one ``{signal: level}``
-        row after each of the ``n_periods`` ticks, ``t`` included.
-
-        *X* is a maplib ``Model`` — advanced in place, so whatever it already
-        holds is the opening state — or a ``{class: DataFrame}`` mapping that
-        ``ottr.map_populations`` puts into a fresh one.  ``None`` continues
-        ``model_``, which is what ``warm_start`` is for.
-
-        The row is ``observables_``, settled at fit time and so the same width
-        every tick: a whole run is ``pl.DataFrame(sim.fit_iter(...))``.  For
-        per-agent state call ``sim.extract()`` in the loop body — ``model_`` is
-        current at each yield, and a loop that does not need the frame pays
-        nothing.
-        """
-        yield from self._fit_iter(X)
-
     def fit(self, X=None) -> "RDFSimulator":
         """Take the world, apply init rules, run all ticks; return self."""
-        for _ in self._fit_iter(X):
+        for _ in self.fit_iter(X):
             pass
         return self

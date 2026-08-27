@@ -309,18 +309,6 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
         self.seed = seed
         self.verbose = verbose
 
-    def get_params(self, deep: bool = True) -> dict:
-        return {  # pragma: no cover
-            "constraints": self.constraints,
-            "population_size": self.population_size,
-            "n_generations": self.n_generations,
-            "mutation_rate": self.mutation_rate,
-            "elite_frac": self.elite_frac,
-            "tournament_size": self.tournament_size,
-            "seed": self.seed,
-            "verbose": self.verbose,
-        }
-
     def fit(self, X: pl.DataFrame, y=None) -> "GeneticConstraintCalibration":
         """Permute rows of X to minimise constraint energy.  Populates samplers_."""
         constraints = _de_constraints(self.constraints)
@@ -340,42 +328,13 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
                 pl.col(c).gather(pl.Series(genome[c])) for c in free_cols
             )
 
-        n_free = max(1, len(free_cols))
+        rng = np.random.default_rng(self.seed)
 
-        # Pre-generate all random indices via polars (no numpy RNG).
-        # OX1 is called len(free_cols) times per genome; tournament twice per genome.
-        budget = self.n_generations * self.population_size
-        _rints = lambda n, hi, s: (  # noqa: E731
-            pl.int_range(hi, eager=True)
-            .sample(n, with_replacement=True, seed=s)
-            .to_numpy()
-        )
-        ab_pool = _rints(budget * 2 * n_free, n_agents, self.seed)
-        # 2 tournament calls per (genome, free_col): each parent per col is a separate call
-        tour_pool = _rints(
-            budget * self.tournament_size * 2 * n_free,
-            self.population_size,
-            self.seed + 1,
-        )
-        swap_pool = _rints(budget * n_swaps * 2 * n_free, n_agents, self.seed + 2)
-        ab_ptr = tour_ptr = swap_ptr = 0
-
-        def random_genome(idx: int) -> dict:
-            return {
-                c: pl.int_range(n_agents, eager=True)
-                .sample(
-                    n_agents,
-                    with_replacement=False,
-                    seed=self.seed + idx * len(free_cols) + j,
-                )
-                .to_numpy()
-                for j, c in enumerate(free_cols)
-            }
+        def random_genome() -> dict:
+            return {c: rng.permutation(n_agents) for c in free_cols}
 
         def ox1(p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
-            nonlocal ab_ptr
-            a, b = sorted(ab_pool[ab_ptr : ab_ptr + 2])
-            ab_ptr += 2
+            a, b = sorted(rng.integers(n_agents, size=2))
             child = np.full(n_agents, -1, dtype=np.intp)
             child[a:b] = p1[a:b]
             in_slice = set(child[a:b].tolist())
@@ -385,26 +344,19 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
             return child
 
         def mutate(g: dict) -> dict:
-            nonlocal swap_ptr
             out = {}
             for c in free_cols:
                 perm = g[c].copy()
-                for _ in range(n_swaps):
-                    i, j = swap_pool[swap_ptr], swap_pool[swap_ptr + 1]
-                    swap_ptr += 2
+                for i, j in rng.integers(n_agents, size=(n_swaps, 2)):
                     perm[i], perm[j] = perm[j], perm[i]
                 out[c] = perm
             return out
 
         def tournament(scored: list) -> dict:
-            nonlocal tour_ptr
-            indices = tour_pool[tour_ptr : tour_ptr + self.tournament_size]
-            tour_ptr += self.tournament_size
-            return min([scored[k % len(scored)] for k in indices], key=lambda x: x[0])[
-                1
-            ]
+            picks = rng.integers(len(scored), size=self.tournament_size)
+            return min((scored[k] for k in picks), key=lambda x: x[0])[1]
 
-        initial = [random_genome(i) for i in range(self.population_size)]
+        initial = [random_genome() for _ in range(self.population_size)]
         scored = [(energy(apply_genome(g), constraints), g) for g in initial]
         scored.sort(key=lambda x: x[0])
         best_energy_val, best_genome = scored[0]
@@ -482,16 +434,6 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
         self.cooling = cooling
         self.seed = seed
         self.verbose = verbose
-
-    def get_params(self, deep: bool = True) -> dict:
-        return {  # pragma: no cover
-            "constraints": self.constraints,
-            "n_steps": self.n_steps,
-            "t0": self.t0,
-            "cooling": self.cooling,
-            "seed": self.seed,
-            "verbose": self.verbose,
-        }
 
     def fit(self, X: pl.DataFrame, y=None) -> "MetropolisHastingsConstraintCalibration":
         """Run MH on X using X[col] as the proposal pool.  Populates samplers_."""

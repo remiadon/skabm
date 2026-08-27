@@ -224,10 +224,10 @@ imposable.
 
 | Where to look next | |
 |---|---|
-| [notebooks/poledna](notebooks/poledna/poledna.ipynb) | the model in five chapters on one population: **0** calibration, **1** the seven-rule quarter plus an intervention, **2** a banking layer propagating to a fixed point through `infer=`, **3** learned expectations over a virtualized history, **4** black-it parameter calibration read as an identification test. [poledna.py](poledna.py) is the same model as a script |
+| [notebooks/poledna](notebooks/poledna/poledna.ipynb) | the model in five chapters on one population: **0** calibration, **1** the seven-rule quarter plus an intervention, **2** a banking layer propagating to a fixed point through `infer=`, **3** learned expectations over a virtualized history, **4** black-it parameter calibration read as an identification test. |
 | [notebooks/extraction](notebooks/extraction.ipynb) | what to *do* with derived state: Gini as one polars expression, an intervention that moves it, telemetry into JAX |
 | [notebooks/labour_automation](notebooks/labour_automation.ipynb) | occupational mobility under an automation shock — a labour-flow network whose central quantity lives on the *edge* |
-| [examples/schelling.py](examples/schelling.py) | spatial segregation, lattice and continuous-geometry variants |
+| [examples/schelling.py](examples/schelling.py) | spatial segregation on the lattice; the continuous-geometry swap is covered by `tests/test_schelling.py` |
 
 ## Architecture
 

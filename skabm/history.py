@@ -56,11 +56,6 @@ EPOCH = "2000-01-01"
 signal_name = "sig__{}__{}__{}".format
 
 
-def signal_iri(*signal: str) -> str:
-    """Full IRI of a signal node; ``ex:`` + the same name used as its DB key."""
-    return EX_NS + signal_name(*signal)
-
-
 def connect(connection: "str | object | None" = None):
     """Open (or adopt) the DuckDB connection holding the state history.
 

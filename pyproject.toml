@@ -3,7 +3,6 @@ name = 'skabm'
 dynamic = ["version"]
 dependencies = [
     "eurostat>=1.1.1",
-    "httpx>=0.28.1",
     "maplib>=0.20.26",
     "numpy>=2.4.6",
     "polars>=1.42.1",
@@ -62,6 +61,7 @@ maplib = { path = "maplib-0.20.29-cp310-abi3-macosx_11_0_arm64.whl", marker = "s
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest-cov>=7.1.0",
     "ipython>=9.15.0",
     "prek>=0.4.6",

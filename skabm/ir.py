@@ -5,7 +5,7 @@ A behaviour rule is a string until something reads it.  This module reads it thr
 real SPARQL algebra (``rdflib``), not a regex, and answers three questions no ABM
 framework can normally answer without being told: which predicates each rule reads and
 writes (``RuleIR.reads`` / ``writes``, keyed by ``(class, predicate)``); what follows at
-model level (``state`` is what the rules own after t=0, ``structure`` everything they
+model level (``writes`` is what the rules own after t=0, ``structure`` everything they
 read but never write — links, coefficients, the knobs a parameter search moves); and
 what should therefore be measured (``observables()``, using the aggregate the rules
 themselves apply to a predicate, falling back to SUM+AVG where none does).
@@ -35,6 +35,7 @@ import importlib
 import pkgutil
 import re
 from dataclasses import dataclass
+from functools import cache
 from string import Template
 from typing import Iterable, Iterator, Sequence
 
@@ -380,24 +381,11 @@ class ModelIR:
 
     @property
     def writes(self) -> frozenset:
-        return (
-            frozenset().union(*(r.writes for r in self.rules))
-            if self.rules
-            else frozenset()
-        )
+        return frozenset().union(*(r.writes for r in self.rules))
 
     @property
     def reads(self) -> frozenset:
-        return (
-            frozenset().union(*(r.reads for r in self.rules))
-            if self.rules
-            else frozenset()
-        )
-
-    @property
-    def state(self) -> frozenset:
-        """Predicates the rules own after t=0 — the carried array."""
-        return self.writes
+        return frozenset().union(*(r.reads for r in self.rules))
 
     @property
     def structure(self) -> frozenset:
@@ -413,12 +401,7 @@ class ModelIR:
         the extract, where a link column is exactly what a relational plot
         needs.
         """
-        rule_links = (
-            frozenset().union(*(r.links for r in self.rules))
-            if self.rules
-            else frozenset()
-        )
-        return rule_links | self.graph_links
+        return frozenset().union(*(r.links for r in self.rules)) | self.graph_links
 
     @property
     def consumed(self) -> frozenset:
@@ -429,11 +412,7 @@ class ModelIR:
         recorded because it is worth looking at.  A rule set consuming nothing
         needs no database.
         """
-        return (
-            frozenset().union(*(r.consumes for r in self.rules))
-            if self.rules
-            else frozenset()
-        )
+        return frozenset().union(*(r.consumes for r in self.rules))
 
     @property
     def known(self) -> frozenset:
@@ -467,7 +446,7 @@ class ModelIR:
                 chosen.setdefault((klass, predicate), set()).add(agg)
 
         found = []
-        for klass, predicate in sorted(self.state - self.links):
+        for klass, predicate in sorted(self.writes - self.links):
             for agg in sorted(chosen.get((klass, predicate)) or _DEFAULT_AGGREGATES):
                 found.append(
                     Observable(
@@ -510,10 +489,6 @@ class ModelIR:
         return tuple(found)
 
     # -- queries -----------------------------------------------------------
-
-    def measure_queries(self, observables: Sequence[Observable] = ()) -> dict:
-        """``measure_queries`` over this IR's own observables by default."""
-        return measure_queries(observables or self.observables())
 
     def extract_query(self) -> str:
         """Per-agent state, one UNION branch per class — the generic extract.
@@ -626,18 +601,15 @@ def rule_name(rule, index: int) -> str:
     return declared or _shipped().get(id(rule)) or f"rule_{index}"
 
 
-def _shipped(_cache: dict = {}) -> dict:  # noqa: B006 - deliberate memo
+@cache
+def _shipped() -> dict:
     """``id(template) -> module-level name`` for every rule in skabm.behaviour."""
-    if not _cache:
-        import skabm.behaviour as behaviour
+    import skabm.behaviour as behaviour
 
-        for module in pkgutil.iter_modules(behaviour.__path__):
-            found = importlib.import_module(f"skabm.behaviour.{module.name}")
-            _cache.update(
-                {
-                    id(v): k
-                    for k, v in vars(found).items()
-                    if isinstance(v, (Template, str))
-                }
-            )
-    return _cache
+    shipped: dict = {}
+    for module in pkgutil.iter_modules(behaviour.__path__):
+        found = importlib.import_module(f"skabm.behaviour.{module.name}")
+        shipped.update(
+            {id(v): k for k, v in vars(found).items() if isinstance(v, (Template, str))}
+        )
+    return shipped
