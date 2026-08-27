@@ -1,44 +1,32 @@
 """
 Schelling's spatial segregation model on the Poledna machinery.
 
-A stress test of ``skabm.rules`` + ``RDFSimulator``: same ``Template`` rules,
-same ``map_df`` mapping, same ``fit_iter`` loop, a different model family.
-Nothing in ``RDFSimulator`` knows about space.
+A stress test of ``skabm.rules`` + ``RDFSimulator``: same ``Template`` rules, same
+mapping, same ``fit_iter`` loop, a different model family.  Nothing in ``RDFSimulator``
+knows about space, because **the grid is a population, not a module**::
 
-**The grid is a population, not a module.**  A cell is just another agent
-class::
+    sim.fit({"Cell": cells, "Person": persons})
 
-    sim.fit(Cell=cells, Person=persons)
+``Cell`` carries ``x``/``y``, ``Person`` carries ``group`` and a ``location`` link into
+a cell.  Occupancy is the *absence* of an inbound ``def:location`` edge (``FILTER NOT
+EXISTS``), and the Moore neighbourhood is a ``def:neighbor`` relation CONSTRUCTed once
+at init — topology as an init rule, like ``firm_ownership``.
 
-``Cell`` carries ``x``/``y``; ``Person`` carries ``group`` and a
-``location`` link into a cell.  Occupancy is the *absence* of an inbound
-``def:location`` edge (``FILTER NOT EXISTS``), and the Moore neighbourhood
-is a ``def:neighbor`` relation CONSTRUCTed once at init — topology as an
-init rule, like ``rules.FIRM_OWNERSHIP``.
+Two things Schelling needs that pure SPARQL does not give.  **Randomness**: the
+``pr:uniform`` UDF, called in-rule via ``BIND``, with which ``SETTLE`` draws occupancy
+and group and ``DRAW`` materialises a fresh ``def:draw`` per agent each tick;
+``random_seed=`` pins the run.  **One-to-one matching**: ``RELOCATE`` works around
+SPARQL's lack of an assignment operator with a *rank join* — movers ranked by
+``def:draw``, vacant cells by theirs, rank *k* paired with rank *k*.  Uniform random
+matching in one batch, quadratic in movers; fine at 10^3, not at 10^6.
 
-Two things Schelling needs that pure SPARQL does not give:
+Deliberate differences from the AMBER reference: activation is simultaneous
+(``RELOCATE``'s pool is the cells vacant at the *start* of the tick), there is no move
+cap, and ``share_similar`` is pre-move, so tick *t*'s index describes the configuration
+movers reacted to.
 
-* **Randomness.**  ``pr:uniform`` UDF (polars-random behind
-  ``rules.register_polars_random``, maplib >= 0.20.26) called in-rule via
-  ``BIND(pr:uniform(0e0, 1e0) AS ?u)``.  ``SETTLE`` draws occupancy and group;
-  ``DRAW`` materialises a fresh ``def:draw`` per agent each tick.
-  ``RDFSimulator(random_seed=...)`` pins the whole run.
-* **One-to-one matching.**  ``RELOCATE`` works around SPARQL's lack of an
-  assignment operator with a **rank join**: movers ranked by ``def:draw``,
-  vacant cells by theirs, rank *k* paired with rank *k* — uniform random
-  matching in one batch.  Quadratic in movers; fine at 10^3, not at 10^6.
-
-Deliberate differences vs the AMBER reference:
-
-* **Simultaneous activation.**  ``RELOCATE`` is one batch upsert: target pool
-  is cells vacant at the *start* of the tick.
-* **No move cap.**  Every unhappy agent that finds a partner moves.
-* **share_similar is pre-move.**  ``HAPPINESS`` runs before ``RELOCATE``; the
-  segregation index for tick *t* describes the configuration movers reacted to.
-
-Everything is xsd:double — coordinates included.  SPARQL BGPs join on RDF
-*terms*, not values, so an ``xsd:integer`` from ``?x + ?dx`` would fail to
-match an ``xsd:long`` stored by maplib.  One numeric type sidesteps the bug.
+Everything is xsd:double, coordinates included: SPARQL BGPs join on RDF *terms*, not
+values, so an ``xsd:integer`` from ``?x + ?dx`` would never match a stored ``xsd:long``.
 """
 
 from string import Template
@@ -249,8 +237,8 @@ def state_extract(model) -> pl.DataFrame:
 # Cost: unlike GRID_NEIGHBORHOOD's O(8N) VALUES join this is an O(N^2) pair
 # scan (no spatial index without `geof:`), fine for hundreds of locations,
 # not for a country of them.  The geometry is carried as a plain string under
-# `def:geometry` because `map_df`/`map_default` type every column by its
-# polars dtype (String -> xsd:string); a fully conformant graph would tag the
+# `def:geometry` because `ottr.cell_template` declares it `xsd:string`, as
+# every string column is typed; a fully conformant graph would tag the
 # literal `geo:wktLiteral` and link it via `geo:asWKT`, a mapping detail
 # orthogonal to the dynamics.
 GEO_NEIGHBORHOOD = Template(

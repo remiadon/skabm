@@ -1,60 +1,32 @@
 """
 Population calibration — agent-population samplers and constraint calibrators.
 
-*Population* calibration finds a synthetic micro-level population whose
-aggregate statistics reproduce observed macro-level facts: IO-table
-coefficients, census shares, Basel III ratios.  There is no training set, no
-label, and no generalisation error — the goal is internal consistency of a
-simulated economy, not predictive accuracy on held-out data.  This is Poledna
-et al. (2023) §4's sense of the word, and survey sampling's (Deville & Särndal
-1992, *calibration estimators*).
+*Population* calibration finds a synthetic micro-level population whose aggregate
+statistics reproduce observed macro facts: IO-table coefficients, census shares,
+Basel III ratios.  There is no training set, no label and no generalisation error —
+the goal is internal consistency of a simulated economy, not predictive accuracy.
+This is Poledna et al. (2023) §4's sense of the word, and survey sampling's
+(Deville & Särndal 1992, *calibration estimators*).
 
-It is **not** the ABM literature's more common sense — fitting behavioural
-parameters so the model reproduces macro time series.  That is
-``skabm.calibration.parameters``, and the two compose: a population is fitted
-once, *outside* any parameter search, and held fixed while ``θ`` moves.
+It is **not** the ABM literature's more common sense, fitting behavioural parameters
+so the model reproduces macro time series; that is ``skabm.calibration.parameters``,
+and the two compose — a population is fitted once, *outside* any parameter search,
+and held fixed while ``θ`` moves.
 
-The estimators here share the sklearn interface for interoperability with
-pipelines, parameter search, and cross-validation scaffolding.  score() returns
--energy (higher = better fit to constraints), which gives a meaningful
-optimisation signal even though it is not a classification or regression metric.
+The estimators share the sklearn interface, so pipelines and parameter search work on
+them.  ``score()`` returns -energy (higher is a better fit to the constraints), a
+meaningful optimisation signal even though it is neither a classification nor a
+regression metric.  ``transform(X_new)`` keeps the anchor column — the first column of
+the ``X`` passed to ``fit`` — and conditionally resamples each free column from
+``samplers_`` within each anchor value, so it works at any size.
 
-Public API
+Constraints are ``Sequence[tuple[pl.Expr, float | pl.Expr]]``, and multi-column ones
+are the point: GA preserves each column's multiset exactly, MH preserves its
+distribution approximately.  A single-column constraint is accepted with a warning,
+since it can erode the marginal ``make_dataset`` set.
 
-Fitted attributes (both calibrators)
--------------------------------------
-    samplers_ : dict[str, pl.Series]
-        Optimal per-column value pools, including the anchor column.
-        Passing samplers_ to make_dataset() generates new populations that
-        reflect the learned marginal distributions (joint structure is
-        approximate; use transform() for exact conditional structure).
-
-    anchor_col_ : str
-        The first column of X passed to fit() — kept from X in transform().
-
-    best_energy_ : float
-        Energy achieved at the end of optimisation.
-
-transform() semantics
----------------------
-    transform(X_new) keeps the anchor column from X_new unchanged and
-    conditionally resamples each free column from samplers_: for each unique
-    anchor value v, free-column values are drawn (with replacement) from the
-    subset of the learned pool where anchor == v.  Works for any X size.
-
-Constraints
------------
-    Sequence[tuple[pl.Expr, float | pl.Expr]]
-
-    Single-column constraints are accepted with a UserWarning (may erode the
-    marginal distribution set by make_dataset).  Multi-column constraints are
-    the primary use case: GA preserves per-column multisets exactly; MH
-    preserves per-column distributions approximately.
-
-sklearn compatibility note
---------------------------
-    pl.Expr objects are serialised internally via pl.Expr.meta.serialize /
-    pl.Expr.deserialize so that get_params() / clone() work correctly.
+``pl.Expr`` objects are serialised internally through ``pl.Expr.meta.serialize`` so
+that ``get_params()`` / ``clone()`` work.
 """
 
 from __future__ import annotations
@@ -137,13 +109,6 @@ def _is_derived(col: str, entry, sampler_keys: set[str]) -> bool:
     if not isinstance(entry, pl.Expr):
         return False
     return bool(set(entry.meta.root_names()) & (sampler_keys - {col}))
-
-
-def _split(samplers: dict) -> tuple[dict, list]:
-    keys = set(samplers.keys())
-    mutable = {k: v for k, v in samplers.items() if not _is_derived(k, v, keys)}
-    derived = [(k, v) for k, v in samplers.items() if _is_derived(k, v, keys)]
-    return mutable, derived
 
 
 def energy(df: pl.DataFrame, constraints: Sequence[tuple]) -> float:
@@ -281,7 +246,9 @@ def make_dataset(
     -------
     pl.DataFrame with a leading ``id`` column (UInt32, 0-based).
     """
-    mutable, derived = _split(samplers)
+    keys = set(samplers.keys())
+    mutable = {k: v for k, v in samplers.items() if not _is_derived(k, v, keys)}
+    derived = [(k, v) for k, v in samplers.items() if _is_derived(k, v, keys)]
     col_series = {
         col: _pool(entry).sample(n_agents, with_replacement=True, seed=seed + i)
         for i, (col, entry) in enumerate(mutable.items())

@@ -58,20 +58,16 @@ sim = RDFSimulator(
 )
 
 t0 = time()
-for t, state in enumerate(sim.fit_iter(Cell=cells)):
-    summary = state.select(
-        pl.lit(t).alias("t"),
-        # AMBER's get_segregation()
-        pl.col("share_similar").mean().round(3).alias("segregation"),
-        (pl.col("share_similar") < SCHELLING_PARAMS["want_similar"])
-        .sum()
-        .alias("unhappy"),
-    )
-    print(summary)
+for row in sim.fit_iter({"Cell": cells}):
+    t = row["t"]
+    # AMBER's get_segregation() is yielded; the unhappy count is a property of
+    # the distribution, so it comes off the per-agent frame.
+    unhappy = (sim.extract()["share_similar"] < SCHELLING_PARAMS["want_similar"]).sum()
+    print(t, round(row["sig__AVG__Person__share_similar"], 3), unhappy)
     # RDFSimulator has no convergence stop — it runs exactly n_periods.  The
     # generator is where that belongs anyway: the caller owns the criterion.
-    if summary["unhappy"][0] == 0:
+    if unhappy == 0:
         print(f"converged at t={t}")
         break
 t1 = time()
-print(f"{t + 1} ticks in {t1 - t0:.2f}s ({(t1 - t0) / (t + 1):.3f} s/tick)")
+print(f"{t} ticks in {t1 - t0:.2f}s ({(t1 - t0) / t:.3f} s/tick)")

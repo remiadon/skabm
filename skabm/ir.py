@@ -1,54 +1,32 @@
 """
 Rule IR: what the SPARQL says about itself.
 
-A behaviour rule is a string until something reads it.  This module reads it —
-through a real SPARQL algebra (``rdflib``), not a regex — and answers three
-questions no ABM framework can normally answer without being told:
+A behaviour rule is a string until something reads it.  This module reads it through a
+real SPARQL algebra (``rdflib``), not a regex, and answers three questions no ABM
+framework can normally answer without being told: which predicates each rule reads and
+writes (``RuleIR.reads`` / ``writes``, keyed by ``(class, predicate)``); what follows at
+model level (``state`` is what the rules own after t=0, ``structure`` everything they
+read but never write — links, coefficients, the knobs a parameter search moves); and
+what should therefore be measured (``observables()``, using the aggregate the rules
+themselves apply to a predicate, falling back to SUM+AVG where none does).
 
-1. **Which predicates does each rule read, and which does it write?**
-   ``RuleIR.reads`` / ``RuleIR.writes``, keyed by ``(agent class, predicate)``.
-2. **What follows from that at model level?**  The ``state`` / ``structure``
-   partition ``simulation``'s docstring has always asserted was derivable:
-   state is what the rules own after t=0, structure is everything they read
-   but never write — links, coefficients, and the calibration knobs a
-   parameter search moves.
-3. **What should therefore be measured?**  ``observables()`` turns the above
-   into ``(aggregate, class, name)`` signals, using the aggregate function the
-   rules *themselves* apply to a predicate where one exists
-   (``centralbank_rate`` takes ``AVG(?price)``, so the price signal is an
-   average, not a sum) and falling back to SUM+AVG where none does.
+**Regimes.**  A rule of the form ``BIND(IF(a < b, a, b) AS ?v)`` writing ``?v`` to
+predicate ``P`` has a binding constraint: post-tick, the agents where ``P = b`` are the
+constrained ones.  When ``b`` reconstructs into an expression over predicates alone
+(``?alpha * ?size`` does, ``pr:normal(...)`` does not) that share becomes an observable
+nobody wrote down.  Deliberately conservative: a branch touching a random draw, an
+aggregate or another class's predicate is dropped rather than guessed at.
 
-``signature()`` — the per-class column schema — exists for one concrete reason:
-it is what tells you the ``dtypes`` of a frame on its way to
-``polars.DataFrame.to_jax``.  That is the whole extent of the JAX story here.
-skabm is *compatible* with JAX the way it is compatible with black-it: the
-telemetry comes out as a plain numeric frame and the ecosystem takes it from
-there.  There is no traced tick and no fused kernel, because a tick is a
-sequence of graph round-trips and no UDF can make that differentiable.  This
-module does not import jax and does not plan to.
+**Scope, honestly.**  Class membership is resolved from ``?v a ex:Class`` within each
+basic graph pattern, falling back to the rule-wide map.  A predicate hung on a variable
+never typed — a link target reached only through another agent, as in the Schelling
+lattice — has no class and is skipped, which is why a genuinely relational model still
+wants ``RDFSimulator(state_extract=...)``.
 
-**Regimes.**  A rule of the form ``BIND(IF(a < b, a, b) AS ?v)`` that writes
-``?v`` to predicate ``P`` has a *binding constraint*: post-tick, the agents
-where ``P = b`` are the constrained ones.  When ``b`` reconstructs into an
-expression over predicates alone — ``?alpha * ?size`` does, ``pr:normal(...)``
-does not — that share becomes an observable nobody wrote down.  This is
-deliberately conservative: a branch touching a random draw, an aggregate or
-another class's predicate is dropped rather than guessed at.
-
-**Scope, honestly.**  Class membership is resolved from ``?v a ex:Class``
-within each basic graph pattern, falling back to the rule-wide map.  A
-predicate hung on a variable that is never typed (a link target reached only
-through another agent, as in the Schelling lattice) has no class and is
-skipped — which is why a model with a genuinely relational state still wants a
-hand-written extract, and why ``RDFSimulator(state_extract=...)`` remains a
-parameter.
-
-**What this module deliberately does not do.**  It proposes *scalar* aggregates
-per agent class.  A distributional statistic — a Gini coefficient, a percentile
-ratio, a dispersion measure — is not derivable from a rule, because no rule
-mentions one, and it cannot be composed from class-level scalars either.  Those
-belong to the caller, computed with polars over the per-agent frame that
-``fit_iter`` yields each tick.  See ``examples/gini.py``.
+**And what it does not do.**  It proposes *scalar* aggregates per agent class; a
+distributional statistic is not derivable from a rule and cannot be composed from
+class-level scalars, so it belongs to the caller, in polars over ``extract()``.
+``signature()`` gives the dtypes for ``polars.DataFrame.to_jax`` — the whole JAX story.
 """
 
 from __future__ import annotations
@@ -102,20 +80,6 @@ _SIGNAL_RE = re.compile(r"^sig__([A-Za-z]+)__([A-Za-z][A-Za-z0-9]*)__([A-Za-z_]\
 # ---------------------------------------------------------------------------
 # SPARQL algebra front end
 # ---------------------------------------------------------------------------
-
-
-def _algebra(text: str) -> list:
-    """Parse a rule to a list of algebra roots, whichever form it takes.
-
-    Update rules (DELETE/INSERT) parse as an update; CONSTRUCT and SELECT rules
-    do not, and fall through to the query parser.  Trying both is cheaper than
-    sniffing the text, and a rule that parses as neither raises here — loudly,
-    at fit time, which is when a malformed rule should be found.
-    """
-    try:
-        return translateUpdate(parseUpdate(text)).algebra
-    except Exception:  # noqa: BLE001 - not an update; try the query grammar
-        return [translateQuery(parseQuery(text)).algebra]
 
 
 def _nodes(node) -> Iterator[CompValue]:
@@ -311,7 +275,13 @@ def _regimes(algebra, bound: dict, written: dict) -> set:
 
 def analyse_rule(text: str, name: str) -> RuleIR:
     """Read one rendered rule's data flow off its SPARQL algebra."""
-    algebra = _algebra(text)
+    # update rules (DELETE/INSERT) parse as an update; CONSTRUCT and SELECT do
+    # not and fall through to the query grammar.  Trying both is cheaper than
+    # sniffing, and a rule that parses as neither raises here — at fit time
+    try:
+        algebra = translateUpdate(parseUpdate(text)).algebra
+    except Exception:  # noqa: BLE001 - not an update; try the query grammar
+        algebra = [translateQuery(parseQuery(text)).algebra]
     blocks = list(_triple_blocks(algebra))
     types = _class_map(blocks)
     reads, writes, bound, orphans, links = _read_write_sets(blocks, types)

@@ -88,7 +88,7 @@ def test_bank_depositors_maps():
         n_periods=0,
         random_seed=0,
     )
-    sim.fit(Household=households, Bank=banks)
+    sim.fit({"Household": households, "Bank": banks})
 
     holds = sim.model_.query(
         """
@@ -150,7 +150,7 @@ def test_bank_capital_updates():
         n_periods=1,
         random_seed=0,
     )
-    sim.fit(Household=households, Bank=banks)
+    sim.fit({"Household": households, "Bank": banks})
 
     cr = sim.model_.query(
         """
@@ -212,7 +212,7 @@ def test_infer_called():
         n_periods=1,
         random_seed=0,
     )
-    sim.fit(Household=households, Bank=banks)
+    sim.fit({"Household": households, "Bank": banks})
 
     distressed = sim.model_.query(
         """

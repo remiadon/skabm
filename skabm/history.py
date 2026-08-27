@@ -1,73 +1,30 @@
 """
-State history: record aggregates to DuckDB, read them back through SPARQL.
+State history: the graph's memory, and the sidecar that persists it.
 
-A SPARQL update rule sees one time slice — the present.  Any behaviour that is
-a function of the model's own past (Poledna's expectation equations 6 and 9;
-``behaviour.macro.centralbank_rate``'s hand-rolled ``def:prev_output`` lag) has
-no way to express that in-graph.  This module gives the graph a memory: named
-aggregates are appended to a DuckDB table each tick and exposed back to SPARQL
-through maplib's chrontext virtualization, following the chrontext tutorial's
-shape — a ``StateDB`` wrapper with a ``query`` method, a ``resource_sql_map`` of
-SQLAlchemy ``Select``s, and one OTTR template per resource.
+``measure`` is the primary path and needs no database — one row of aggregates read
+out of the model, which ``RDFSimulator.fit_iter`` yields.  A database opens for the
+other two reasons: a rule that reads its own past, and a caller who wants the series
+to outlive the process.
 
-    signal                     t   level
-    sig__SUM__Firm__output     0   4500.0
-    sig__SUM__Firm__output     1   4514.3
-    sig__AVG__Firm__price      0   1.0
+A SPARQL update rule sees one time slice, so a behaviour that is a function of the
+model's own past has nowhere in-graph to express it.  Named aggregates are appended to
+a DuckDB table each tick and exposed back to SPARQL through maplib's chrontext
+virtualization, one ``(signal, t, level)`` row per aggregate per tick.  A history rule
+is a SELECT whose first projected variable is a subject IRI and whose remaining
+variables become ``def:`` predicates on it; those are upserted into the simulation
+graph, which is how history reaches the update rules that need it.
 
-**Nothing here knows what the history is used for.**  *What* to record is
-decided in ``skabm.ir`` — the signals the rules read back (``ex:sig__`` IRIs)
-plus every observable the rule set implies — and what gets computed from the
-recorded series is an ordinary SPARQL SELECT the caller supplies
-(``RDFSimulator(history_rules=...)``), with any polars reduction it needs
-registered as a UDF through the existing ``udfs`` seam.  Sample-autocorrelation
-learning is one such pair of a query and a UDF and lives in
-``behaviour.learning``; a moving average, a volatility estimate or a
-reinforcement-learning update would be another, with no change to this file.
+Three properties of the virtualization shape all of the above, and all three fail
+*silently*:
 
-A history rule is a SELECT whose **first projected variable is a subject IRI**
-and whose remaining variables become ``def:`` predicates on it — the same
-column-to-predicate convention ``rules.map_df`` uses for populations.
-``apply_history_rules`` upserts them into the simulation graph, which is how a
-value derived from history reaches the update rules that need it.
-
-Two properties of maplib's virtualization shape all of the above, and both fail
-silently, so they are worth stating precisely.
-
-**1. Only ``query`` federates.**
-
-===============================  ==========================================
-``Model.query`` (SELECT)         federates — SQL is pushed down, UDFs run
-``Model.query`` (CONSTRUCT)      panics: "not implemented: Not supported by
-                                 chrontext"
-``Model.insert`` (CONSTRUCT)     no pushdown, inserts nothing, no error
-``Model.update`` (DELETE/INSERT) no pushdown, matches nothing, no error
-===============================  ==========================================
-
-An ABM's behaviour lives in ``update`` rules, so a behaviour rule cannot read
-the history itself — its WHERE would quietly match zero rows and the tick would
-become a no-op.  Hence the write-back: history rules run as SELECTs and their
-results are materialised as triples the update rules read normally.
-
-**2. Registering a virtualization breaks graph-local aggregates on that model.**
-After ``add_virtualization``, ``SELECT (SUM(?x) AS ?s) WHERE { ?a a ex:Firm ;
-def:output ?x }`` returns ``None`` where it returned 4500.0 before — including
-aggregates nested in sub-SELECTs, which ``behaviour.firm.firm_sales`` (four of
-them), ``macro.centralbank_rate`` and ``household.household_wealth_init`` are
-built out of.  So the virtualization never touches the simulation graph:
-``attach_history`` puts it on ``RDFSimulator.meta_`` — the sidecar model that
-also carries the rule IR, the behaviour metadata and any UDF a history rule
-calls — and ``model_`` keeps working aggregates.
-
-A consequence worth stating: maplib has no cross-graph join
-(``GRAPH ?g { ... }`` is not implemented, and a query is scoped to one graph),
-so nothing can select over the sidecar and the simulation graph at once.  That
-is why history rules run against ``meta_`` alone and their results are written
-back as ordinary triples.
-
-Rows reach a UDF in database order, *not* time order, so a history rule that
-cares about sequence must say so in SPARQL — ``ORDER BY ?ext ?t`` inside a
-sub-SELECT, which chrontext pushes down.  See ``behaviour.learning``.
+1. Only ``query`` (SELECT) federates.  CONSTRUCT panics; ``insert`` and ``update`` see
+   virtualized data as empty and quietly no-op.  Behaviour lives in ``update`` rules,
+   which is why history is read by SELECT and written back as triples.
+2. ``add_virtualization`` makes every graph-local aggregate on that model return
+   ``None``, nested sub-SELECTs included — and most behaviour rules are built out of
+   those.  Hence ``attach_history`` puts it on ``meta_``, never on ``model_``.
+3. Rows reach a UDF in database order, not time order, so a rule that cares must say
+   ``ORDER BY ?ext ?t`` in a sub-SELECT for chrontext to push down.
 """
 
 from __future__ import annotations
@@ -243,28 +200,32 @@ def attach_history(meta, con, signals: Sequence[str]) -> None:
     )
 
 
-def record(con, model, observables: Sequence, t: int) -> None:
-    """Measure every observable out of *model* and append it to the table at *t*.
+def measure(model, observables: Sequence) -> dict:
+    """Every observable, measured out of *model* — one row of the run, wide.
 
     One SPARQL query **per agent class**, not per signal: ``ir.ModelIR`` batches
-    a class's aggregates into a single projection, which is what makes it
-    affordable to record everything a rule set implies rather than only the two
-    or three aggregates the rules read back.  The result frame's columns are
-    already the table's signal keys, so recording is an unpivot.
+    a class's aggregates into one projection, which is what makes it affordable
+    to measure everything a rule set implies rather than only what it reads
+    back.  The result frame's columns are already the signal keys.
 
-    A class absent from the populations (households in a Firm-only run)
-    aggregates to nothing; its nulls are dropped, no row is written, and the
-    rules referencing it — which anchor on that same absent class — stay inert
-    in step.
+    A predicate no agent carries comes back ``None`` rather than missing, so the
+    row is the same width every tick and a run stacks rectangular.
     """
     from skabm.ir import measure_queries
 
-    frames = [model.query(q) for q in measure_queries(observables).values()]
+    measured: dict = {}
+    for query in measure_queries(observables).values():
+        frame = model.query(query)
+        if frame.height:
+            measured.update(zip(frame.columns, frame.row(0)))
+    return {o.signal: measured.get(o.signal) for o in observables}
+
+
+def record(con, row: dict, t: int) -> None:
+    """Append the measured half of *row* to the table at *t*, long."""
     rows = [
         (signal, int(t), float(level))
-        for frame in frames
-        if frame.height
-        for signal, level in zip(frame.columns, frame.row(0))
+        for signal, level in row.items()
         if level is not None
     ]
     if rows:
@@ -276,7 +237,7 @@ def apply_history_rules(model, meta, rules: Sequence[str]) -> None:
 
     A rule is a SELECT whose first projected variable is a subject IRI and whose
     remaining variables become ``def:`` predicates on it, exactly as
-    ``rules.map_df`` turns a population's columns into predicates.  Each written
+    ``rules.map_population`` turns a population's columns into predicates.  Each written
     predicate is cleared first, so the graph carries one current value however
     many ticks have run, and null results are dropped rather than written — that
     is how a rule says "not enough history yet" and leaves the consuming

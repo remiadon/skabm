@@ -465,7 +465,7 @@ def _model(**kwargs):
 
 
 def test_summarise_defaults_to_the_derived_observables():
-    """The recorded observables *are* the per-tick summary statistics.
+    """The yielded observables *are* the per-tick summary statistics.
 
     A method-of-moments loss wants a fixed vector per tick, which is what the
     rule set already implies — so the common case passes no ``summarise`` and
@@ -479,9 +479,12 @@ def test_summarise_defaults_to_the_derived_observables():
     assert model.observables_ == tuple(sorted(model.observables_))  # stable columns
     assert np.isfinite(out).all()
 
-    # a rule set that records nothing has nothing to derive, and says so
-    with pytest.raises(ValueError, match="track=False"):
-        simulator_model(CAL_POPS, free=["growth_sigma"], params=CAL_PARAMS, track=False)
+    # track=False narrows the vector to the signals the rules read back
+    narrow = simulator_model(
+        CAL_POPS, free=["growth_sigma"], params=CAL_PARAMS, track=False
+    )
+    assert narrow([0.0], 6, 0).shape == (6, 3)
+    assert set(narrow.observables_) < set(model.observables_)
 
 
 def test_simulator_model_shape_and_guards():
@@ -573,6 +576,6 @@ def test_derived_summarise_needs_something_to_derive():
     # no rules at all, so Firm is inert and warns before the failure we are after
     with (
         pytest.warns(UserWarning, match="not referenced"),
-        pytest.raises(RuntimeError, match="opened no history"),
+        pytest.raises(RuntimeError, match="implies no observable"),
     ):
         model([0.0], 3, 0)

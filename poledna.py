@@ -14,11 +14,12 @@ demography BD_9BD_SZ_CL_R2, Austria 2010):
 
 Construction and simulation are one call: the populations are passed to
 `RDFSimulator.fit_iter` as keyword arguments (one DataFrame per agent
-class; templates are auto-generated, predicates are column names), the
+class, checked against its `skabm.ottr` template on the way in), the
 init rules (`HOUSEHOLD_INCOME`, `HOUSEHOLD_WEALTH`) run in-graph right
 after mapping, and each tick applies the SPARQL DELETE/INSERT upserts from
-`skabm.rules` in the paper's event order and yields raw per-agent state,
-summarized here with plain polars expressions.
+`skabm.rules` in the paper's event order and yields the aggregates the rules
+imply.  Only GDP has to be computed here: it is a product across two
+predicates, which no class-level aggregate can express.
 See skabm/rules.py for the deliberate simplifications this pure-SPARQL
 architecture imposes (no search-and-matching, no stochastic shocks, no
 AR(1) re-estimation).
@@ -32,7 +33,7 @@ from skabm.calibration import make_dataset, weighted_enum
 from skabm.datasets import build_firm_io_df
 from skabm.simulation import RDFSimulator
 
-# Everything is bare local names ("firm_0"): map_df prefixes ids, and a link
+# Everything is bare local names ("firm_0"): map_population prefixes ids, and a link
 # column (whose values name already-mapped agents) resolves automatically.
 
 # --- Table 2 / Table 7 scalars (reference quarter 2010:Q4) -------------------
@@ -211,30 +212,29 @@ sim = RDFSimulator(
     n_periods=120,
 )
 
-# Each tick yields raw per-agent state; the macro summary is plain polars:
-# GDP by the production approach (Appendix B.1), CPI as mean price.
+# CPI, household wealth and the policy rate are yielded; GDP by the production
+# approach (Appendix B.1) is a row-wise product, so it comes off the frame.
 # Bank is mapped but inert (no rule references ex:Bank yet) — fit warns.
 t0 = time()
-for t, state in enumerate(
-    sim.fit_iter(
-        Firm=firms,
-        Household=households,
-        Government=governments,
-        Bank=banks,
-        ForeignFirm=foreign_firms,
-        CentralBank=central_bank,
-    )
+for row in sim.fit_iter(
+    {
+        "Firm": firms,
+        "Household": households,
+        "Government": governments,
+        "Bank": banks,
+        "ForeignFirm": foreign_firms,
+        "CentralBank": central_bank,
+    }
 ):
+    gdp = sim.extract().select(
+        (pl.col("price") * pl.col("output") * (1 - pl.col("tech_share"))).sum()
+    )
     print(
-        state.select(
-            pl.lit(t).alias("t"),
-            (pl.col("price") * pl.col("output") * (1 - pl.col("tech_share")))
-            .sum()
-            .alias("gdp"),
-            pl.col("price").mean().alias("price_level"),
-            pl.col("wealth").sum().alias("hh_wealth"),
-            pl.col("policy_rate").max().alias("policy_rate"),
-        )
+        row["t"],
+        gdp.item(),
+        row["sig__AVG__Firm__price"],
+        row["sig__SUM__Household__wealth"],
+        row["sig__AVG__CentralBank__policy_rate"],
     )
 t1 = time()
 print(

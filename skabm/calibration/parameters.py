@@ -61,17 +61,17 @@ def simulator_model(
         exist in the merged parameter dict — a name no rule template reads would
         be searched over silently and change nothing, so it is rejected here.
     summarise : Callable[[pl.DataFrame], Sequence[float]], optional
-        One per-tick state frame (as yielded by ``fit_iter``) to the ``D``
-        observables.  **Usually unnecessary.**  The default (``None``) uses the
-        observables the rule set already implies — every state predicate under
-        the aggregate its own rules apply to it, plus the share of agents at
-        each binding constraint — which is exactly the vector of per-tick
-        summary statistics a method-of-moments loss consumes.  Their names, in
-        column order, land on ``model.observables_``.
+        One per-tick state frame (``sim.extract()``) to the ``D`` observables.
+        **Usually unnecessary.**  The default (``None``) uses the row
+        ``fit_iter`` already yields — every state predicate under the aggregate
+        its own rules apply to it, plus the share of agents at each binding
+        constraint — which is exactly the vector of per-tick summary statistics
+        a method-of-moments loss consumes.  Their names, in column order, land
+        on ``model.observables_``.
 
-        Pass one only for a statistic the recorded set cannot express: anything
+        Pass one only for a statistic the measured set cannot express: anything
         distributional (a Gini coefficient, a percentile ratio) needs the
-        per-agent frame, because the recorded observables are class-level
+        per-agent frame, because the measured observables are class-level
         scalars.
     stop : Callable[[list[list[float]]], bool], optional
         Early stopping.  Called with every summarised row so far (so
@@ -130,14 +130,6 @@ def simulator_model(
             "N and seed come from the calibrator, and fits are always cold."
         )
 
-    if summarise is None and simulator_kwargs.get("track") is False:
-        raise ValueError(
-            "summarise=None reads the recorded observables, which track=False "
-            "switches off. Pass a summarise callable, or leave track alone."
-        )
-    if summarise is None:
-        simulator_kwargs["track"] = True
-
     base = {**poledna_params, **(params or {})}
     unknown = [name for name in free if name not in base]
     if unknown:
@@ -157,13 +149,27 @@ def simulator_model(
             **simulator_kwargs,
         )
         rows: list[list[float]] = []
-        for tick, state in enumerate(sim.fit_iter(**populations), start=1):
+        for measured in sim.fit_iter(populations):
             if summarise is None:
-                names, values = _recorded(sim, tick)
-                model.observables_ = names  # type: ignore[attr-defined]
-                rows.append(values)
+                if not sim.observables_:
+                    raise RuntimeError(
+                        "this rule set implies no observable, so summarise=None "
+                        "has nothing to derive a summary from: it would return an "
+                        "(N, 0) array. Pass a summarise callable."
+                    )
+                model.observables_ = tuple(k for k in measured if k != "t")  # type: ignore[attr-defined]
+                # name-sorted and the same width every tick, so column j means
+                # the same thing across ticks and candidates; a class with no
+                # population aggregates to null, which becomes nan not a hole
+                rows.append(
+                    [
+                        float("nan") if level is None else float(level)
+                        for signal, level in measured.items()
+                        if signal != "t"
+                    ]
+                )
             else:
-                rows.append([float(v) for v in summarise(state)])
+                rows.append([float(v) for v in summarise(sim.extract())])
             if stop is not None and stop(rows):
                 break
         model.ticks_ = len(rows)  # type: ignore[attr-defined]
@@ -175,27 +181,6 @@ def simulator_model(
     model.ticks_ = 0  # type: ignore[attr-defined]
     model.observables_ = ()  # type: ignore[attr-defined]
     return model
-
-
-def _recorded(sim, tick: int) -> tuple[tuple[str, ...], list[float]]:
-    """Tick *tick*'s recorded observables, name-sorted so columns line up.
-
-    The simulator has already measured them — ``_observe`` writes one row per
-    signal per tick — so this is a read, not a second pass over the graph.
-    Sorting by name is what makes column ``j`` mean the same thing on every
-    tick and across every candidate.
-    """
-    from skabm.history import TABLE
-
-    if sim.connection_ is None:
-        raise RuntimeError(
-            "summarise=None needs recorded observables, and this rule set "
-            "opened no history. It implies none, so pass a summarise callable."
-        )
-    rows = sim.connection_.execute(
-        f"SELECT signal, level FROM {TABLE} WHERE t = ? ORDER BY signal", [int(tick)]
-    ).fetchall()
-    return tuple(name for name, _ in rows), [float(level) for _, level in rows]
 
 
 def noise_floor(

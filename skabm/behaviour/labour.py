@@ -1,52 +1,32 @@
 """
-Labour-market behaviour templates — occupational mobility on a job-transition
-network, after del Rio-Chanona, Mealy, Beguerisse-Díaz, Lafond & Farmer (2021),
-*Occupational mobility and automation: a data-driven network model*, J. R. Soc.
-Interface 18(174):20200898 (arXiv:1906.04086).
+Labour-market behaviour templates — occupational mobility on a job-transition network,
+after del Rio-Chanona, Mealy, Beguerisse-Díaz, Lafond & Farmer (2021), *Occupational
+mobility and automation*, J. R. Soc. Interface 18(174):20200898.
 
-A third model family on the same machinery (Poledna, Schelling, this), and the
-first whose *specification* is a network flow problem: workers do not consume
-or price, they queue.  Two populations carry the whole model —
+A third model family on the same machinery, and the first whose *specification* is a
+network flow problem: workers do not consume or price, they queue.  ``Occupation`` holds
+the stocks e/u/v of eqs. 2-4 plus the demand it chases; ``Edge`` is the mobility network
+A_ij *reified* — one agent per edge with ``def:src`` / ``def:dst`` links and a
+``def:weight``, since RDF triples carry none — and a one-row ``Clock`` carries the
+calendar time the automation shock (eq. 19) needs.
 
-``Occupation``
-    One node per occupation (464 in the paper's US network).  Holds the three
-    state stocks ``def:employment`` / ``def:unemployment`` / ``def:vacancies``
-    (e, u, v of eqs. 2-4) plus the demand it is chasing.
-``Edge``
-    The occupational mobility network A_ij as a *reified* relation: one agent
-    per edge, with ``def:src`` / ``def:dst`` links and a ``def:weight``.  RDF
-    triples carry no weight, so a weighted network is a population like any
-    other — ``rules.map_df`` turns the two id columns into real graph edges
-    (see ``mobility_network``).
+**The event order is the rule order.**  The paper computes every flow from the state at
+*t* and applies them simultaneously at *t+1* (fig. 2), so the staged-synchronous regime
+the engine imposes is the paper's own timing rather than an approximation, as it is for
+Poledna's random-sequential markets.  Intermediate flows are materialised as triples for
+later rules in the same tick; ``labour_market_clearing`` moves the stocks.  The urn-ball
+function (eq. 16) and the S-curve shock (eq. 19) are transcendental, so ``math:exp``
+arrives as a UDF on the random draws' seam: ``RDFSimulator(udfs=LABOUR_UDFS, ...)``.
 
-and a one-row ``Clock`` population, because unlike Poledna's autonomous
-dynamics the automation shock is an explicit function of calendar time
-(eq. 19).
+**Parenthesise every arithmetic chain.**  maplib's SPARQL evaluates same-precedence
+operators *right*-associatively, so ``?e - ?w + ?f`` comes out as ``?e - (?w + ?f)``,
+silently.  The conservation laws below are bracketed for that reason, and
+``tests/test_labour.py`` pins the labour force as the tripwire.
 
-**The event order is the rule order.**  Within a tick the paper computes every
-flow from the state at *t* and applies them simultaneously at *t+1* (fig. 2),
-so the staged-synchronous regime the engine imposes is not an approximation
-here, as it is for Poledna's random-sequential markets, but the paper's own
-timing.  Intermediate flows (``def:separations``, ``def:openings``,
-``def:applications``, ``def:flow``) are materialised as triples for later rules
-in the same tick; ``labour_market_clearing`` is what moves the stocks.
-
-**What this needs beyond plain SPARQL.**  ``math:exp`` — the urn-ball matching
-function (eq. 16) and the S-curve technology shock (eq. 19) are both
-transcendental.  It arrives as a UDF on the same seam as the random draws:
-pass ``RDFSimulator(udfs=LABOUR_UDFS, ...)``.
-
-**Parenthesise every arithmetic chain.**  maplib's SPARQL evaluates
-same-precedence operators *right*-associatively, so ``?e - ?w + ?f`` comes out
-as ``?e - (?w + ?f)`` and ``?a / ?b * ?c`` as ``?a / (?b * ?c)`` — wrong, and
-silently so.  The conservation laws below are written with explicit brackets
-for that reason; ``tests/test_labour.py`` pins the labour force as the tripwire.
-
-**Deterministic mean-field, not agent-level.**  The paper gives both the
-stochastic processes over individual workers (eqs. 2-12) and their
-large-population limit (eqs. 13-17); the limit is what every figure in the
-paper is computed from and what is implemented here, so nodes are occupations,
-not people, and 140 M workers is 464 agents.  See the note at the bottom.
+**Deterministic mean-field, not agent-level.**  The paper gives both the stochastic
+processes over individual workers (eqs. 2-12) and their large-population limit (13-17);
+the limit is what every figure comes from and what is implemented here, so nodes are
+occupations and 140M workers is 464 agents.
 """
 
 from __future__ import annotations
@@ -443,10 +423,9 @@ def mobility_network(
     seven years of CPS monthly panel data over 464 four-digit occupations.
 
     ``transitions`` needs ``src`` / ``dst`` / ``count`` columns of bare
-    occupation ids; the result is ready for ``sim.fit(Edge=...)`` (map the
-    ``Occupation`` frame first, so ``map_df`` can see that ``src`` and ``dst``
-    name agents and lift them to real graph edges).  Self-transitions in the
-    input are dropped — the diagonal is set by *stay*, not observed.
+    occupation ids; the result is ready for ``sim.fit(Edge=...)`` in any order,
+    since ``ottr.edge_template`` declares both as links.  Self-transitions in
+    the input are dropped — the diagonal is set by *stay*, not observed.
     """
     off = (
         transitions.filter(pl.col("src") != pl.col("dst"))

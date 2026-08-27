@@ -7,7 +7,8 @@ the behaviour templates (``skabm.behaviour.*``) and the simulator
 
 SPARQL rule *logic* lives in ``skabm.behaviour`` (firm.py, household.py,
 macro.py).  This module carries only the plumbing: namespaces, ``render()``,
-``map_df()``, ``register_polars_random()``, ``register_math()`` and ``dbl()``.
+``register_polars_random()``, ``register_math()`` and ``dbl()``.  Mapping is
+``skabm.ottr``'s.
 
 There is no ``state_extract`` here any more: what a model's per-agent frame
 should contain is derivable from the rules themselves, and ``skabm.ir`` derives
@@ -34,8 +35,6 @@ _PREFIXES = (
     f"PREFIX math:<{MATH_NS}>\n"
     "PREFIX xsd:<http://www.w3.org/2001/XMLSchema#>\n"
 )
-
-_RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
 
 
 def register_polars_random(model) -> None:
@@ -118,40 +117,3 @@ def render(rule: "Template | str", params: dict) -> str:
             {k: dbl(v) if isinstance(v, (int, float)) else v for k, v in params.items()}
         )
     return rule
-
-
-def map_df(model, df: pl.DataFrame, kind: str) -> None:
-    """Map an agent population into the model in one call.
-
-    Users pass bare local names everywhere (``"firm_0"``): the ``id``
-    column is prefixed with ``EX_NS``, and a *link* column — one whose bare
-    values name agents already mapped into the model — is prefixed to the
-    same nodes, so ``employer="firm_0"`` resolves to the firm.  Which
-    columns are links is read from the graph, not declared: a value is a
-    reference iff an agent with that id already exists.  (Map referenced
-    populations first; e.g. firms before households.)
-
-    ``map_default`` generates the template from the DataFrame schema (every
-    non-``id`` column becomes a ``def:`` predicate; IRI-valued and nullable
-    columns are detected) **and applies it to ``df`` in the same call** —
-    its return value is the template document for inspection only, and a
-    follow-up ``model.map`` would map the rows a second time.
-
-    The generated template emits no class triple, and the class is not
-    derivable from the schema (two populations may share identical
-    columns), so every agent is tagged ``rdf:type ex:<kind>`` here — that
-    is what lets rules anchor on ``?hh a ex:Household``.
-    """
-    df = df.with_columns(pl.format(EX_NS + "{}", pl.col("id")).alias("id"))
-    known = {s.strip("<>") for s in model.query("SELECT ?s WHERE { ?s a ?c }")["s"]}
-    for c in df.columns:
-        if c == "id" or df.schema[c] != pl.String:
-            continue
-        vals = {EX_NS + v for v in df[c].drop_nulls().to_list()}
-        if vals and vals <= known:
-            df = df.with_columns((pl.lit(EX_NS) + pl.col(c)).alias(c))
-    model.map_default(df, primary_key_column="id")
-    model.map_triples(
-        df.select(subject="id").with_columns(object=pl.lit(EX_NS + kind)),
-        predicate=_RDF_TYPE,
-    )

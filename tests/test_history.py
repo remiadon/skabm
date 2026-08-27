@@ -89,12 +89,13 @@ DELETE {{ ?f def:output ?y0 }} INSERT {{ ?f def:output ?y1 }}
 WHERE {{ ?f a ex:Firm ; def:output ?y0 . BIND(?y0 * 1.1e0 AS ?y1) }}"""
 
 
-def test_signals_drive_recording_and_nothing_else_opens_a_database():
-    """Naming ``ex:sig__`` in rule text is the whole opt-in mechanism.
+def test_measuring_needs_no_database_and_signals_are_what_open_one():
+    """Naming ``ex:sig__`` in rule text is the whole opt-in for *memory*.
 
-    The IR reads the dependency off the parsed algebra, so a rule set that names
-    no signal opens no database — which is what keeps the core install free of
-    duckdb.  ``track=True`` is the deliberate override.
+    Measuring is not what a database is for.  A rule set that names no signal
+    yields every observable the IR derives and opens nothing, which is what
+    keeps the core install free of duckdb; a ``duckdb_connection`` is the other
+    reason to open one, and it is asked for rather than implied.
     """
     assert IR.analyse(
         [("e", f"{_PREFIX} SELECT * WHERE {{ {expect(*OUTPUT, out='g')} }}")]
@@ -103,40 +104,58 @@ def test_signals_drive_recording_and_nothing_else_opens_a_database():
 
     bare = RDFSimulator(
         init_rules=(), update_rules=(PLAIN,), history_rules=(), n_periods=2
-    ).fit(Firm=FIRMS)
+    )
+    run = pl.DataFrame(bare.fit_iter({"Firm": FIRMS}))
     assert bare.connection_ is None and bare.virtualized_ is False
-
-    tracked = RDFSimulator(
-        init_rules=(), update_rules=(PLAIN,), history_rules=(), n_periods=2, track=True
-    ).fit(Firm=FIRMS)
-    assert tracked.virtualized_ is False  # nothing consumes history, nothing learns
-    assert set(tracked.history()["signal"]) == {
+    assert set(run.columns) == {
+        "t",
         "sig__SUM__Firm__output",
         "sig__AVG__Firm__output",
     }
+    with pytest.raises(RuntimeError, match="no history was opened"):
+        bare.history()
+
+    kept = RDFSimulator(
+        init_rules=(),
+        update_rules=(PLAIN,),
+        history_rules=(),
+        n_periods=2,
+        duckdb_connection=H.connect(None),
+    ).fit({"Firm": FIRMS})
+    assert kept.virtualized_ is False  # nothing consumes history, nothing learns
+    assert set(kept.history()["signal"]) == set(run.columns) - {"t"}
+
+    narrow = RDFSimulator(
+        init_rules=(),
+        update_rules=(PLAIN,),
+        history_rules=(),
+        n_periods=1,
+        track=False,
+    )
+    *_, row = narrow.fit_iter({"Firm": FIRMS})
+    assert set(row) == {"t"}  # this rule set consumes nothing, so nothing is left
 
 
-def test_recording_covers_every_observable_whose_class_has_a_population():
-    """One row per observable per tick, and an absent class is skipped, not faked.
+def test_measurement_covers_every_observable_of_every_class_present():
+    """One value per observable per tick, and an absent class is dropped.
 
     Firm-only, so every Household / Government / CentralBank observable the
-    default rule set implies aggregates to nothing and writes no row — while the
-    Firm ones are all recorded, not just the two the rules read back.
+    default rule set implies has nobody to aggregate: those columns are not in
+    the run and no row is written for them, while the Firm ones are all there
+    and not just the two the rules read back.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=4).fit(Firm=FIRMS)
+    sim = RDFSimulator(params=PARAMS, n_periods=4)
+    run = pl.DataFrame(sim.fit_iter({"Firm": FIRMS}))
     history = H.state_frame(sim.connection_)
     recorded = set(history["signal"])
 
+    assert set(run.columns) == {"t"} | {o.signal for o in sim.observables_}
     assert {o.signal for o in sim.observables_ if o.klass == "Firm"} == recorded
     assert recorded > {"sig__SUM__Firm__output", "sig__AVG__Firm__price"}
     assert not any(s.startswith("sig__SUM__Household") for s in recorded)
+    assert not any(c.startswith("sig__SUM__Household") for c in run.columns)
     # the binding constraint nobody declared: alpha is far above output here
-    assert (
-        history.filter(pl.col("signal") == "sig__AVG__Firm__binds__output")[
-            "level"
-        ].to_list()
-        == [0.0] * 5
-    )
+    assert run["sig__AVG__Firm__binds__output"].to_list() == [0.0] * 4
     # t=0 is recorded before the first tick, so four ticks leave five rows
     assert history.filter(pl.col("signal") == "sig__SUM__Firm__output").height == 5
 
@@ -151,7 +170,7 @@ def test_history_rule_results_are_upserted_as_predicates_on_their_subject(tmp_pa
     """
     path = str(tmp_path / "history.duckdb")
     sim = RDFSimulator(params=PARAMS, n_periods=4, duckdb_connection=path)
-    sim.fit(Firm=FIRMS)
+    sim.fit({"Firm": FIRMS})
 
     written = sim.model_.query(f"{_PREFIX} SELECT ?s ?f WHERE {{ ?s def:forecast ?f }}")
     assert {iri.strip("<>").rsplit("#", 1)[-1] for iri in written["s"]} == {
@@ -159,7 +178,7 @@ def test_history_rule_results_are_upserted_as_predicates_on_their_subject(tmp_pa
         "sig__AVG__Firm__price",
     }
 
-    sim.fit(Firm=FIRMS)  # cold refit clears the previous run's memory
+    sim.fit({"Firm": FIRMS})  # cold refit clears the previous run's memory
     assert H.state_frame(sim.connection_)["t"].max() == 4
     # upserted, not accumulated: still one forecast per signal
     assert (
@@ -183,7 +202,7 @@ def test_virtualization_is_kept_off_the_simulation_graph():
     That is why the learner is a separate ``Model``.  Pinned because violating
     it would silently no-op firm_sales and the Taylor rule rather than raise.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=3).fit(Firm=FIRMS)
+    sim = RDFSimulator(params=PARAMS, n_periods=3).fit({"Firm": FIRMS})
     total = sim.model_.query(
         f"{_PREFIX} SELECT (SUM(?y) AS ?total) WHERE {{ ?f a ex:Firm ; def:output ?y }}"
     )["total"][0]
@@ -235,13 +254,13 @@ def test_expectations_are_learned_end_to_end_from_an_empty_history():
     something to estimate, and what gets published must equal the forecast
     recomputed by hand from the recorded series.
     """
-    flat = RDFSimulator(params=PARAMS, n_periods=5).fit(Firm=FIRMS)
+    flat = RDFSimulator(params=PARAMS, n_periods=5).fit({"Firm": FIRMS})
     levels = H.state_frame(flat.connection_).filter(
         pl.col("signal") == "sig__SUM__Firm__output"
     )["level"]
     assert levels.n_unique() == 1  # steady state: no prior to push it off
 
-    sim = RDFSimulator(params=SHOCKED, n_periods=10, random_seed=7).fit(Firm=FIRMS)
+    sim = RDFSimulator(params=SHOCKED, n_periods=10, random_seed=7).fit({"Firm": FIRMS})
     shocked = (
         H.state_frame(sim.connection_)
         .filter(pl.col("signal") == "sig__SUM__Firm__output")
@@ -264,7 +283,7 @@ def test_aggregates_on_the_sidecar_are_the_price_of_the_split():
     that *does* carry the virtualization, the same aggregate returns None — no
     error, no warning.  Anything reading ``meta_`` counts rows in Python.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(Firm=FIRMS)
+    sim = RDFSimulator(params=PARAMS, n_periods=1).fit({"Firm": FIRMS})
     assert sim.virtualized_
 
     every = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"

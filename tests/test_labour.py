@@ -77,14 +77,12 @@ def world(n: int = 8, employment: float = 1000.0, **overrides):
     return sim, {"Occupation": occ, "Edge": ring(n), "Clock": clock()}
 
 
-def macro(state: pl.DataFrame) -> dict:
-    """The paper's aggregates, off the IR-derived per-agent extract."""
-    e, u, v, ltu = state.select(
-        pl.col("employment").sum(),
-        pl.col("unemployment").sum(),
-        pl.col("vacancies").sum(),
-        pl.col("ltu").sum(),
-    ).row(0)
+def macro(row: dict) -> dict:
+    """The paper's aggregates, off the row the rules already imply."""
+    e, u, v, ltu = (
+        row[f"sig__SUM__Occupation__{name}"]
+        for name in ("employment", "unemployment", "vacancies", "ltu")
+    )
     return {"e": e, "u": u, "v": v, "ltu": ltu, "u_rate": u / (e + u)}
 
 
@@ -125,7 +123,7 @@ def test_labour_force_is_conserved():
     # right-associative arithmetic — `?e0 - ?w + ?hired` parsed as
     # `?e0 - (?w + ?hired)` leaks workers on every tick and nothing else fails.
     sim, pops = world(n=8, n_periods=25)
-    totals = [macro(s)["e"] + macro(s)["u"] for s in sim.fit_iter(**pops)]
+    totals = [macro(s)["e"] + macro(s)["u"] for s in sim.fit_iter(pops)]
     assert totals == pytest.approx([totals[0]] * len(totals), rel=1e-12)
     assert totals[0] == pytest.approx(8 * 1000.0 * 1.05)
 
@@ -137,7 +135,7 @@ def test_hires_match_the_urn_ball_count():
     stop = LABOUR_UPDATE_RULES.index(labour_flow) + 1  # halt before clearing,
     sim, pops = world(n=6, n_periods=1)  # so v and s still hold what f used
     sim.set_params(update_rules=LABOUR_UPDATE_RULES[:stop])
-    sim.fit(**pops)
+    sim.fit(pops)
     got = sim.model_.query(
         _PREFIXES
         + """
@@ -156,7 +154,7 @@ def test_duration_cohorts_sum_to_unemployment():
     # enter the first, each cohort that fails to match ages into the next, and
     # `ltu` absorbs everyone past 4 steps (= 27 weeks).  The sum is the invariant.
     sim, pops = world(n=6, n_periods=12)
-    for _ in sim.fit_iter(**pops):
+    for _ in sim.fit_iter(pops):
         pass
     per_occ = sim.model_.query(
         _PREFIXES
@@ -176,7 +174,7 @@ def test_converges_to_a_steady_state():
     # With target demand flat the market settles: the paper initialises this way
     # before shocking anything.
     sim, pops = world(n=8, n_periods=120)
-    path = [macro(s)["u_rate"] for s in sim.fit_iter(**pops)]
+    path = [macro(s)["u_rate"] for s in sim.fit_iter(pops)]
     assert path[-1] == pytest.approx(path[-2], rel=1e-6)
     assert 0.01 < path[-1] < 0.15  # a plausible natural rate, not a corner
 
@@ -186,7 +184,7 @@ def test_beveridge_curve_slopes_downward():
     # downward-sloping relation between unemployment and vacancies — when
     # vacancies are plentiful the unemployed match faster.
     sim, pops = world(n=8, n_periods=60)
-    for _ in sim.fit_iter(**pops):
+    for _ in sim.fit_iter(pops):
         pass
     sim.set_params(n_periods=1, warm_start=True)
 
@@ -203,9 +201,8 @@ def test_beveridge_curve_slopes_downward():
             WHERE {{ ?o a ex:Occupation ; def:demand_init ?d0 .
                      BIND(?d0 * {cycle(tick + 1) / cycle(tick):.9e} AS ?d1) }}"""
         )
-        for state in sim.fit_iter():
-            pass
-        m = macro(state)
+        *_, row = sim.fit_iter()
+        m = macro(row)
         curve.append({"u": m["u_rate"], "v": m["v"] / (m["e"] + m["v"])})
     assert pl.DataFrame(curve).select(pl.corr("u", "v")).item() < -0.3
 
@@ -242,8 +239,8 @@ def shock_outcome(edges: pl.DataFrame, n: int) -> tuple[dict, dict]:
         udfs=LABOUR_UDFS,
         n_periods=60,
     )
-    sim.fit(Occupation=occ, Edge=edges, Clock=clock())
-    before = macro(sim.extract())
+    *_, opening = sim.fit_iter({"Occupation": occ, "Edge": edges, "Clock": clock()})
+    before = macro(opening)
 
     sim.model_.update(
         _PREFIXES
@@ -259,8 +256,8 @@ def shock_outcome(edges: pl.DataFrame, n: int) -> tuple[dict, dict]:
     sim.set_params(
         n_periods=200, warm_start=True, params={**labour_params, "shock_start": 0.0}
     )
-    sim.fit()
-    return before, macro(sim.extract())
+    *_, shocked = sim.fit_iter()
+    return before, macro(shocked)
 
 
 def test_network_structure_decides_what_the_shock_costs():
@@ -290,4 +287,4 @@ def test_labour_rules_need_the_math_udf():
     sim, pops = world(n=4, n_periods=1)
     sim.set_params(udfs=())
     with pytest.raises(Exception, match="(?i)function"):
-        sim.fit(**pops)
+        sim.fit(pops)

@@ -1,39 +1,29 @@
 """
 Sample-Autocorrelation Learning — Poledna's expectations, as a query and a UDF.
 
-Poledna eq. 6 and 9 do not give agents a constant expected growth rate; they
-make expectations a *regression on the model's own past*.  Hommes & Zhu (2014)
-call the rule SAC learning: agents do not know the model, they perceive an
-aggregate's growth rate as an AR(1) process and estimate its two parameters from
-the realized sample —
-
-``a``
-    the sample mean (the growth rate's long-run level), and
-``b``
-    the first-order sample autocorrelation (its persistence),
-    ``b = Sum (g_k - a)(g_{k-1} - a) / Sum (g_k - a)^2``, clamped into
-    ``(-1, 1)`` so the perceived law of motion stays stationary —
-
-giving the one-step forecast ``a + b * (g_last - a)``.
+Poledna eq. 6 and 9 do not give agents a constant expected growth rate; they make
+expectations a *regression on the model's own past*.  Hommes & Zhu (2014) call the rule
+SAC learning: agents perceive an aggregate's growth rate as an AR(1) process and
+estimate its two parameters from the realized sample — ``a``, the sample mean, and
+``b``, the first-order sample autocorrelation ``Sum (g_k - a)(g_{k-1} - a) /
+Sum (g_k - a)^2``, clamped into ``(-1, 1)`` so the perceived law of motion stays
+stationary — giving the one-step forecast ``a + b * (g_last - a)``.
 
 The whole implementation is the two things ``RDFSimulator`` already accepts:
-
-``register_sac``
-    a polars UDF, passed through the existing ``udfs=`` seam exactly like
-    ``rules.register_polars_random`` (the Poledna default pairs the two); and
-``sac_learning``
-    a SPARQL SELECT, passed through ``history_rules=``, that runs the UDF over
-    the virtualized history and projects ``?sig ?forecast`` — subject IRI first,
-    remaining columns becoming ``def:`` predicates, per ``history``'s contract.
+``register_sac``, a polars UDF passed through the existing ``udfs=`` seam exactly like
+``rules.register_polars_random``; and ``sac_learning``, a SPARQL SELECT passed through
+``history_rules=`` that runs the UDF over the virtualized history and projects
+``?sig ?forecast`` — subject IRI first, remaining columns becoming ``def:`` predicates,
+per ``history``'s contract.
 
 ``skabm.history`` knows none of this.  Swapping SAC for a moving average, an
-adaptive-expectations rule or a reinforcement-learning update means writing
-another query and another UDF, and changing nothing else.
+adaptive-expectations rule or a reinforcement-learning update means writing another
+query and another UDF, and changing nothing else.
 
-**Ordering is the query's job, not the UDF's.**  Rows reach a UDF in database
-order, so ``sac_learning`` sorts inside a sub-SELECT (``ORDER BY ?ext ?t``),
-which chrontext pushes down into SQL.  The UDF then trusts that order — it must,
-since a UDF returns one value per input row and cannot reorder its output.
+**Ordering is the query's job, not the UDF's.**  Rows reach a UDF in database order, so
+``sac_learning`` sorts inside a sub-SELECT (``ORDER BY ?ext ?t``), which chrontext
+pushes down into SQL.  The UDF then trusts that order — it must, since a UDF returns one
+value per input row and cannot reorder its output.
 """
 
 from __future__ import annotations

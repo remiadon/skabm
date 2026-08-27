@@ -1,39 +1,27 @@
 """
-Bank behaviour templates - extensions to Poledna (2023) not present in the
-original paper.  Poledna et al. (2023, European Economic Review 151, 104306)
-calibrate 12 Basel III banks (capital_ratio, leverage, deposit_share) but
-leave them passive: no interbank market, no contagion, no deposit flight.
-This module adds:
+Bank behaviour templates — extensions to Poledna (2023) not present in the paper.
 
-1. ``bank_depositors``  - init CONSTRUCT: which agents hold deposits at which
-                          bank (structural, runs once at init).
-2. ``bank_capital``     - update rule: capital ratio responds to deposit outflows
-                          (state, per-tick).
-3. ``interbank_contagion`` - recursive SPARQL CONSTRUCT rule (licensed
-                          ``Model.infer``): distress propagates through the
-                          depositor network to a fixed point.
+Poledna et al. calibrate 12 Basel III banks (capital_ratio, leverage, deposit_share) but
+leave them passive: no interbank market, no contagion, no deposit flight.  This module
+adds ``bank_depositors`` (an init CONSTRUCT: which agents hold deposits at which bank),
+``bank_capital`` (a per-tick update: the capital ratio responds to deposit outflows) and
+``interbank_contagion`` (a recursive CONSTRUCT evaluated by ``Model.infer``: distress
+propagates through the depositor network to a fixed point).  Placeholders are
+parameterised in ``skabm.behaviour.params``; rule logic never contains numeric defaults.
 
-Placeholders are parameterised in ``skabm.behaviour.params`` (or a user
-params dict); rule logic never contains numeric defaults.
+**Licensing.**  ``bank_depositors`` and ``bank_capital`` run on the free maplib core.
+Only ``interbank_contagion`` needs the licensed reasoning add-on — free for academic
+use, absent from the stock PyPI wheels — so importing this module never requires a
+license, but passing that rule to ``RDFSimulator(infer=...)`` does.
 
-Licensing: ``bank_depositors`` (insert) and ``bank_capital`` (update) run on
-the free maplib core.  Only ``interbank_contagion`` - evaluated through
-``Model.infer`` - needs the licensed reasoning add-on (free for academic use,
-absent from the stock PyPI wheels).  So importing/using this module never
-requires a license; passing ``interbank_contagion`` to
-``RDFSimulator(infer=)`` does.
+**Engine choice.**  The contagion rule is a SPARQL CONSTRUCT, not Datalog: the Datalog
+triple-pattern form in maplib 0.20.29 supports neither FILTER in the body nor
+aggregation, and recursive CONSTRUCT does.  ``RDFSimulator`` passes the string as-is to
+``Model.infer``, which accepts both forms.
 
-IMPORTANT - engine choice:
-    The contagion rule is written as a SPARQL CONSTRUCT, not Datalog.  The
-    Datalog triple-pattern form in maplib 0.20.29 does not support FILTER in
-    the body or aggregation; recursive CONSTRUCT does.  ``RDFSimulator``
-    passes the string as-is to ``Model.infer`` - it accepts both forms.
-
-IMPORTANT - CONSTRUCT/WHERE line break:
-    Maplib's SPARQL parser (0.20.29) rejects a line break between the closing
-    ``}`` of CONSTRUCT and the ``WHERE`` keyword.  Every CONSTRUCT rule here
-    is written with ``CONSTRUCT { ... } WHERE { ... }`` on a single line so
-    it parses under ``Model.infer``.
+**CONSTRUCT/WHERE line break.**  maplib's SPARQL parser (0.20.29) rejects a line break
+between the closing ``}`` of CONSTRUCT and the ``WHERE`` keyword, so every CONSTRUCT
+rule here keeps ``} WHERE {`` on one line.
 """
 
 from __future__ import annotations

@@ -4,54 +4,29 @@
 
 **scikit-learn-style agent-based modeling on a knowledge graph.**
 
-skabm builds economic agent-based models (ABMs) from public data with as
-little user code as possible. Agent populations are calibrated as
-[polars](https://pola.rs) DataFrames, lifted into an RDF knowledge graph
-([maplib](https://github.com/DataTreehouse/maplib)), and simulated by
-applying SPARQL rules to that graph — all behind a scikit-learn-shaped API.
-
-The reference implementation follows Poledna, Miess, Hommes & Rabitsch
-(2023), *Economic forecasting with an agent-based model* (European Economic
-Review 151): a full six-sector economy — firms, households, government,
-banks, central bank, rest of world — calibrated 1:1 from Eurostat national
-accounts, input–output tables, census and business demography data.
-
-## Why a knowledge graph?
-
-Traditional ABM frameworks struggle to express **heterogeneous agents**:
-populations of different sizes, different attributes, and typed relations
-between them (household → employer, household → owned firm, firm →
-industry). Array-based frameworks (e.g. [AMBER](https://github.com/a11to1n3/AMBER))
-get the performance story right but flatten this structure into
-undocumented index arrays. skabm keeps the polars performance and makes the
-structure explicit: agents are RDF nodes, relations are triples, and
-behavior is SPARQL over those triples. What used to be a DataFrame `join`
-becomes graph traversal; what used to be a hard-coded interaction matrix
-becomes a queryable, editable, shareable ontology.
+Populations are calibrated as [polars](https://pola.rs) DataFrames, lifted into an RDF
+knowledge graph ([maplib](https://github.com/DataTreehouse/maplib)), and simulated by applying
+SPARQL rules to it — behind a scikit-learn-shaped API. The reference implementation follows
+Poledna, Miess, Hommes & Rabitsch (2023), *Economic forecasting with an agent-based model*
+(EER 151): a six-sector economy calibrated 1:1 from Eurostat. Array-based frameworks (e.g.
+[AMBER](https://github.com/a11to1n3/AMBER)) get performance right but flatten heterogeneous
+populations and their typed relations into undocumented index arrays; skabm keeps the polars
+performance and makes the structure explicit — agents are nodes, relations are triples.
 
 ## What skabm gives researchers
 
-You bring behavioural rules and data. Six things come back that you did not write.
+You bring behavioural rules and data. These come back without your writing them:
 
-**1 — Populations from public data, calibrated two ways.** `skabm.datasets` pulls
-Eurostat IO tables and business demography; `calibration.population` fits the agent
-*rows* to accounting identities and known margins by permutation (so every marginal
-survives exactly); `calibration.parameters` fits the *behavioural parameters* to macro
-series through [black-it](https://github.com/bancaditalia/black-it). Both are sklearn
-estimators, so they compose the sklearn way — the population is calibrated once,
-outside the search loop, and held frozen while θ moves inside it.
+| | |
+|---|---|
+| **Populations from public data** | `skabm.datasets` pulls Eurostat IO tables and business demography; `calibration.population` fits agent *rows* to accounting identities and known margins by permutation, so every marginal survives exactly |
+| **Behaviour as data** | a rule is a SPARQL `string.Template` passed to `__init__`, so `get_params()`/`clone()` work and a rule set is serialisable, diffable and shareable — logic in the template, numbers in `params` |
+| **Derived observables** | Mesa makes you declare `model_reporters`, Agents.jl `adata`, NetLogo a metric list — their rules are opaque host-language functions. skabm's are SPARQL, so it parses them through a real algebra and derives the `(class, predicate, aggregate)` triples they imply. Every binding constraint becomes a series too: the `min` in eq. 5 gives the share of firms pinned at `alpha * size`, the `max` in the Taylor rule the share of quarters at the zero lower bound |
+| **A graph with memory** | a rule naming an `ex:sig__<agg>__<Class>__<predicate>` signal opens a DuckDB history; `history_rules` re-run over the accumulated series each tick and upsert their results back as triples. SAC learning is one `SELECT` plus one polars UDF; a moving average or an RL update is another, with no engine change |
+| **Fixed-point propagation** | `infer=` hands recursive CONSTRUCT rules to maplib's reasoner, so contagion, transitive closure and reachability propagate across the whole graph in one call rather than hand-tuned sub-tick passes |
+| **First-class interventions** | `model_` is a regular maplib model post-fit: rewire an ownership edge, delete a bank, halve a sector's demand with `model_.update(...)`, then continue with `warm_start=True` |
 
-**2 — Behaviour is data, not code.** A rule is a SPARQL `string.Template` passed to
-`__init__`, so `get_params()` / `clone()` work and a rule set is serialisable, diffable
-and shareable. Rule *logic* lives in the template, rule *numbers* in `params`. The
-default set covers the full Poledna economy and self-scopes: pass only `Firm=` and
-`Household=` and the rules referencing absent classes are filtered out at fit time.
-
-**3 — The model tells you what to measure.** Mesa makes you declare `model_reporters`;
-Agents.jl makes you declare `adata`/`mdata`; NetLogo's BehaviorSpace makes you list
-metrics. They have to: their rules are opaque host-language functions. skabm's rules are
-SPARQL, so it parses them — through a real algebra, not a regex — and derives the
-`(class, predicate, aggregate)` triples they imply.
+### What a run yields
 
 ```python
 import polars as pl
@@ -65,34 +40,20 @@ households = pl.DataFrame({"id": ["hh_0", "hh_1"], "wealth": [100.0, 200.0],
                           "income": [10.0, 12.0], "psi": [0.9, 0.9],
                           "employer": ["firm_0", "firm_1"]})
 
-sim = RDFSimulator(n_periods=8, random_seed=0).fit(Firm=firms, Household=households)
+sim = RDFSimulator(n_periods=8, random_seed=0)
+run = pl.DataFrame(sim.fit_iter({"Firm": firms, "Household": households}))
 
+run.shape                    # 8 ticks x (t + every aggregate the rules imply)
+run.columns[:3]              # sig__AVG__Firm__binds__output, sig__AVG__Firm__liquidity, ...
 len(sim.extract().columns)   # 18 per-agent columns, none of them named by hand
-len(sim.observables_)        # 19 aggregates recorded every tick, none of them declared
-sim.history()                # signal | t | level — the telemetry, long
 ```
 
-The analysis behind that is machinery, not an interface. It reads the rules to work out
-which predicates the extract projects and which aggregates are worth recording; there is
-no IR object to learn.
-
-Each state predicate is measured under the aggregate the rules themselves apply to it —
-`centralbank_rate` takes `AVG(?price)`, so the price signal is a mean and not a sum —
-and every binding constraint the rules impose becomes a *regime indicator*. The `min`
-in Poledna's eq. 5 means "the share of firms pinned at `alpha * size`" is a series the
-model implies; the `max` in the Taylor rule means the share of quarters at the zero
-lower bound is another. Nobody wrote either down. Both get recorded and plotted.
-
-**What is *not* derivable, and why the line is there.** `SUM(def:output)` follows from the
-rules; calling it *GDP* is a modelling claim. And a **distributional** statistic — a Gini
-coefficient, a percentile ratio, a dispersion measure — is not derivable at all: no rule
-mentions one, and it cannot be composed from class-level scalars either. Both stay with
-you, and both are written the same way, in polars.
-
-What skabm removes is not the statistic but the plumbing. `fit_iter` yields the per-agent
-frame each tick, and that frame is itself derived — `sim.extract()` projects exactly the
-predicates the rules touch plus whatever the populations carried, one UNION branch per
-agent class. Nothing below names a column to collect:
+A whole run is `pl.DataFrame(sim.fit_iter(...))`, one tick is the metrics dict a callback API
+takes, nothing was declared, and nothing opened a database. Each predicate is measured under
+the aggregate the rules apply to it — `centralbank_rate` takes `AVG(?price)`, so the price
+signal is a mean, not a sum. **Where the line is:** `SUM(def:output)` follows from the rules,
+but calling it *GDP* is a modelling claim and a **distributional** statistic is not derivable
+at all. Both stay with you, in polars over `sim.extract()` — itself derived from the rules.
 
 ```python continuation
 def gini(column: str) -> pl.Expr:
@@ -101,45 +62,56 @@ def gini(column: str) -> pl.Expr:
     return 2 * (pl.int_range(1, n + 1, dtype=pl.Int64) * x).sum() / (n * x.sum()) - (n + 1) / n
 
 panel = pl.concat(
-    state.with_columns(t=pl.lit(t))
-    for t, state in enumerate(sim.fit_iter(Firm=firms, Household=households), start=1)
+    sim.extract().with_columns(t=pl.lit(row["t"]))
+    for row in sim.fit_iter({"Firm": firms, "Household": households})
 )
 panel.lazy().group_by("t").agg(gini("wealth")).sort("t").collect()
 ```
 
-Written as an expression rather than a function over a Series, Gini composes like any
-other aggregate — inside `group_by().agg()`, inside `over()`, and lazily — so every
-tick is one grouped pass instead of a Python loop.
-[notebooks/extraction.ipynb](notebooks/extraction.ipynb) has the full version, plus the
-telemetry going into JAX.
+### Getting data in
 
-**4 — The graph has a memory.** Rules that depend on the model's own past say so by
-naming an `ex:sig__<agg>__<Class>__<predicate>` signal. When one does, the fit opens a
-DuckDB history, records every observable each tick (batched — one query per agent class,
-not one per signal), and re-runs `history_rules` over the accumulated series, upserting
-the results back as triples. Poledna's sample-autocorrelation learning is one SPARQL
-`SELECT` plus one polars UDF; a moving average or an RL update is another, with no
-engine change.
+**Check the frames before you simulate.** Map a template yourself — maplib's own API:
+```python continuation
+from maplib import Model
+from skabm.ottr import conform, firm_template, map_populations
 
-**5 — Multi-hop propagation runs to a fixed point.** `infer=` hands recursive CONSTRUCT
-rules to maplib's reasoner, so contagion, transitive closure and reachability propagate
-across the whole graph in one call rather than in hand-tuned sub-tick passes. Every head
-predicate of an inference rule is emergent by construction — nothing gave it to an agent
-— which makes its count a free observable.
+Model().map(firm_template, conform(firms, firm_template))    # fine
 
-**6 — Interventions are first-class.** `model_` is a regular maplib model post-fit.
-Rewire an ownership edge, delete a bank, halve one sector's demand with
-`model_.update(...)`, then continue with `warm_start=True`. Because the IR separates
-structure from state, you can see at a glance which predicates an intervention is safe
-to touch between passes.
+try:
+    Model().map(firm_template, conform(firms.drop("alpha"), firm_template))
+except Exception as error:
+    print(error)          # Expected column alpha is missing
+```
+
+Required parameters are what the rules read but never write: nothing produces them, so a
+frame lacking one is a run of nothing. `conform` casts declared columns to the type the rules
+join on — the failure worth the most, since an `Int64` where a rule wrote `xsd:double` joins
+with nothing, silently.
+
+**The world is an argument.** `fit` takes one thing: a maplib `Model`, advanced in place — a
+graph another system built, or one you deserialized and intervened on. A `{class: DataFrame}`
+mapping is put into a fresh one first and then does exactly the same:
+
+```python continuation
+world = Model()
+map_populations(world, {"Firm": firms, "Household": households})
+world.update("""
+PREFIX ex: <http://example.net/skabm#>
+PREFIX def: <urn:maplib_default:>
+DELETE { ?f def:price ?p } INSERT { ?f def:price 3e0 }
+WHERE  { ?f a ex:Firm ; def:price ?p }
+""")
+RDFSimulator(n_periods=4).fit(world)      # your graph, ticked
+```
+
+That one call maps every population together, so an undeclared reference resolves against
+every id in it, not only the classes that went first: both key orders give the same graph.
 
 ### Three things are the frontend
 
-In the order anyone needs them: **`fit_iter()`** for statistics over per-agent state,
-**`history()`** for telemetry a calibrator or JAX takes as-is, and **`model_`** itself for
-interventions and queries. Calibration is where this pays off, because the derived observables *are* the per-tick
-summary statistics a method-of-moments loss consumes — so `simulator_model` needs no
-`summarise` at all:
+**`fit_iter()`** for telemetry a calibrator or JAX takes as-is, **`extract()`** for statistics
+over per-agent state, **`model_`** for interventions. The derived observables *are* the
+summary statistics a method-of-moments loss consumes:
 
 ```python notest
 model = simulator_model(populations, free=["growth_sigma"])
@@ -147,53 +119,28 @@ model(theta, 120, seed)    # (120, D)
 model.observables_         # the D column names, derived and name-sorted
 ```
 
-Early stopping plugs into the same call. skabm ships **no criterion** — `flax`'s
-`EarlyStopping` already is that algorithm, with `min_delta`, `patience` and a tested
-notion of improvement — so all skabm provides is the seam and the mechanics:
+Early stopping plugs into the same call, but skabm ships **no criterion** — `flax`'s
+`EarlyStopping` already is that algorithm, so skabm supplies the seam and the padding only.
 
 ```python notest
 model = simulator_model(populations, free=["growth_sigma"], stop=settled(patience=10))
 model.ticks_               # 13 of 120: the run had settled
 ```
 
-Because a calibrator's `(N, D)` contract is not optional, a stopped run is padded by
-carrying the last row forward — the loss stays finite and the candidate is judged on its
-own numbers. On this model that is 9.2s of candidates down to 1.0s.
-[notebooks/extraction.ipynb](notebooks/extraction.ipynb) §4–5 has it end to end,
-including what flax's "stopped improving" actually means for a stochastic run.
+Padding carries the last row forward, so the loss stays finite and the candidate is judged on
+its own numbers — 9.2s of candidates down to 1.0s here. `notebooks/extraction.ipynb` §4–5.
 
-### Two models: the world, and what skabm knows about it
+### Two models, and the JAX boundary
 
-`model_` is the world — agents and nothing else, so a `?s ?p ?o` scan returns what a
-modeller expects and the graph stays portable. `meta_` is the sidecar: the rule IR as
-triples, the behaviour metadata, the signal nodes, the virtualized history, and any UDF a
-history rule calls.
-
-The split is forced, not stylistic. Registering a virtualization silently nulls every
-graph-local aggregate on the model carrying it, and the behaviour rules are built out of
-those aggregates. The price: maplib has no cross-graph join — `GRAPH ?g { … }` is
-unimplemented and a query is scoped to one graph — so combining the two sides means two
-queries and a polars join.
-
-`meta_` is also the extension seam. A researcher bringing their own forecasting module or
-RL update registers it with `Model.add_udf` and names it in SPARQL like any built-in;
-`sac:forecast` has no privileged status. That is what `RDFSimulator(udfs=…)` installs, and
-it is installed on `meta_` precisely because history rules are evaluated there.
-
-### JAX and black-it are ecosystem, not architecture
-
-skabm is JAX-compatible the way it is black-it-compatible: through the telemetry.
-`history()` is a long frame of every recorded observable; pivoted it is a plain numeric
-table, which `polars.DataFrame.to_jax` turns into arrays — `signature()` is what tells you
-the dtypes. Differentiable losses over simulated-versus-observed series, gradient-based
-calibration on summary statistics, and neural surrogates all follow from there.
-
-What skabm deliberately does **not** claim is a differentiable tick. A tick is a sequence
-of SPARQL `DELETE`/`INSERT` round trips, and every one of them materialises the graph and
-breaks the trace. Registering a JAX function as a maplib UDF makes a rule's inner
-arithmetic fast; it does not make `grad` work through a simulation. The honest boundary is
-the telemetry frame.
-
+`model_` is the world — agents and nothing else, so `?s ?p ?o` returns what a modeller expects.
+`meta_` is the sidecar: rule IR, behaviour metadata, signal nodes, the virtualized history, any
+UDF a history rule calls. The split is forced — registering a virtualization silently nulls
+every graph-local aggregate on the model carrying it, and the behaviour rules are built out of
+those. `meta_` is also the extension seam: a researcher's own forecasting module arrives as
+`Model.add_udf`, named in SPARQL like any built-in. And skabm is JAX-compatible the way it is
+black-it-compatible — **through the telemetry**, the yielded rows being a numeric table
+`polars.DataFrame.to_jax` turns into arrays. There is no differentiable tick; every SPARQL
+round trip breaks the trace.
 
 ## Quickstart
 
@@ -261,262 +208,91 @@ households = make_dataset(
 #    populations passed, so a Firm + Household run executes exactly those dynamics.
 sim = RDFSimulator(n_periods=12, params={"firm_ownership_ratio": 300 / 10_000,
                                          "growth_sigma": 0.02, "inflation_sigma": 0.01})
-for state in sim.fit_iter(Firm=firms, Household=households):
-    active = state.drop_nulls("output")
-    print((active["price"] * active["output"] * (1 - active["tech_share"])).sum())
+for row in sim.fit_iter({"Firm": firms, "Household": households}):
+    # the price level and household wealth are yielded; GDP is a per-agent
+    # product taken before the sum, so it comes off the frame
+    active = sim.extract().drop_nulls("output")
+    print(row["sig__AVG__Firm__price"],
+          (active["price"] * active["output"] * (1 - active["tech_share"])).sum())
 ```
 
-Step 3 is the part a marginal sampler cannot do. `size` and `industry` are drawn
-independently, so their joint structure is whatever the draw happened to produce;
-the calibrator permutes rows until per-industry mean size matches Eurostat, and
-because permutation leaves each column's multiset untouched, both marginals survive
-exactly. That invariance also fixes the `shift`: the global mean of `log(size)` cannot
-move, so only *relative* sizes across industries are imposable — the absolute scale
-stays the sampler's. Pass the calibrator only the columns its constraint mentions;
-each free column is permuted independently, so a derived column handed to it (`alpha`
-here) would be shuffled away from the industry it belongs to.
+Step 3 is what a marginal sampler cannot do. `size` and `industry` are drawn independently, so
+their joint structure is whatever the draw produced; the calibrator permutes rows until
+per-industry mean size matches Eurostat, and permutation leaves each column's multiset
+untouched, so both marginals survive exactly — which is also why only *relative* sizes are
+imposable.
 
-[notebooks/poledna/poledna.ipynb](notebooks/poledna/poledna.ipynb) builds the
-model up in five chapters on one shared population. **Chapter 0** is the
-calibration above at notebook scale; **1** runs the seven-rule quarter and
-intervenes on the fitted graph; **2** adds a banking layer whose distress
-propagates to a fixed point through `infer=`; **3** opens up the learned
-expectations — a DuckDB history, virtualized back into SPARQL — and swaps the
-estimator to show the seam is generic; **4** hands the behavioural parameters to
-[black-it](https://github.com/bancaditalia/black-it) and reads the result as an
-identification test on the rule set. [poledna.py](poledna.py) is the same model
-as a plain script.
-
-[notebooks/extraction.ipynb](notebooks/extraction.ipynb) is the other half of the story:
-what to *do* with the derived state — a Gini coefficient as one polars expression, an
-intervention that moves it, and the recorded telemetry handed to JAX.
-
-Elsewhere, [examples/schelling.py](examples/schelling.py) covers spatial segregation and
-[notebooks/labour_automation.ipynb](notebooks/labour_automation.ipynb)
-covers occupational mobility under an automation shock — a labour-flow network where
-the model's central quantity lives on the *edge*.
+| Where to look next | |
+|---|---|
+| [notebooks/poledna](notebooks/poledna/poledna.ipynb) | the model in five chapters on one population: **0** calibration, **1** the seven-rule quarter plus an intervention, **2** a banking layer propagating to a fixed point through `infer=`, **3** learned expectations over a virtualized history, **4** black-it parameter calibration read as an identification test. [poledna.py](poledna.py) is the same model as a script |
+| [notebooks/extraction](notebooks/extraction.ipynb) | what to *do* with derived state: Gini as one polars expression, an intervention that moves it, telemetry into JAX |
+| [notebooks/labour_automation](notebooks/labour_automation.ipynb) | occupational mobility under an automation shock — a labour-flow network whose central quantity lives on the *edge* |
+| [examples/schelling.py](examples/schelling.py) | spatial segregation, lattice and continuous-geometry variants |
 
 ## Architecture
 
 | Module | Role |
 |---|---|
 | `skabm.datasets` | Eurostat loaders (IO tables, business demography) |
-| `skabm.calibration.population` | Population samplers + constraint calibrators (GA, Metropolis–Hastings) with a sklearn estimator API |
-| `skabm.calibration.parameters` | Model calibration: `RDFSimulator` as a black-it `model(theta, N, seed)`, plus the `noise_floor` diagnostic |
-| `skabm.rules` | `map_df` (DataFrame → graph, auto-generated templates) + SPARQL `string.Template` rules + `render` (param substitution) + UDF registrars |
-| `skabm.behaviour` | The rule library, grouped by economic function: `firm`, `household`, `macro`, `bank`, `labour`, `learning` |
-| `skabm.ir` | Rule IR: read/write sets off the SPARQL algebra, the state/structure partition, the per-class schema, and the observables they imply |
-| `skabm.history` | State history in DuckDB, virtualized back into SPARQL (chrontext) — the graph's memory |
-| `skabm.simulation` | `RDFSimulator`: fit/fit_iter over SPARQL update rules |
+| `skabm.calibration.population` | Population samplers + constraint calibrators (GA, Metropolis–Hastings), sklearn estimator API |
+| `skabm.calibration.parameters` | Model calibration: `RDFSimulator` as a black-it `model(theta, N, seed)`, plus `noise_floor` |
+| `skabm.ottr` | One maplib `Template` per agent class: the contract a population is checked and cast against |
+| `skabm.rules` | Namespaces, `render` (param substitution) and the UDF registrars |
+| `skabm.behaviour` | The rule library by economic function: `firm`, `household`, `macro`, `bank`, `labour`, `learning` |
+| `skabm.ir` | Rule IR: read/write sets off the SPARQL algebra, the state/structure partition, the per-class schema, the observables implied |
+| `skabm.history` | Measuring the observables, and the DuckDB sidecar that persists and virtualizes them (chrontext) |
+| `skabm.simulation` | `RDFSimulator`: `fit`/`fit_iter` over SPARQL update rules |
 
-The hooks are split by what they cost. **Per commit**: `ruff`, every ```python fence in
-this README (so a renamed function fails the commit rather than rotting in the docs), and
-`pytest --testmon` — only the tests that touch what changed, which is ~0.3s on an
-untouched tree and never the full minute. **Per push**: the full suite with the coverage
-gate, plus `pytest --nbmake notebooks/`, which executes the notebooks and so gives the
-long-form documentation the same guarantee the README gets.
+| Design decision, in sklearn vocabulary | |
+|---|---|
+| **X is the world** | a maplib `Model`, or a `{class: DataFrame}` mapping put into one. Predicates are column names — the DataFrame schema *is* the graph schema — and an IRI-valued column (`employer`, `owns`) is a graph edge. Invariants that always hold ship as init rules (`firm_ownership`) rather than being re-encoded per dataset |
+| **Rules are hyperparameters** | `string.Template` objects in `__init__`, so `get_params`/`clone` work. `init_rules` set initial conditions once after mapping; `update_rules` are the dynamics, upserted every tick in the paper's event order. The default set self-scopes: rules whose classes are all absent match nothing |
+| **`model_` is the fitted artifact** | the graph where data and rules blend into one evolving world. Cold `fit` rebuilds it; `warm_start=True` continues it |
+| **Structure vs state** | predicates no update rule touches (links, coefficients) are *structure*, written at fit and edited only by intervention; predicates the rules upsert are *state*, owned by the rules after t=0. Derived, not asserted — `skabm.ir` reads it off the algebra, and it settles both the extract's columns and the observables |
+| **Randomness is a UDF** | SPARQL has no `RAND`, so polars-random is registered as `pr:uniform`/`pr:normal` and called in-rule via `BIND(...)`, pinned by `RDFSimulator(random_seed=...)`. That is what lets the Schelling example derive its whole population in-graph with no seed column, and gives Poledna genuine AR(1) innovations |
 
-`notebooks/poledna` is excluded from that hook — at 3m24 it is four fifths of the runtime
-and the only notebook that reaches the network on a cold cache. Run it in CI or by hand
-with `pytest --nbmake notebooks/poledna`. The others still want `notebooks/data` warm; a
-cold one fetches from Zenodo.
+**Two senses of "calibration".** `calibration.population` fits agent *rows* to accounting
+identities and known margins (Poledna §4; Deville & Särndal 1992); `calibration.parameters`
+fits *behavioural parameters* to macro series (Fagiolo et al. 2019), skabm supplying the
+adapter and [black-it](https://github.com/bancaditalia/black-it) the search. The population is
+calibrated once, outside the search loop, and held frozen while θ moves.
 
-**Two senses of "calibration".** The word means different things in the
-microsimulation and ABM literatures, so `skabm.calibration` is split in two and
-re-exports both. `calibration.population` fits the agent *rows* to accounting
-identities and known margins — IO coefficients, census shares, Basel III ratios
-— which is Poledna §4's usage and survey sampling's (Deville & Särndal 1992,
-calibration estimators). `calibration.parameters` fits the *behavioural
-parameters* to macro time series, the ABM literature's usual sense (Fagiolo et
-al. 2019); skabm supplies the adapter and
-[black-it](https://github.com/bancaditalia/black-it) supplies the search, via
-`uv sync --extra model-calibration`.
-
-The two compose in the sklearn way — population calibration is a transformer on
-`X`, model calibration is a search over `get_params()` — and the ordering
-follows: the population is calibrated once, *outside* the search loop, and held
-frozen while `θ` moves inside it.
-
-Design decisions, in sklearn vocabulary:
-
-- **X is the data**: heterogeneous agent populations, passed to `fit` as
-  keyword DataFrames (`Firm=`, `Household=`, ...). Predicates in the graph
-  are simply column names — the DataFrame schema *is* the graph schema.
-  **Relations live in the data too**: an IRI-valued column (a household's
-  `employer`, `owns`) becomes a graph edge at map time, and init rules
-  traverse those edges. Economic invariants that always hold — e.g. "a
-  `firm_ownership_ratio` fraction of households own firms" — are *not* the
-  user's job to encode per dataset: they ship as init rules
-  (`FIRM_OWNERSHIP`) that create the edges in-graph, controlled by a
-  hyperparameter, and only where the data left them undefined.
-- **Rules are hyperparameters**: SPARQL `string.Template` objects in
-  `__init__` (serializable, so `get_params`/`clone` work). `init_rules`
-  set *initial conditions* (run once, after mapping); `update_rules` are
-  the *dynamics* (DELETE/INSERT upserts, run every tick in the paper's
-  event order). Rule *logic* lives in the templates, rule *numbers* in the
-  `params` dict — merged over `rules.POLEDNA_PARAMS` and substituted into
-  `$placeholders` at fit time, so overriding one value is
-  `params={"total_deposits": 2.5e4}`, never a rewritten rule. The default
-  rule set covers the full economy and self-scopes: at fit time, rules
-  whose referenced agent classes are all absent from the populations are
-  filtered out, so passing only `Firm=` and `Household=` runs exactly the
-  firm and household dynamics.
-- **`model_` is the fitted artifact**: the graph where data and rules
-  blend into one evolving world. Cold `fit` rebuilds it; `warm_start=True`
-  continues it — after an intervention (`model_.update(...)`), under
-  different update rules, or on a hand-built model.
-- **Structure vs state**: predicates no update rule touches (links,
-  coefficients, classes) are *structure*, written at fit and edited only
-  by explicit intervention; predicates the rules upsert (output, price,
-  wealth, ...) are *state*, owned by the rules after t=0. The partition is
-  not asserted but *derived* — `skabm.ir` reads it off the rules' SPARQL
-  algebra at fit time, and it is what settles the extract's columns and the
-  recorded observables. It is internal: there is no IR object in the API.
-- **Observables are derived, names are declared**: which aggregates a rule
-  set implies follows from the rules; which of them is *GDP* does not.
-  `observables_` is the first; naming and anything distributional is the
-  second, written in polars over `history()` or over the per-agent frame
-  `fit_iter` yields. That line is the one place the framework deliberately
-  stops.
-- **Two models**: `model_` is the world (agents only, portable); `meta_` is
-  the sidecar the simulator keeps about the run — rule IR, behaviour
-  metadata, signal nodes, the virtualized history, and the UDFs a history
-  rule calls. Forced by maplib: a virtualization nulls graph-local
-  aggregates on whichever model carries it.
-- **Randomness is a UDF**: SPARQL has no `RAND`, so skabm registers
-  polars-random as SPARQL functions (`rules.register_polars_random`,
-  maplib ≥ 0.20.26): `pr:uniform`/`pr:normal`, called in-rule via
-  `BIND(pr:uniform(0e0, 1e0) AS ?u)`, with `RDFSimulator(random_seed=...)`
-  pinning them for reproducible runs. This is what lets the Schelling
-  example derive its whole population in-graph with no seed column, and
-  gives Poledna genuine AR(1) innovations (`$..._sigma` params, off by
-  default) — Monte-Carlo ensembles included.
+**Hooks, split by what they cost.** Per commit: `ruff`, a minimum-function-length check
+(`tools/`), every ```python fence here, and `pytest --testmon` (~0.3s on an untouched tree).
+Per push: the full suite with the coverage gate, plus `pytest --nbmake notebooks/`, so the
+long-form docs get the guarantee the README does — minus `notebooks/poledna`, which is 3m24
+and the only notebook hitting the network.
 
 ## Limitations
 
-The current simulation backend is **pure SPARQL** — deliberately, as a
-stress test of how far a declarative, set-based rule engine carries an
-economic ABM. The walls we hit are documented here on purpose.
+The backend is **pure SPARQL**, deliberately — a stress test of how far a declarative rule
+engine carries an economic ABM, so the walls are documented on purpose.
 
-**No *sequential* search-and-matching.** The paper's goods, labor, and
-credit markets are *random sequential* algorithms: consumers visit firms in
-random order, first-come-first-served, until stocks run out. Declarative
-SPARQL can only express the simultaneous approximation (demand allocated
-proportionally to supply shares). Consequently Poledna's employment links are
-static — hiring and firing would require rewiring `employer` triples under
-per-firm vacancy quotas, which needs an ordering no single UPDATE can
-express.
-
-What is *not* out of reach is search-and-matching as such. Where a model
-specifies matching as a closed form rather than a queue, SPARQL states it
-directly: `behaviour.labour` implements del Rio-Chanona et al. (2021) — an
-occupational mobility network where unemployed workers apply across a
-weighted job-transition graph and vacancies draw from their applicant pools —
-in seven rules, urn-ball matching function included, and reproduces the
-Beveridge curve. Where a model needs one-to-one assignment,
-`schelling.RELOCATE`'s rank join does it in a single batch. The wall is
-agent-by-agent *ordering*, not matching.
-
-**Estimation on the model's own history is a database, not a rule.** The
-paper's agents re-estimate their AR(1) expectation rules on the model's own
-history every quarter (behavioral learning, eq. 6/9). A SPARQL update rule
-sees one time slice — the present — so history lives in a DuckDB table that
-gains one row per tracked aggregate per tick, virtualized back into SPARQL
-through maplib's chrontext (`skabm.history`). Sample-Autocorrelation learning
-is then exactly two things the simulator already accepts: a polars UDF passed
-through `udfs=`, and a SPARQL `SELECT` passed through `history_rules=` that
-runs it over the virtualized series (`behaviour.learning`). Behaviour rules
-themselves stay graph-local — `firm_produce` reads one `def:forecast` triple
-and falls back to its `$growth_e` parameter until enough history exists.
-Nothing in `skabm.history` knows what is being learned, so a moving average or
-an RL update is another query and another UDF and no engine change.
-
-Two chrontext properties shape that design, and both fail *silently*: only
-`Model.query` federates (`update` and `insert` see virtualized data as empty,
-and CONSTRUCT panics), and registering a virtualization makes every
-graph-local aggregate on that model return `None` — which is why the
-virtualization lives on a separate learner model and results are written back
-as triples. `tests/test_history.py` pins both.
-
-SPARQL also has no `log`/`exp` of its own, so the Poledna rules turn
-log-level laws of motion into linear growth factors — but that is a choice,
-not a limit: `rules.register_math` supplies `math:exp` / `math:log` on the
-same `add_udf` seam as the random draws, which is how `behaviour.labour`
-states its urn-ball matching function and its S-curve technology shock
-verbatim. Which UDFs a rule set needs is the `udfs=` hyperparameter.
-
-**Right-associative arithmetic in maplib's SPARQL.** Operators of equal
-precedence associate to the right, against the SPARQL grammar: `?a - ?b + ?c`
-evaluates as `?a - (?b + ?c)` and `?a / ?b * ?c` as `?a / (?b * ?c)`, silently
-and with no error. Chains led by `+` or `*` survive it algebraically, which is
-why the Poledna and Schelling rules are unaffected — but bracket every mixed
-chain explicitly, and give any conservation law a test that pins its invariant
-(`tests/test_labour.py::test_labour_force_is_conserved` exists for exactly
-this reason).
-
-**Activation is synchronous and staged — and there is no scheduler, on
-purpose.** ABM "schedulers" do two jobs: ordering behavioral *phases*
-within a tick, and ordering *agents* within a phase. The ABM literature's
-hard-won result concerns the second: the activation regime is a modeling
-assumption, not a technicality — synchronous vs asynchronous updating can
-qualitatively change outcomes (Huberman & Glance 1993). In this
-architecture the engine decides it for us: a SPARQL UPDATE evaluates its
-WHERE against the pre-update graph, so all agents update simultaneously
-(synchronous), and rules fire in list order (staged) — exactly Mesa's
-`StagedActivation`, with `RandomActivation` structurally unreachable. An
-in-house scheduler could only reorder phases, which an ordered rule list
-already does; the investment only becomes worthwhile with a numerical
-backend, where activation regimes become a real, implementable choice.
-
-**Reproducibility caveat.** A *simulation* is reproducible via
-`RDFSimulator(random_seed=...)`, which pins the `pr:*` UDF draws. *Calibration*
-is subtler: `polars_random.set_random_seed` only reaches the `size=N` Series
-form, not the expression-over-frame form `make_dataset` uses for its value
-pools, so a population is reproducible only when each `pr.*` sampler (and
-`weighted_enum`) is given an explicit `seed=`.
+| Wall | Why, and what is *not* walled |
+|---|---|
+| **No sequential search-and-matching** | the paper's goods, labour and credit markets are *random sequential*: consumers visit firms in random order until stocks run out. SPARQL expresses only the simultaneous approximation, so Poledna's employment links stay static. Matching *as such* is fine where a model states it in closed form: `behaviour.labour` does del Rio-Chanona et al. (2021) in seven rules, urn-ball function included, and reproduces the Beveridge curve; `schelling.RELOCATE` does one-to-one assignment as a rank join. The wall is agent-by-agent *ordering* |
+| **Estimation on history is a database** | a SPARQL update rule sees one time slice, so the model's own past lives in DuckDB, virtualized back through chrontext. Two chrontext properties shape this and both fail *silently*: only `Model.query` federates (`update`/`insert` see virtualized data as empty, CONSTRUCT panics), and registering a virtualization makes every graph-local aggregate return `None`. `tests/test_history.py` pins both |
+| **Right-associative arithmetic** | in maplib's SPARQL, operators of equal precedence associate right, against the grammar: `?a - ?b + ?c` evaluates as `?a - (?b + ?c)`, silently. Chains led by `+` or `*` survive algebraically, which is why the shipped rules are unaffected — bracket every mixed chain, and give conservation laws a test (`test_labour_force_is_conserved` exists for this) |
+| **Synchronous, staged activation** | and no scheduler, on purpose. A SPARQL UPDATE evaluates its WHERE against the pre-update graph, so all agents update simultaneously and rules fire in list order — exactly Mesa's `StagedActivation`, with `RandomActivation` structurally unreachable. Activation regime is a modelling assumption (Huberman & Glance 1993), and it only becomes an implementable choice with a numerical backend |
+| **No `log`/`exp` in SPARQL** | a choice, not a limit: `rules.register_math` supplies `math:exp`/`math:log` on the same `add_udf` seam as the random draws, which is how `behaviour.labour` states its urn-ball function and S-curve verbatim. Which UDFs a rule set needs is the `udfs=` hyperparameter |
+| **Reproducibility** | a *simulation* is reproducible via `random_seed=`; *calibration* is subtler, since `polars_random.set_random_seed` reaches only the `size=N` Series form and not the expression-over-frame form `make_dataset` uses, so a population is reproducible only when each sampler gets an explicit `seed=` |
 
 ## Roadmap
 
-- **Numerical backends**: compile the graph to polars frames
-  (`Model.query` → DataFrame → polars expressions, or `.to_jax()` for
-  differentiable kernels), step in frame-land, re-map at observation
-  points. The SPARQL path then becomes the slow, semantically transparent
-  reference implementation the fast kernels are validated against — and
-  the home of search-and-matching, activation regimes, and gradient-based
-  calibration.
-- **Rule-scoped validation**: `skabm.ir` already knows the predicates each
-  rule traverses; the remaining step is checking coverage against the graph
-  at fit time and emitting SHACL shapes from the same read/write sets.
-- **Sensitivity-ranked observables**: 19 recorded series is more than a
-  figure needs. Ranking them by paired-seed ε-shocks (common random numbers,
-  so the difference is signal and not RNG) would order the panels and give
-  calibration a divergence detector for early stopping. Deliberately not
-  built: it costs k+1 simulations per k parameters, and it is only valid
-  once every draw in a tick is provably seeded.
-- **Per-agent signals**: `ex:sig__` records class-level aggregates only, so a
-  rule wanting "this firm versus its own past" has nowhere to put one. The
-  history table and the write-back would carry it unchanged; the signal
-  grammar is what needs widening.
-- **Self-describing export**: serialize `model_` together with its rule
-  strings — world and behavior in a single shareable artifact.
+| | |
+|---|---|
+| **Numerical backends** | compile the graph to polars frames (or `.to_jax()` for differentiable kernels), step in frame-land, re-map at observation points. The SPARQL path becomes the slow, semantically transparent reference the fast kernels are validated against — and the home of search-and-matching, activation regimes and gradient-based calibration |
+| **Rule-scoped validation** | `skabm.ir` already knows the predicates each rule traverses; the step left is checking coverage against the graph at fit time and emitting SHACL shapes from the same read/write sets |
+| **Sensitivity-ranked observables** | 19 series is more than a figure needs. Ranking by paired-seed ε-shocks would order the panels and give calibration a divergence detector. Deliberately unbuilt: k+1 simulations per k parameters, and only valid once every draw in a tick is provably seeded |
 
 ## References
 
-- Poledna, Miess, Hommes & Rabitsch (2023). Economic forecasting with an
-  agent-based model. *European Economic Review* 151, 104306.
-- del Rio-Chanona, Mealy, Beguerisse-Díaz, Lafond & Farmer (2021).
-  Occupational mobility and automation: a data-driven network model.
-  *J. R. Soc. Interface* 18(174), 20200898.
-- Hommes & Zhu (2014). Behavioral learning equilibria. *JET* 150.
-- Huberman & Glance (1993). Evolutionary games and computer simulations.
-  *PNAS* 90(16).
-- Deville & Särndal (1992). Calibration estimators in survey sampling.
-  *JASA* 87(418).
-- Fagiolo, Guerini, Lamperti, Moneta & Roventini (2019). Validation of
-  agent-based models in economics and finance. In *Computer Simulation
-  Validation*, Springer.
-- [black-it](https://github.com/bancaditalia/black-it) — Banca d'Italia's ABM
-  parameter-calibration toolbox.
-- [maplib](https://github.com/DataTreehouse/maplib) — Rust knowledge-graph
-  toolkit with polars-native OTTR templates and SPARQL.
-- [AMBER](https://github.com/a11to1n3/AMBER) — polars-based ABM framework.
+- Poledna, Miess, Hommes & Rabitsch (2023). Economic forecasting with an agent-based model.
+  *European Economic Review* 151, 104306 · del Rio-Chanona, Mealy, Beguerisse-Díaz, Lafond &
+  Farmer (2021). Occupational mobility and automation. *J. R. Soc. Interface* 18(174), 20200898.
+- Hommes & Zhu (2014). Behavioral learning equilibria. *JET* 150 · Huberman & Glance (1993).
+  Evolutionary games and computer simulations. *PNAS* 90(16) · Deville & Särndal (1992).
+  Calibration estimators in survey sampling. *JASA* 87(418) · Fagiolo, Guerini, Lamperti,
+  Moneta & Roventini (2019). Validation of ABMs. In *Computer Simulation Validation*.
+- [black-it](https://github.com/bancaditalia/black-it) (ABM parameter calibration) ·
+  [maplib](https://github.com/DataTreehouse/maplib) (knowledge graphs, OTTR, SPARQL) · [AMBER](https://github.com/a11to1n3/AMBER) (polars-based ABM).

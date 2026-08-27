@@ -13,6 +13,17 @@ repos:
         language: system
         pass_filenames: false
 
+      # A function under four lines of *code* (docstrings and comments do not
+      # count) is a name, not an abstraction; a module docstring over 30 lines is
+      # a design note that belongs in the README. Good code reads as itself.
+      # tools/short-functions.baseline grandfathers what predates the function
+      # rule; it is an allowlist to shrink, never to extend.
+      - id: min-function-lines
+        name: no tiny functions, no long module docstrings
+        entry: uv run --no-sync python tools/min_function_lines.py
+        language: system
+        pass_filenames: false
+
       # Per-commit: only the tests that touch what changed. testmon keeps a
       # line-level map of which test exercises which code in .testmondata, so an
       # untouched tree collects nothing (~0.3s) and a one-module change runs its
