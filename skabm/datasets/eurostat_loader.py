@@ -22,6 +22,7 @@ build a firm-population spec for ``make_dataset``.
 
 from __future__ import annotations
 
+import math
 import re
 from functools import lru_cache
 
@@ -155,7 +156,7 @@ def _nearest_year(
     # Sort candidate years by distance to requested year; skip nulls.
     for col in sorted(year_cols, key=lambda c: abs(int(c) - year)):
         val = sub[col][0]
-        if val is not None and not (isinstance(val, float) and val != val):  # not NaN
+        if val is not None and not (isinstance(val, float) and math.isnan(val)):
             return float(val)
 
 

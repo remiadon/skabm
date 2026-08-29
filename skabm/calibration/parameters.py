@@ -30,14 +30,14 @@ the identification reading of a calibration result.
 
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import polars as pl
 
 from skabm.behaviour.params import poledna_params
 
-__all__ = ["simulator_model", "noise_floor"]
+__all__ = ["noise_floor", "simulator_model"]
 
 
 def simulator_model(

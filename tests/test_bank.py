@@ -20,7 +20,7 @@ with one.
 import polars as pl
 import pytest
 
-from skabm.behaviour.bank import bank_depositors, bank_capital, interbank_contagion
+from skabm.behaviour.bank import bank_capital, bank_depositors, interbank_contagion
 from skabm.behaviour.params import poledna_params
 from skabm.simulation import RDFSimulator
 
@@ -43,7 +43,7 @@ def _infer_licensed() -> bool:
             "PREFIX ex: <http://x#> CONSTRUCT { ?s ex:p ?o } WHERE { ?s ex:p ?o }"
         )
         return True
-    except BaseException:
+    except BaseException:  # noqa: BLE001 - a pyo3 panic is not an Exception
         return False
 
 

@@ -32,7 +32,7 @@ that ``get_params()`` / ``clone()`` work.
 from __future__ import annotations
 
 import warnings
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import polars as pl
@@ -217,7 +217,7 @@ def _conditional_transform(
 
 
 def make_dataset(
-    samplers: dict[str, "pl.Series | pl.Expr"],
+    samplers: dict[str, pl.Series | pl.Expr],
     n_agents: int = 500,
     seed: int = 0,
 ) -> pl.DataFrame:
@@ -309,7 +309,7 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
         self.seed = seed
         self.verbose = verbose
 
-    def fit(self, X: pl.DataFrame, y=None) -> "GeneticConstraintCalibration":
+    def fit(self, X: pl.DataFrame, y=None) -> GeneticConstraintCalibration:
         """Permute rows of X to minimise constraint energy.  Populates samplers_."""
         constraints = _de_constraints(self.constraints)
         _warn_single_col_constraints(constraints)
@@ -435,7 +435,7 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
         self.seed = seed
         self.verbose = verbose
 
-    def fit(self, X: pl.DataFrame, y=None) -> "MetropolisHastingsConstraintCalibration":
+    def fit(self, X: pl.DataFrame, y=None) -> MetropolisHastingsConstraintCalibration:
         """Run MH on X using X[col] as the proposal pool.  Populates samplers_."""
         constraints = _de_constraints(self.constraints)
         _warn_single_col_constraints(constraints)
@@ -453,7 +453,7 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
             return pl.concat([working.select(anchors), df], how="horizontal_extend")
 
         # Pre-generate all random indices via polars (no numpy RNG).
-        _rints = lambda n, hi, s: (  # noqa: E731
+        _rints = lambda n, hi, s: (
             pl.int_range(hi, eager=True)
             .sample(n, with_replacement=True, seed=s)
             .to_list()

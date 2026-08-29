@@ -1,6 +1,6 @@
 # skabm
 
-![coverage](https://img.shields.io/badge/coverage-99%25-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
 
 **scikit-learn-style agent-based modeling on a knowledge graph.**
 
@@ -228,6 +228,7 @@ imposable.
 | [notebooks/extraction](notebooks/extraction.ipynb) | what to *do* with derived state: Gini as one polars expression, an intervention that moves it, telemetry into JAX |
 | [notebooks/labour_automation](notebooks/labour_automation.ipynb) | occupational mobility under an automation shock — a labour-flow network whose central quantity lives on the *edge* |
 | [notebooks/schelling](notebooks/schelling.ipynb) | spatial segregation on the lattice; the continuous-geometry swap is covered by `tests/test_schelling.py` |
+| [notebooks/hale](notebooks/hale.ipynb) | Moon et al. (2026): an SIR epidemic whose contact network is rewired by what an LLM says people will do. `llm:choose` is a SPARQL UDF, so the model is a function inside a rule; three of the four arms need no account |
 
 ## Architecture
 
@@ -239,6 +240,7 @@ imposable.
 | `skabm.ottr` | One maplib `Template` per agent class: the contract a population is checked and cast against |
 | `skabm.rules` | Namespaces, `render` (param substitution) and the UDF registrars |
 | `skabm.behaviour` | The rule library by economic function: `firm`, `household`, `macro`, `bank`, `labour`, `learning` |
+| `skabm.schelling`, `skabm.hale` | Whole model families outside the Poledna economy: spatial segregation, and the HALE epidemic with its LLM-decided mobility |
 | `skabm.ir` | Rule IR: read/write sets off the SPARQL algebra, the state/structure partition, the per-class schema, the observables implied |
 | `skabm.history` | Measuring the observables, and the DuckDB sidecar that persists and virtualizes them (chrontext) |
 | `skabm.simulation` | `RDFSimulator`: `fit`/`fit_iter` over SPARQL update rules |
@@ -249,6 +251,7 @@ imposable.
 | **Rules are hyperparameters** | `string.Template` objects in `__init__`, so `get_params`/`clone` work. `init_rules` set initial conditions once after mapping; `update_rules` are the dynamics, upserted every tick in the paper's event order. The default set self-scopes: rules whose classes are all absent match nothing |
 | **`model_` is the fitted artifact** | the graph where data and rules blend into one evolving world. Cold `fit` rebuilds it; `warm_start=True` continues it |
 | **Structure vs state** | predicates no update rule touches (links, coefficients) are *structure*, written at fit and edited only by intervention; predicates the rules upsert are *state*, owned by the rules after t=0. Derived, not asserted — `skabm.ir` reads it off the algebra, and it settles both the extract's columns and the observables |
+| **Decisions can be a UDF too** | the same `Model.add_udf` seam carries a language model: `rules.register_llm` registers `llm:choose(?prompt)`, a rule builds the prompt out of an agent's own triples with `CONCAT`, and the answer is mapped to a number before it becomes a triple. Answers memoize on the prompt, which is how `skabm.hale` inherits the paper's one-LLM-agent-per-group reduction without any machinery for it |
 | **Randomness is a UDF** | SPARQL has no `RAND`, so polars-random is registered as `pr:uniform`/`pr:normal` and called in-rule via `BIND(...)`, pinned by `RDFSimulator(random_seed=...)`. That is what lets the Schelling example derive its whole population in-graph with no seed column, and gives Poledna genuine AR(1) innovations |
 
 **Two senses of "calibration".** `calibration.population` fits agent *rows* to accounting

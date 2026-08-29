@@ -11,14 +11,14 @@ unreferenced-population warning, and sklearn get_params/clone compatibility.
 """
 
 import polars as pl
-from maplib import Model
 import pytest
+from maplib import Model
 from sklearn.base import clone
 
-from skabm.rules import DEF_NS
 from skabm.behaviour.firm import firm_ownership, firm_produce
 from skabm.behaviour.household import household_income_init
 from skabm.ottr import map_populations
+from skabm.rules import DEF_NS
 from skabm.simulation import RDFSimulator
 
 _PREFIX = f"PREFIX def:<{DEF_NS}> PREFIX ex:<http://example.net/skabm#>"
@@ -416,8 +416,8 @@ def test_get_params_and_clone():
 def test_inject_metadata_adds_triples():
     # _inject_metadata is the SPARQL-free provenance path; exercise it
     # directly so the insertion block is covered without a full cold fit.
-    from skabm.simulation import _inject_metadata
     from skabm.behaviour.firm import firm_ownership
+    from skabm.simulation import _inject_metadata
 
     m = firm_ownership.metadata
     assert m["@id"] == "firm_ownership"

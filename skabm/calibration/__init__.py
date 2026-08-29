@@ -28,6 +28,7 @@ Both modules' public names are re-exported here, so ``from skabm.calibration
 import make_dataset`` keeps working.
 """
 
+from .parameters import noise_floor, simulator_model
 from .population import (
     GeneticConstraintCalibration,
     MetropolisHastingsConstraintCalibration,
@@ -35,16 +36,13 @@ from .population import (
     make_dataset,
     weighted_enum,
 )
-from .parameters import noise_floor, simulator_model
 
 __all__ = [
-    # population calibration
-    "make_dataset",
-    "weighted_enum",
-    "energy",
     "GeneticConstraintCalibration",
     "MetropolisHastingsConstraintCalibration",
-    # model calibration
-    "simulator_model",
+    "energy",
+    "make_dataset",
     "noise_floor",
+    "simulator_model",
+    "weighted_enum",
 ]

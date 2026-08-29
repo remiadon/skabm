@@ -32,14 +32,32 @@ path then becomes the reference the fast kernels are validated against.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable, Iterator, Sequence
 from string import Template
-from typing import Callable, Iterator, Sequence
 
 import polars as pl
 import polars_random as pr
 from maplib import Model
 from sklearn.base import BaseEstimator
 
+from skabm.behaviour.firm import (
+    firm_ownership,
+    firm_price,
+    firm_produce,
+    firm_sales,
+)
+from skabm.behaviour.household import (
+    household_income,
+    household_income_init,
+    household_wealth_init,
+    satisificing_consume,
+)
+from skabm.behaviour.learning import register_sac, sac_learning
+from skabm.behaviour.macro import (
+    centralbank_rate,
+    government_spend,
+)
+from skabm.behaviour.params import poledna_params
 from skabm.history import TABLE as HISTORY_TABLE
 from skabm.history import (
     apply_history_rules,
@@ -52,24 +70,6 @@ from skabm.history import (
 )
 from skabm.ir import analyse, rule_name
 from skabm.rules import EX_NS, register_polars_random, render
-from skabm.behaviour.learning import register_sac, sac_learning
-from skabm.behaviour.params import poledna_params
-from skabm.behaviour.household import (
-    household_income_init,
-    household_income,
-    household_wealth_init,
-    satisificing_consume,
-)
-from skabm.behaviour.firm import (
-    firm_ownership,
-    firm_produce,
-    firm_price,
-    firm_sales,
-)
-from skabm.behaviour.macro import (
-    government_spend,
-    centralbank_rate,
-)
 
 # Canonical Poledna (2023) rule composition, sourced from behaviour/.
 # Users override via __init__(init_rules=..., update_rules=..., params=...).
@@ -266,7 +266,7 @@ class RDFSimulator(BaseEstimator):
         ),
         random_seed: int | None = None,
         history_rules: Sequence[Template | str] = DEFAULT_HISTORY_RULES,
-        duckdb_connection: "str | object | None" = None,
+        duckdb_connection: str | object | None = None,
     ):
         self.init_rules = init_rules
         self.update_rules = update_rules
@@ -290,7 +290,7 @@ class RDFSimulator(BaseEstimator):
 
     def _cold_start(
         self,
-        world: "Model | dict[str, pl.DataFrame]",
+        world: Model | dict[str, pl.DataFrame],
         init_rules: list[str],
         update_rules: list[str],
         infer_rules: list[str] | None,
@@ -543,7 +543,7 @@ class RDFSimulator(BaseEstimator):
             )
         return state_frame(self.connection_)
 
-    def fit(self, X=None) -> "RDFSimulator":
+    def fit(self, X=None) -> RDFSimulator:
         """Take the world, apply init rules, run all ticks; return self."""
         for _ in self.fit_iter(X):
             pass

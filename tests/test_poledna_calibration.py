@@ -26,9 +26,9 @@ Coverage vs paper Table 2 (~70%):
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import polars as pl
 import polars_random as pr
+import pytest
 
 from skabm.calibration import (
     GeneticConstraintCalibration,
@@ -38,7 +38,6 @@ from skabm.calibration import (
     weighted_enum,
 )
 from skabm.datasets import build_firm_io_df
-
 
 # ---------------------------------------------------------------------------
 # Table 2 scalar parameters (reference quarter 2010:Q4)

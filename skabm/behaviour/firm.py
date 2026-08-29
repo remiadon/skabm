@@ -13,7 +13,7 @@ from __future__ import annotations
 from string import Template
 
 from skabm.behaviour.learning import expect
-from skabm.rules import EX_NS, _PREFIXES
+from skabm.rules import _PREFIXES, EX_NS
 
 # ---------------------------------------------------------------------------
 # firm_ownership — assign firm owners to investor households (init CONSTRUCT)

@@ -30,6 +30,17 @@ history = [
 model-calibration = [
     "black-it>=0.3.3",
 ]
+# LLM-decided behaviour: `rules.register_llm` puts a provider call behind the
+# `llm:choose` SPARQL UDF, so a rule can hand an agent's own triples to a model
+# and write the decision back (skabm.hale, notebooks/hale.ipynb).  An extra, not
+# a dependency: no rule mentions llm: unless you write one, and the import is
+# function-scoped like the history extra's.  Both LangChain backends are here so
+# `provider="aopenai"` reaches any OpenAI-compatible server (Ollama, vLLM,
+# llama.cpp) as a `base_url` — which is how to run it with no account at all.
+# The default path needs ANTHROPIC_API_KEY.
+llm = [
+    "polars-llm[anthropic,openai]>=0.2.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
