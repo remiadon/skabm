@@ -239,6 +239,7 @@ imposable.
 | `skabm.ottr` | One maplib `Template` per agent class: the contract a population is checked and cast against |
 | `skabm.rules` | Namespaces, `render` (param substitution) and the UDF registrars |
 | `skabm.behaviour` | The rule library by economic function: `firm`, `household`, `macro`, `bank`, `labour`, `learning` |
+| `skabm.housing` | Two behavioural rules setting one price, composed rather than merged — the worked example for rule composition |
 | `skabm.ir` | Rule IR: read/write sets off the SPARQL algebra, the state/structure partition, the per-class schema, the observables implied |
 | `skabm.history` | Measuring the observables, and the DuckDB sidecar that persists and virtualizes them (chrontext) |
 | `skabm.simulation` | `RDFSimulator`: `fit`/`fit_iter` over SPARQL update rules |
@@ -247,6 +248,7 @@ imposable.
 |---|---|
 | **X is the world** | a maplib `Model`, or a `{class: DataFrame}` mapping put into one. Predicates are column names — the DataFrame schema *is* the graph schema — and an IRI-valued column (`employer`, `owns`) is a graph edge. Invariants that always hold ship as init rules (`firm_ownership`) rather than being re-encoded per dataset |
 | **Rules are hyperparameters** | `string.Template` objects in `__init__`, so `get_params`/`clone` work. `init_rules` set initial conditions once after mapping; `update_rules` are the dynamics, upserted every tick in the paper's event order. The default set self-scopes: rules whose classes are all absent match nothing |
+| **Rules compose by predicate, not by merging** | two behaviours that determine the same quantity are two rules writing two *different* predicates plus a combinator that reads both — never one rule containing both logics. `firm_produce` writes `def:output`, `firm_labor` reads it; `housing` prices from the neighbourhood in one rule and from a time-on-market heuristic in another, and `ASK_PRICE` mixes them under a `$anchor` weight black-it can calibrate. Two rules writing the *same* predicate do not compose: the WHERE sees the pre-update graph, so the second silently wins. Where the motives are simultaneous rather than staged, compose the SPARQL text instead — `learning.expect`, `housing.neighbourhood_mean` |
 | **`model_` is the fitted artifact** | the graph where data and rules blend into one evolving world. Cold `fit` rebuilds it; `warm_start=True` continues it |
 | **Structure vs state** | predicates no update rule touches (links, coefficients) are *structure*, written at fit and edited only by intervention; predicates the rules upsert are *state*, owned by the rules after t=0. Derived, not asserted — `skabm.ir` reads it off the algebra, and it settles both the extract's columns and the observables |
 | **Randomness is a UDF** | SPARQL has no `RAND`, so polars-random is registered as `pr:uniform`/`pr:normal` and called in-rule via `BIND(...)`, pinned by `RDFSimulator(random_seed=...)`. That is what lets the Schelling example derive its whole population in-graph with no seed column, and gives Poledna genuine AR(1) innovations |
