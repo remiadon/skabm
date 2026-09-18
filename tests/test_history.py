@@ -14,12 +14,14 @@ graph (registering one nulls every aggregate the behaviour rules use).
 import numpy as np
 import polars as pl
 import pytest
+from maplib import Model
 
 from skabm import history as H
 from skabm import ir as IR
 from skabm.behaviour.learning import expect, register_sac, sac_learning
 from skabm.rules import DEF_NS
 from skabm.simulation import RDFSimulator
+from skabm.templates import firm_template
 
 _PREFIX = f"PREFIX def:<{DEF_NS}> PREFIX ex:<http://example.net/skabm#>"
 PARAMS = {"total_deposits": 1000.0}
@@ -29,7 +31,7 @@ OUTPUT = ("SUM", "Firm", "output")
 FIRMS = pl.DataFrame(
     {
         "id": ["firm_0", "firm_1"],
-        "size": [10, 20],
+        "size": [10.0, 20.0],
         "alpha": [1e6, 2e6],  # capacity far above output: growth is never capped
         "w_bar": [30.0, 40.0],
         "tech_share": [0.4, 0.5],
@@ -39,7 +41,14 @@ FIRMS = pl.DataFrame(
         "margin": [0.1, 0.05],
         "liquidity": [10.0, 10.0],
     }
-)
+).with_iri()
+
+
+def firms() -> Model:
+    """A fresh world per fit: a cold fit advances the graph it is given."""
+    world = Model()
+    world.map(firm_template, FIRMS)
+    return world
 
 
 def sac_by_numpy(levels) -> float:
@@ -69,7 +78,6 @@ def learner_over():
                 for t in (range(len(levels)) if order is None else order)
             ],
         )
-        from maplib import Model
 
         meta = Model()
         H.attach_history(meta, con, [H.signal_name(*OUTPUT)])
@@ -105,7 +113,7 @@ def test_measuring_needs_no_database_and_signals_are_what_open_one():
     bare = RDFSimulator(
         init_rules=(), update_rules=(PLAIN,), history_rules=(), n_periods=2
     )
-    run = pl.DataFrame(bare.fit_iter({"Firm": FIRMS}))
+    run = pl.DataFrame(bare.fit_iter(firms()))
     assert bare.connection_ is None and bare.virtualized_ is False
     assert set(run.columns) == {
         "t",
@@ -121,7 +129,7 @@ def test_measuring_needs_no_database_and_signals_are_what_open_one():
         history_rules=(),
         n_periods=2,
         duckdb_connection=H.connect(None),
-    ).fit({"Firm": FIRMS})
+    ).fit(firms())
     assert kept.virtualized_ is False  # nothing consumes history, nothing learns
     assert set(kept.history()["signal"]) == set(run.columns) - {"t"}
 
@@ -132,7 +140,7 @@ def test_measuring_needs_no_database_and_signals_are_what_open_one():
         n_periods=1,
         track=False,
     )
-    *_, row = narrow.fit_iter({"Firm": FIRMS})
+    *_, row = narrow.fit_iter(firms())
     assert set(row) == {"t"}  # this rule set consumes nothing, so nothing is left
 
 
@@ -145,7 +153,7 @@ def test_measurement_covers_every_observable_of_every_class_present():
     and not just the two the rules read back.
     """
     sim = RDFSimulator(params=PARAMS, n_periods=4)
-    run = pl.DataFrame(sim.fit_iter({"Firm": FIRMS}))
+    run = pl.DataFrame(sim.fit_iter(firms()))
     history = H.state_frame(sim.connection_)
     recorded = set(history["signal"])
 
@@ -170,7 +178,7 @@ def test_history_rule_results_are_upserted_as_predicates_on_their_subject(tmp_pa
     """
     path = str(tmp_path / "history.duckdb")
     sim = RDFSimulator(params=PARAMS, n_periods=4, duckdb_connection=path)
-    sim.fit({"Firm": FIRMS})
+    sim.fit(firms())
 
     written = sim.model_.query(f"{_PREFIX} SELECT ?s ?f WHERE {{ ?s def:forecast ?f }}")
     assert {iri.strip("<>").rsplit("#", 1)[-1] for iri in written["s"]} == {
@@ -178,7 +186,7 @@ def test_history_rule_results_are_upserted_as_predicates_on_their_subject(tmp_pa
         "sig__AVG__Firm__price",
     }
 
-    sim.fit({"Firm": FIRMS})  # cold refit clears the previous run's memory
+    sim.fit(firms())  # cold refit clears the previous run's memory
     assert H.state_frame(sim.connection_)["t"].max() == 4
     # upserted, not accumulated: still one forecast per signal
     assert (
@@ -202,7 +210,7 @@ def test_virtualization_is_kept_off_the_simulation_graph():
     That is why the learner is a separate ``Model``.  Pinned because violating
     it would silently no-op firm_sales and the Taylor rule rather than raise.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=3).fit({"Firm": FIRMS})
+    sim = RDFSimulator(params=PARAMS, n_periods=3).fit(firms())
     total = sim.model_.query(
         f"{_PREFIX} SELECT (SUM(?y) AS ?total) WHERE {{ ?f a ex:Firm ; def:output ?y }}"
     )["total"][0]
@@ -254,13 +262,13 @@ def test_expectations_are_learned_end_to_end_from_an_empty_history():
     something to estimate, and what gets published must equal the forecast
     recomputed by hand from the recorded series.
     """
-    flat = RDFSimulator(params=PARAMS, n_periods=5).fit({"Firm": FIRMS})
+    flat = RDFSimulator(params=PARAMS, n_periods=5).fit(firms())
     levels = H.state_frame(flat.connection_).filter(
         pl.col("signal") == "sig__SUM__Firm__output"
     )["level"]
     assert levels.n_unique() == 1  # steady state: no prior to push it off
 
-    sim = RDFSimulator(params=SHOCKED, n_periods=10, random_seed=7).fit({"Firm": FIRMS})
+    sim = RDFSimulator(params=SHOCKED, n_periods=10, random_seed=7).fit(firms())
     shocked = (
         H.state_frame(sim.connection_)
         .filter(pl.col("signal") == "sig__SUM__Firm__output")
@@ -283,7 +291,7 @@ def test_aggregates_on_the_sidecar_are_the_price_of_the_split():
     that *does* carry the virtualization, the same aggregate returns None — no
     error, no warning.  Anything reading ``meta_`` counts rows in Python.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=1).fit({"Firm": FIRMS})
+    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(firms())
     assert sim.virtualized_
 
     every = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"

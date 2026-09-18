@@ -29,11 +29,11 @@ Three properties of the virtualization shape all of the above, and all three fai
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import polars as pl
 
-from skabm.rules import DEF_NS, EX_NS, _PREFIXES
+from skabm.rules import _PREFIXES, DEF_NS, EX_NS
 
 CT_NS = "https://github.com/DataTreehouse/chrontext#"
 
@@ -56,7 +56,7 @@ EPOCH = "2000-01-01"
 signal_name = "sig__{}__{}__{}".format
 
 
-def connect(connection: "str | object | None" = None):
+def connect(connection: str | object | None = None):
     """Open (or adopt) the DuckDB connection holding the state history.
 
     ``None`` opens a fresh ``:memory:`` database — history lives as long as the

@@ -5,7 +5,9 @@ A stress test of ``skabm.rules`` + ``RDFSimulator``: same ``Template`` rules, sa
 mapping, same ``fit_iter`` loop, a different model family.  Nothing in ``RDFSimulator``
 knows about space, because **the grid is a population, not a module**::
 
-    sim.fit({"Cell": cells, "Person": persons})
+    world = Model()
+    world.map(cell_template, cells.with_iri())
+    sim.fit(world)
 
 ``Cell`` carries ``x``/``y``, ``Person`` carries ``group`` and a ``location`` link into
 a cell.  Occupancy is the *absence* of an inbound ``def:location`` edge (``FILTER NOT
@@ -237,7 +239,7 @@ def state_extract(model) -> pl.DataFrame:
 # Cost: unlike GRID_NEIGHBORHOOD's O(8N) VALUES join this is an O(N^2) pair
 # scan (no spatial index without `geof:`), fine for hundreds of locations,
 # not for a country of them.  The geometry is carried as a plain string under
-# `def:geometry` because `ottr.cell_template` declares it `xsd:string`, as
+# `def:geometry` because `templates.cell_template` declares it `xsd:string`, as
 # every string column is typed; a fully conformant graph would tag the
 # literal `geo:wktLiteral` and link it via `geo:asWKT`, a mapping detail
 # orthogonal to the dynamics.

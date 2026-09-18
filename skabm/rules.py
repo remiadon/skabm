@@ -8,7 +8,7 @@ the behaviour templates (``skabm.behaviour.*``) and the simulator
 SPARQL rule *logic* lives in ``skabm.behaviour`` (firm.py, household.py,
 macro.py).  This module carries only the plumbing: namespaces, ``render()``,
 ``register_polars_random()``, ``register_math()`` and ``dbl()``.  Mapping is
-``skabm.ottr``'s.
+``skabm.templates``'s.
 
 There is no ``state_extract`` here any more: what a model's per-agent frame
 should contain is derivable from the rules themselves, and ``skabm.ir`` derives
@@ -105,7 +105,7 @@ def dbl(x: float) -> str:
     return f"{x:.6e}"
 
 
-def render(rule: "Template | str", params: dict) -> str:
+def render(rule: Template | str, params: dict) -> str:
     """Substitute a rule Template's $-placeholders with xsd:double literals.
 
     Numeric parameter values go through ``dbl`` so decimal literals can

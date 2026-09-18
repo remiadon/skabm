@@ -26,9 +26,10 @@ Coverage vs paper Table 2 (~70%):
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import polars as pl
 import polars_random as pr
+import pytest
+from maplib import Model
 
 from skabm.calibration import (
     GeneticConstraintCalibration,
@@ -38,7 +39,7 @@ from skabm.calibration import (
     weighted_enum,
 )
 from skabm.datasets import build_firm_io_df
-
+from skabm.templates import firm_template, household_template
 
 # ---------------------------------------------------------------------------
 # Table 2 scalar parameters (reference quarter 2010:Q4)
@@ -445,7 +446,15 @@ CAL_HH = pl.DataFrame(
         "employer": [f"firm_{i % 6}" for i in range(12)],
     }
 )
-CAL_POPS = {"Firm": CAL_FIRMS, "Household": CAL_HH}
+
+
+def cal_world() -> Model:
+    world = Model()
+    world.map(firm_template, CAL_FIRMS.with_iri())
+    world.map(household_template, CAL_HH.with_iri("employer"))
+    return world
+
+
 CAL_PARAMS = {"total_deposits": 4.0e5}
 
 
@@ -456,7 +465,7 @@ def _summarise(state: pl.DataFrame) -> list[float]:
 
 def _model(**kwargs):
     return simulator_model(
-        CAL_POPS,
+        cal_world,
         free=["growth_sigma"],
         summarise=_summarise,
         params=CAL_PARAMS,
@@ -471,7 +480,7 @@ def test_summarise_defaults_to_the_derived_observables():
     rule set already implies — so the common case passes no ``summarise`` and
     the columns come out named.
     """
-    model = simulator_model(CAL_POPS, free=["growth_sigma"], params=CAL_PARAMS)
+    model = simulator_model(cal_world, free=["growth_sigma"], params=CAL_PARAMS)
     out = model([0.0], 6, 0)
 
     assert out.shape == (6, len(model.observables_))
@@ -481,7 +490,7 @@ def test_summarise_defaults_to_the_derived_observables():
 
     # track=False narrows the vector to the signals the rules read back
     narrow = simulator_model(
-        CAL_POPS, free=["growth_sigma"], params=CAL_PARAMS, track=False
+        cal_world, free=["growth_sigma"], params=CAL_PARAMS, track=False
     )
     assert narrow([0.0], 6, 0).shape == (6, 3)
     assert set(narrow.observables_) < set(model.observables_)
@@ -499,7 +508,7 @@ def test_simulator_model_shape_and_guards():
         _model(n_periods=5)
     with pytest.raises(ValueError, match="not in the parameter set"):
         simulator_model(
-            CAL_POPS, free=["no_such_knob"], summarise=_summarise, params=CAL_PARAMS
+            cal_world, free=["no_such_knob"], summarise=_summarise, params=CAL_PARAMS
         )
 
 
@@ -511,7 +520,7 @@ def test_early_stopping_preserves_the_shape_contract():
     candidate is penalised on its own numbers.
     """
     diverged = simulator_model(
-        CAL_POPS,
+        cal_world,
         free=["growth_sigma"],
         summarise=_summarise,
         params=CAL_PARAMS,
@@ -527,7 +536,7 @@ def test_early_stopping_preserves_the_shape_contract():
 
     # a criterion that never fires costs nothing and changes nothing
     never = simulator_model(
-        CAL_POPS,
+        cal_world,
         free=["growth_sigma"],
         summarise=_summarise,
         params=CAL_PARAMS,
@@ -548,7 +557,7 @@ def test_noise_floor_measures_seed_spread():
         def compute_loss(self, simulated, real_data):
             return float(np.abs(np.mean(simulated, axis=0) - real_data).mean())
 
-    model = simulator_model(CAL_POPS, free=["growth_sigma"], params=CAL_PARAMS)
+    model = simulator_model(cal_world, free=["growth_sigma"], params=CAL_PARAMS)
     real = np.zeros((4, len(model([0.0], 4, 0)[0])))
 
     losses = noise_floor(
@@ -567,7 +576,7 @@ def test_noise_floor_measures_seed_spread():
 def test_derived_summarise_needs_something_to_derive():
     """A rule set that implies no observable says so instead of returning (N, 0)."""
     model = simulator_model(
-        {"Firm": CAL_FIRMS},
+        cal_world,
         free=["growth_sigma"],
         params=CAL_PARAMS,
         init_rules=(),

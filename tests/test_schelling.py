@@ -18,6 +18,7 @@ GeoSPARQL spatial-structure swap.
 
 import polars as pl
 import polars_random as pr
+from worlds import world
 
 from skabm.rules import _PREFIXES
 from skabm.schelling import (
@@ -59,7 +60,7 @@ def test_settle_derives_population():
         n_periods=0,
         state_extract=state_extract,
         random_seed=0,
-    ).fit({"Cell": grid(6)})
+    ).fit(world(Cell=grid(6)))
     people = sim.model_.query(
         _PREFIXES
         + "SELECT ?p ?g ?c WHERE { ?p a ex:Person ; def:group ?g ; def:location ?c }"
@@ -87,7 +88,7 @@ def test_settle_yields_to_user_population():
         n_periods=1,
         state_extract=state_extract,
         random_seed=0,
-    ).fit({"Cell": grid(6), "Person": persons})
+    ).fit(world(links=("location",), Cell=grid(6), Person=persons))
     n = sim.model_.query(
         _PREFIXES + "SELECT (COUNT(?p) AS ?n) WHERE { ?p a ex:Person }"
     )["n"][0]
@@ -104,7 +105,7 @@ def test_one_person_per_cell_invariant():
         n_periods=8,
         state_extract=state_extract,
         random_seed=0,
-    ).fit({"Cell": grid(12)})
+    ).fit(world(Cell=grid(12)))
     occ = sim.model_.query(
         _PREFIXES + "SELECT ?p ?c WHERE { ?p a ex:Person ; def:location ?c }"
     )
@@ -124,7 +125,7 @@ def test_segregation_rises_and_converges():
         random_seed=0,
     )
     seg, unhappy = [], []
-    for row in sim.fit_iter({"Cell": grid(12)}):
+    for row in sim.fit_iter(world(Cell=grid(12))):
         seg.append(row["sig__AVG__Person__share_similar"])
         unhappy.append((sim.extract()["share_similar"] < want).sum())
     assert seg[-1] > seg[0] + 0.2  # substantial rise from the mixed start
@@ -145,7 +146,7 @@ def test_reproducible_under_random_seed():
         )
         return [
             round(row["sig__AVG__Person__share_similar"], 6)
-            for row in sim.fit_iter({"Cell": grid(10)})
+            for row in sim.fit_iter(world(Cell=grid(10)))
         ]
 
     assert seg_path(0) == seg_path(0)
@@ -179,7 +180,8 @@ def test_geo_variant_plugs_in():
         random_seed=0,
     )
     seg = [
-        row["sig__AVG__Person__share_similar"] for row in sim.fit_iter({"Cell": cells})
+        row["sig__AVG__Person__share_similar"]
+        for row in sim.fit_iter(world(Cell=cells))
     ]
     neighbours = sim.model_.query(
         _PREFIXES + "SELECT (COUNT(*) AS ?n) WHERE { ?c def:neighbor ?c2 }"

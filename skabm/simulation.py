@@ -2,11 +2,12 @@
 RDFSimulator: advance a maplib knowledge-graph ABM with SPARQL update rules.
 
 ``fit`` takes one argument, the world: a maplib ``Model``, simulated as given and
-advanced in place, or a ``{class: DataFrame}`` mapping that ``ottr.map_populations``
-puts into a fresh one.  Nothing past that line knows which it was.
+advanced in place.  How the agents got into it — ``skabm.templates`` and
+``Model.map``, a deserialized file, another system — is not the simulator's business.
 
-    sim = RDFSimulator(n_periods=12)          # Poledna rules by default
-    sim.fit({"Firm": firms, "Household": households, "CentralBank": central_bank})
+    world = Model()
+    world.map(firm_template, firms.with_iri())
+    RDFSimulator(n_periods=12).fit(world)     # Poledna rules by default
 
 ``fit_iter`` yields one ``{signal: level}`` row per tick — the observables
 ``skabm.ir`` derives from the rules, so nothing declares a reporter.  ``model_`` is
@@ -32,14 +33,32 @@ path then becomes the reference the fast kernels are validated against.
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable, Iterator, Sequence
 from string import Template
-from typing import Callable, Iterator, Sequence
 
 import polars as pl
 import polars_random as pr
 from maplib import Model
 from sklearn.base import BaseEstimator
 
+from skabm.behaviour.firm import (
+    firm_ownership,
+    firm_price,
+    firm_produce,
+    firm_sales,
+)
+from skabm.behaviour.household import (
+    household_income,
+    household_income_init,
+    household_wealth_init,
+    satisificing_consume,
+)
+from skabm.behaviour.learning import register_sac, sac_learning
+from skabm.behaviour.macro import (
+    centralbank_rate,
+    government_spend,
+)
+from skabm.behaviour.params import poledna_params
 from skabm.history import TABLE as HISTORY_TABLE
 from skabm.history import (
     apply_history_rules,
@@ -52,24 +71,6 @@ from skabm.history import (
 )
 from skabm.ir import analyse, rule_name
 from skabm.rules import EX_NS, register_polars_random, render
-from skabm.behaviour.learning import register_sac, sac_learning
-from skabm.behaviour.params import poledna_params
-from skabm.behaviour.household import (
-    household_income_init,
-    household_income,
-    household_wealth_init,
-    satisificing_consume,
-)
-from skabm.behaviour.firm import (
-    firm_ownership,
-    firm_produce,
-    firm_price,
-    firm_sales,
-)
-from skabm.behaviour.macro import (
-    government_spend,
-    centralbank_rate,
-)
 
 # Canonical Poledna (2023) rule composition, sourced from behaviour/.
 # Users override via __init__(init_rules=..., update_rules=..., params=...).
@@ -176,7 +177,7 @@ class RDFSimulator(BaseEstimator):
     warm_start : bool
         When True, ``fit``/``fit_iter`` continue ticking a model that already
         exists — ``model_``, or the one passed as ``X`` — instead of rebuilding
-        and re-initialising it.  No populations may be passed.
+        and re-initialising it.
     state_extract : callable | None
         ``Model -> pl.DataFrame``, called by ``fit_iter`` after each tick to
         yield raw per-agent state.  ``None`` (the default) uses the IR-derived
@@ -266,7 +267,7 @@ class RDFSimulator(BaseEstimator):
         ),
         random_seed: int | None = None,
         history_rules: Sequence[Template | str] = DEFAULT_HISTORY_RULES,
-        duckdb_connection: "str | object | None" = None,
+        duckdb_connection: str | object | None = None,
     ):
         self.init_rules = init_rules
         self.update_rules = update_rules
@@ -290,7 +291,7 @@ class RDFSimulator(BaseEstimator):
 
     def _cold_start(
         self,
-        world: "Model | dict[str, pl.DataFrame]",
+        world: Model | None,
         init_rules: list[str],
         update_rules: list[str],
         infer_rules: list[str] | None,
@@ -299,24 +300,14 @@ class RDFSimulator(BaseEstimator):
 
         Runs only on a cold ``fit``/``fit_iter`` (warm_start=False); the tick
         loop in ``fit_iter`` is shared by both paths.  *world* is a maplib
-        ``Model`` — used as given, and advanced in place — or a mapping of
-        populations, which ``ottr.map_populations`` puts into a fresh one.
-        Everything after is the same either way, which is the point: how the
-        agents got into the graph is not the simulator's business, and the OTTR
-        import is local because of it.
+        ``Model``, used as given and advanced in place; ``None`` is an empty one.
 
         When the rules read expectations, this also opens the DuckDB history,
         virtualizes it into the model, seeds each signal's prior, and records
         the t=0 state — so the first tick already has a base period to measure
         growth against and a forecast to read.
         """
-        self.model_ = Model()
-        if isinstance(world, Model):
-            self.model_ = world
-        elif world:
-            from skabm.ottr import map_populations
-
-            map_populations(self.model_, world)
+        self.model_ = Model() if world is None else world
         self.meta_ = Model()
         self.virtualized_ = False
         self._register_udfs()
@@ -353,9 +344,8 @@ class RDFSimulator(BaseEstimator):
         row after each of the ``n_periods`` ticks, ``t`` included.
 
         *X* is a maplib ``Model`` — advanced in place, so whatever it already
-        holds is the opening state — or a ``{class: DataFrame}`` mapping that
-        ``ottr.map_populations`` puts into a fresh one.  ``None`` continues
-        ``model_``, which is what ``warm_start`` is for.
+        holds is the opening state.  ``None`` continues ``model_`` under
+        ``warm_start``, and is an empty world otherwise.
 
         The row is ``observables_``, settled at fit time and so the same width
         every tick: a whole run is ``pl.DataFrame(sim.fit_iter(...))``.  For
@@ -363,6 +353,11 @@ class RDFSimulator(BaseEstimator):
         current at each yield, and a loop that does not need the frame pays
         nothing.
         """
+        if X is not None and not isinstance(X, Model):
+            raise TypeError(
+                f"X is a maplib Model, not {type(X).__name__}: map populations into "
+                "one with skabm.templates and Model.map, then pass the model."
+            )
         if self.random_seed is not None:
             pr.set_random_seed(self.random_seed)
         merged = {
@@ -384,14 +379,8 @@ class RDFSimulator(BaseEstimator):
             )
         )
         if self.warm_start:
-            if isinstance(X, Model):
+            if X is not None:
                 self.model_ = X
-            elif X:
-                raise ValueError(
-                    "warm_start=True continues a model that already exists; pass a "
-                    "maplib Model to continue that one, or drop warm_start to map "
-                    "these populations into a fresh world."
-                )
             self._register_udfs()
             self._register_udfs(self.meta_)
             self._bind_graph()
@@ -543,7 +532,7 @@ class RDFSimulator(BaseEstimator):
             )
         return state_frame(self.connection_)
 
-    def fit(self, X=None) -> "RDFSimulator":
+    def fit(self, X=None) -> RDFSimulator:
         """Take the world, apply init rules, run all ticks; return self."""
         for _ in self.fit_iter(X):
             pass

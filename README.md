@@ -30,8 +30,10 @@ You bring behavioural rules and data. These come back without your writing them:
 
 ```python
 import polars as pl
+from maplib import Model
 
 from skabm.simulation import RDFSimulator
+from skabm.templates import firm_template, household_template  # + DataFrame.with_iri
 
 firms = pl.DataFrame({"id": ["firm_0", "firm_1"], "output": [100.0, 120.0],
                       "price": [1.0, 1.1], "alpha": [10.0, 10.0], "size": [12.0, 13.0],
@@ -40,16 +42,23 @@ households = pl.DataFrame({"id": ["hh_0", "hh_1"], "wealth": [100.0, 200.0],
                           "income": [10.0, 12.0], "psi": [0.9, 0.9],
                           "employer": ["firm_0", "firm_1"]})
 
+def economy() -> Model:
+    world = Model()
+    world.map(firm_template, firms.with_iri())
+    world.map(household_template, households.with_iri("employer"))
+    return world
+
 sim = RDFSimulator(n_periods=8, random_seed=0)
-run = pl.DataFrame(sim.fit_iter({"Firm": firms, "Household": households}))
+run = pl.DataFrame(sim.fit_iter(economy()))
 
 run.shape                    # 8 ticks x (t + every aggregate the rules imply)
 run.columns[:3]              # sig__AVG__Firm__binds__output, sig__AVG__Firm__liquidity, ...
 len(sim.extract().columns)   # 18 per-agent columns, none of them named by hand
 ```
 
-A whole run is `pl.DataFrame(sim.fit_iter(...))`, one tick is the metrics dict a callback API
-takes, nothing was declared, and nothing opened a database. Each predicate is measured under
+A whole run is `pl.DataFrame(sim.fit_iter(world))`, one tick is the metrics dict a callback API
+takes, nothing was declared, and nothing opened a database. A fit advances its model in place,
+which is why `economy()` is a function: each run gets a fresh world. Each predicate is measured under
 the aggregate the rules apply to it — `centralbank_rate` takes `AVG(?price)`, so the price
 signal is a mean, not a sum. **Where the line is:** `SUM(def:output)` follows from the rules,
 but calling it *GDP* is a modelling claim and a **distributional** statistic is not derivable
@@ -63,38 +72,36 @@ def gini(column: str) -> pl.Expr:
 
 panel = pl.concat(
     sim.extract().with_columns(t=pl.lit(row["t"]))
-    for row in sim.fit_iter({"Firm": firms, "Household": households})
+    for row in sim.fit_iter(economy())
 )
 panel.lazy().group_by("t").agg(gini("wealth")).sort("t").collect()
 ```
 
 ### Getting data in
 
-**Check the frames before you simulate.** Map a template yourself — maplib's own API:
+**The world is an argument.** `fit` takes one thing: a maplib `Model`, advanced in place — one
+you mapped, a graph another system built, or one you deserialized and intervened on.
+`skabm.templates` is a registry of maplib `Template`s, one per agent class, and mapping a
+population is maplib's own `Model.map` — which checks the frame before anything simulates:
+
 ```python continuation
-from maplib import Model
-from skabm.ottr import conform, firm_template, map_populations
-
-Model().map(firm_template, conform(firms, firm_template))    # fine
-
 try:
-    Model().map(firm_template, conform(firms.drop("alpha"), firm_template))
+    Model().map(firm_template, firms.drop("alpha").with_iri())
 except Exception as error:
     print(error)          # Expected column alpha is missing
 ```
 
 Required parameters are what the rules read but never write: nothing produces them, so a
-frame lacking one is a run of nothing. `conform` casts declared columns to the type the rules
-join on — the failure worth the most, since an `Int64` where a rule wrote `xsd:double` joins
-with nothing, silently.
-
-**The world is an argument.** `fit` takes one thing: a maplib `Model`, advanced in place — a
-graph another system built, or one you deserialized and intervened on. A `{class: DataFrame}`
-mapping is put into a fresh one first and then does exactly the same:
+frame lacking one is a run of nothing. Quantities are `xsd:double`, which takes any float
+width as is; an integer column is refused by name, because an `xsd:long` never equals the
+doubles the rules write and would join with nothing, silently. Columns a template does not
+declare are refused too: drop them, or declare your own class with `agent_template`.
+Importing `skabm.templates` registers `DataFrame.with_iri(*links)`, which turns `id` and the
+named link columns into the IRIs the graph needs — and mints `id` from row position, like
+`with_row_index`, when a frame has none (`prefix=` keeps two such classes apart).
 
 ```python continuation
-world = Model()
-map_populations(world, {"Firm": firms, "Household": households})
+world = economy()
 world.update("""
 PREFIX ex: <http://example.net/skabm#>
 PREFIX def: <urn:maplib_default:>
@@ -104,9 +111,6 @@ WHERE  { ?f a ex:Firm ; def:price ?p }
 RDFSimulator(n_periods=4).fit(world)      # your graph, ticked
 ```
 
-That one call maps every population together, so an undeclared reference resolves against
-every id in it, not only the classes that went first: both key orders give the same graph.
-
 ### Three things are the frontend
 
 **`fit_iter()`** for telemetry a calibrator or JAX takes as-is, **`extract()`** for statistics
@@ -114,7 +118,7 @@ over per-agent state, **`model_`** for interventions. The derived observables *a
 summary statistics a method-of-moments loss consumes:
 
 ```python notest
-model = simulator_model(populations, free=["growth_sigma"])
+model = simulator_model(economy, free=["growth_sigma"])    # a fresh world per candidate
 model(theta, 120, seed)    # (120, D)
 model.observables_         # the D column names, derived and name-sorted
 ```
@@ -123,7 +127,7 @@ Early stopping plugs into the same call, but skabm ships **no criterion** — `f
 `EarlyStopping` already is that algorithm, so skabm supplies the seam and the padding only.
 
 ```python notest
-model = simulator_model(populations, free=["growth_sigma"], stop=settled(patience=10))
+model = simulator_model(economy, free=["growth_sigma"], stop=settled(patience=10))
 model.ticks_               # 13 of 120: the run had settled
 ```
 
@@ -151,8 +155,11 @@ import polars as pl
 import polars_random as pr
 
 from skabm.calibration import GeneticConstraintCalibration, make_dataset, weighted_enum
+from maplib import Model
+
 from skabm.datasets import build_firm_io_df
 from skabm.simulation import RDFSimulator
+from skabm.templates import firm_template, household_template
 
 # 1. Real data: Austrian input-output table + business demography (Poledna §4.1).
 io = build_firm_io_df("AT", 2010).drop_nulls(["n_firms", "alpha_s"])
@@ -186,6 +193,7 @@ firms = firms.with_columns(
     alpha=by_industry(io["alpha_s"]), w_bar=by_industry(io["w_bar_s"]),
     delta=by_industry(io["delta_s"]), tech_share=by_industry(io["tech_share_s"]),
     price=pl.lit(1.0), margin=pl.lit(0.2), liquidity=pl.lit(0.0),
+    size=pl.col("size").cast(pl.Float64),           # a headcount, as the double the rules compute in
 ).with_columns(output=0.9 * pl.col("alpha") * pl.col("size"))
 
 # 5. Households: census active/inactive shares, and an `employer` *link* column whose
@@ -204,11 +212,15 @@ households = make_dataset(
               .then(pl.col("employer").cast(pl.String)).otherwise(None),
 ).drop("status")
 
-# 6. Simulate. The default rule set is the full Poledna economy and self-scopes to the
-#    populations passed, so a Firm + Household run executes exactly those dynamics.
+# 6. Map, then simulate. The default rule set is the full Poledna economy and
+#    self-scopes to the classes in the graph, so a Firm + Household world executes
+#    exactly those dynamics.
+world = Model()
+world.map(firm_template, firms.with_iri())
+world.map(household_template, households.with_iri("employer"))
 sim = RDFSimulator(n_periods=12, params={"firm_ownership_ratio": 300 / 10_000,
                                          "growth_sigma": 0.02, "inflation_sigma": 0.01})
-for row in sim.fit_iter({"Firm": firms, "Household": households}):
+for row in sim.fit_iter(world):
     # the price level and household wealth are yielded; GDP is a per-agent
     # product taken before the sum, so it comes off the frame
     active = sim.extract().drop_nulls("output")
@@ -236,7 +248,7 @@ imposable.
 | `skabm.datasets` | Eurostat loaders (IO tables, business demography) |
 | `skabm.calibration.population` | Population samplers + constraint calibrators (GA, Metropolis–Hastings), sklearn estimator API |
 | `skabm.calibration.parameters` | Model calibration: `RDFSimulator` as a black-it `model(theta, N, seed)`, plus `noise_floor` |
-| `skabm.ottr` | One maplib `Template` per agent class: the contract a population is checked and cast against |
+| `skabm.templates` | A registry of maplib `Template`s, one per agent class — the contract `Model.map` checks a population against — plus `DataFrame.with_iri`, which gives a frame its IRIs |
 | `skabm.rules` | Namespaces, `render` (param substitution) and the UDF registrars |
 | `skabm.behaviour` | The rule library by economic function: `firm`, `household`, `macro`, `bank`, `labour`, `learning` |
 | `skabm.ir` | Rule IR: read/write sets off the SPARQL algebra, the state/structure partition, the per-class schema, the observables implied |
@@ -245,7 +257,7 @@ imposable.
 
 | Design decision, in sklearn vocabulary | |
 |---|---|
-| **X is the world** | a maplib `Model`, or a `{class: DataFrame}` mapping put into one. Predicates are column names — the DataFrame schema *is* the graph schema — and an IRI-valued column (`employer`, `owns`) is a graph edge. Invariants that always hold ship as init rules (`firm_ownership`) rather than being re-encoded per dataset |
+| **X is the world** | a maplib `Model`, populations mapped into it with `skabm.templates` and `Model.map`. Predicates are column names — the DataFrame schema *is* the graph schema — and an IRI-valued column (`employer`, `owns`) is a graph edge. Invariants that always hold ship as init rules (`firm_ownership`) rather than being re-encoded per dataset |
 | **Rules are hyperparameters** | `string.Template` objects in `__init__`, so `get_params`/`clone` work. `init_rules` set initial conditions once after mapping; `update_rules` are the dynamics, upserted every tick in the paper's event order. The default set self-scopes: rules whose classes are all absent match nothing |
 | **`model_` is the fitted artifact** | the graph where data and rules blend into one evolving world. Cold `fit` rebuilds it; `warm_start=True` continues it |
 | **Structure vs state** | predicates no update rule touches (links, coefficients) are *structure*, written at fit and edited only by intervention; predicates the rules upsert are *state*, owned by the rules after t=0. Derived, not asserted — `skabm.ir` reads it off the algebra, and it settles both the extract's columns and the observables |

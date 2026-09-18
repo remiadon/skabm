@@ -34,10 +34,10 @@ from __future__ import annotations
 import importlib
 import pkgutil
 import re
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cache
 from string import Template
-from typing import Iterable, Iterator, Sequence
 
 import polars as pl
 from rdflib.plugins.sparql.algebra import translateQuery, translateUpdate
@@ -45,7 +45,7 @@ from rdflib.plugins.sparql.parser import parseQuery, parseUpdate
 from rdflib.plugins.sparql.parserutils import CompValue
 from rdflib.term import Literal, URIRef, Variable
 
-from skabm.rules import DEF_NS, EX_NS, _PREFIXES
+from skabm.rules import _PREFIXES, DEF_NS, EX_NS
 
 RDF_TYPE = URIRef("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
 
@@ -94,7 +94,7 @@ def _nodes(node) -> Iterator[CompValue]:
             yield from _nodes(value)
 
 
-def _local(iri) -> "str | None":
+def _local(iri) -> str | None:
     """Local name of a ``def:``/``ex:`` IRI; None for anything else.
 
     Predicates outside the two model namespaces (``rdf:type``, ``dcterms:``,
@@ -142,7 +142,7 @@ class RuleIR:
     links: frozenset = frozenset()  # {(class, predicate)} pointing at another agent
     orphans: frozenset = frozenset()  # {(predicate, is_write)} with no class in scope
 
-    def adopt(self, owners: dict) -> "RuleIR":
+    def adopt(self, owners: dict) -> RuleIR:
         """Re-attach orphan predicates to the classes other rules give them.
 
         A rule can touch a predicate on a subject it never types — an owner
@@ -226,7 +226,7 @@ def _read_write_sets(blocks, types) -> tuple[set, set, dict]:
     return reads, writes, bound, orphans, links
 
 
-def _reconstruct(expr, bound: dict, binds: dict, klass: str) -> "str | None":
+def _reconstruct(expr, bound: dict, binds: dict, klass: str) -> str | None:
     """Spell an algebra expression back out over predicate-named variables.
 
     Returns None the moment the expression leaves what can be re-evaluated
@@ -366,7 +366,7 @@ class ModelIR:
     carried: frozenset = frozenset()
     graph_links: frozenset = frozenset()
 
-    def with_graph(self, model) -> "ModelIR":
+    def with_graph(self, model) -> ModelIR:
         """This IR, plus what only a mapped graph can say.
 
         Two things: predicates that arrived with a population and are named by
@@ -604,7 +604,7 @@ def rule_name(rule, index: int) -> str:
 @cache
 def _shipped() -> dict:
     """``id(template) -> module-level name`` for every rule in skabm.behaviour."""
-    import skabm.behaviour as behaviour
+    from skabm import behaviour
 
     shipped: dict = {}
     for module in pkgutil.iter_modules(behaviour.__path__):

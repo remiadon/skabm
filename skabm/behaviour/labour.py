@@ -424,7 +424,7 @@ def mobility_network(
 
     ``transitions`` needs ``src`` / ``dst`` / ``count`` columns of bare
     occupation ids; the result is ready for ``sim.fit(Edge=...)`` in any order,
-    since ``ottr.edge_template`` declares both as links.  Self-transitions in
+    since ``templates.edge_template`` declares both as links.  Self-transitions in
     the input are dropped — the diagonal is set by *stay*, not observed.
     """
     off = (

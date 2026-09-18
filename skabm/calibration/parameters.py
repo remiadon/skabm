@@ -30,18 +30,19 @@ the identification reading of a calibration result.
 
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import polars as pl
+from maplib import Model
 
 from skabm.behaviour.params import poledna_params
 
-__all__ = ["simulator_model", "noise_floor"]
+__all__ = ["noise_floor", "simulator_model"]
 
 
 def simulator_model(
-    populations: dict[str, pl.DataFrame],
+    world: Callable[[], Model],
     free: Sequence[str],
     summarise: Callable[[pl.DataFrame], Sequence[float]] | None = None,
     params: dict | None = None,
@@ -52,9 +53,10 @@ def simulator_model(
 
     Parameters
     ----------
-    populations : dict[str, pl.DataFrame]
-        The agent populations, keyword-style (``{"Firm": firms, ...}``), already
-        calibrated and **frozen**.  Every candidate ``θ`` is evaluated against
+    world : Callable[[], maplib.Model]
+        Builds the opening graph, called once per candidate: a fit advances
+        its model in place, so every ``θ`` needs a fresh one.  Map populations
+        already calibrated and **frozen** — every candidate is evaluated against
         the same rows, which is what makes the losses comparable.
     free : Sequence[str]
         Names of the parameters ``θ`` indexes, in order.  Each must already
@@ -114,7 +116,7 @@ def simulator_model(
     Examples
     --------
     >>> model = simulator_model(          # doctest: +SKIP
-    ...     populations={"Firm": firms, "Household": households},
+    ...     world,                         # () -> maplib.Model
     ...     free=("dividend_ratio", "rho"),
     ...     summarise=lambda s: [s["wealth"].drop_nulls().sum()],
     ...     params={"total_deposits": 2000.0},
@@ -149,7 +151,7 @@ def simulator_model(
             **simulator_kwargs,
         )
         rows: list[list[float]] = []
-        for measured in sim.fit_iter(populations):
+        for measured in sim.fit_iter(world()):
             if summarise is None:
                 if not sim.observables_:
                     raise RuntimeError(

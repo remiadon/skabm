@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from string import Template
 
-from skabm.rules import EX_NS, _PREFIXES
+from skabm.rules import _PREFIXES, EX_NS
 
 # ---------------------------------------------------------------------------
 # bank_depositors - init CONSTRUCT, structural, runs once after mapping

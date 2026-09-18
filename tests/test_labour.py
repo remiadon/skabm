@@ -22,6 +22,7 @@ import math
 
 import polars as pl
 import pytest
+from worlds import world
 
 from skabm.behaviour.labour import (
     LABOUR_UDFS,
@@ -60,8 +61,8 @@ def clock() -> pl.DataFrame:
     return pl.DataFrame({"id": ["clock"], "t": [0.0]})
 
 
-def world(n: int = 8, employment: float = 1000.0, **overrides):
-    """A settled-ish labour market: populations plus a simulator wired for it."""
+def market(n: int = 8, employment: float = 1000.0, **overrides):
+    """A settled-ish labour market: its graph plus a simulator wired for it."""
     occ = occupations(
         pl.DataFrame(
             {"id": [f"occ_{i}" for i in range(n)], "employment": [employment] * n}
@@ -74,7 +75,7 @@ def world(n: int = 8, employment: float = 1000.0, **overrides):
         udfs=LABOUR_UDFS,
         **overrides,
     )
-    return sim, {"Occupation": occ, "Edge": ring(n), "Clock": clock()}
+    return sim, world(Occupation=occ, Edge=ring(n), Clock=clock())
 
 
 def macro(row: dict) -> dict:
@@ -122,8 +123,8 @@ def test_labour_force_is_conserved():
     # so e + u is invariant.  This is also the tripwire for maplib's
     # right-associative arithmetic — `?e0 - ?w + ?hired` parsed as
     # `?e0 - (?w + ?hired)` leaks workers on every tick and nothing else fails.
-    sim, pops = world(n=8, n_periods=25)
-    totals = [macro(s)["e"] + macro(s)["u"] for s in sim.fit_iter(pops)]
+    sim, graph = market(n=8, n_periods=25)
+    totals = [macro(s)["e"] + macro(s)["u"] for s in sim.fit_iter(graph)]
     assert totals == pytest.approx([totals[0]] * len(totals), rel=1e-12)
     assert totals[0] == pytest.approx(8 * 1000.0 * 1.05)
 
@@ -133,9 +134,9 @@ def test_hires_match_the_urn_ball_count():
     # the number of j's vacancies that drew at least one applicant.  This pins
     # the whole matching function, the v_j^2 in the numerator included.
     stop = LABOUR_UPDATE_RULES.index(labour_flow) + 1  # halt before clearing,
-    sim, pops = world(n=6, n_periods=1)  # so v and s still hold what f used
+    sim, graph = market(n=6, n_periods=1)  # so v and s still hold what f used
     sim.set_params(update_rules=LABOUR_UPDATE_RULES[:stop])
-    sim.fit(pops)
+    sim.fit(graph)
     got = sim.model_.query(
         _PREFIXES
         + """
@@ -153,8 +154,8 @@ def test_duration_cohorts_sum_to_unemployment():
     # The four duration stages partition the unemployed: this tick's separations
     # enter the first, each cohort that fails to match ages into the next, and
     # `ltu` absorbs everyone past 4 steps (= 27 weeks).  The sum is the invariant.
-    sim, pops = world(n=6, n_periods=12)
-    for _ in sim.fit_iter(pops):
+    sim, graph = market(n=6, n_periods=12)
+    for _ in sim.fit_iter(graph):
         pass
     per_occ = sim.model_.query(
         _PREFIXES
@@ -173,8 +174,8 @@ def test_duration_cohorts_sum_to_unemployment():
 def test_converges_to_a_steady_state():
     # With target demand flat the market settles: the paper initialises this way
     # before shocking anything.
-    sim, pops = world(n=8, n_periods=120)
-    path = [macro(s)["u_rate"] for s in sim.fit_iter(pops)]
+    sim, graph = market(n=8, n_periods=120)
+    path = [macro(s)["u_rate"] for s in sim.fit_iter(graph)]
     assert path[-1] == pytest.approx(path[-2], rel=1e-6)
     assert 0.01 < path[-1] < 0.15  # a plausible natural rate, not a corner
 
@@ -183,8 +184,8 @@ def test_beveridge_curve_slopes_downward():
     # The paper's macro validation (fig. 3): cycling *aggregate* demand traces a
     # downward-sloping relation between unemployment and vacancies — when
     # vacancies are plentiful the unemployed match faster.
-    sim, pops = world(n=8, n_periods=60)
-    for _ in sim.fit_iter(pops):
+    sim, graph = market(n=8, n_periods=60)
+    for _ in sim.fit_iter(graph):
         pass
     sim.set_params(n_periods=1, warm_start=True)
 
@@ -239,7 +240,7 @@ def shock_outcome(edges: pl.DataFrame, n: int) -> tuple[dict, dict]:
         udfs=LABOUR_UDFS,
         n_periods=60,
     )
-    *_, opening = sim.fit_iter({"Occupation": occ, "Edge": edges, "Clock": clock()})
+    *_, opening = sim.fit_iter(world(Occupation=occ, Edge=edges, Clock=clock()))
     before = macro(opening)
 
     sim.model_.update(
@@ -284,7 +285,7 @@ def test_labour_rules_need_the_math_udf():
     # math:exp is not a SPARQL built-in and not in the default registrar set;
     # the rules that need it fail loudly rather than silently, which is what
     # makes `udfs` a hyperparameter worth having.
-    sim, pops = world(n=4, n_periods=1)
+    sim, graph = market(n=4, n_periods=1)
     sim.set_params(udfs=())
     with pytest.raises(Exception, match="(?i)function"):
-        sim.fit(pops)
+        sim.fit(graph)

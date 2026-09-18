@@ -19,8 +19,9 @@ with one.
 
 import polars as pl
 import pytest
+from worlds import world
 
-from skabm.behaviour.bank import bank_depositors, bank_capital, interbank_contagion
+from skabm.behaviour.bank import bank_capital, bank_depositors, interbank_contagion
 from skabm.behaviour.params import poledna_params
 from skabm.simulation import RDFSimulator
 
@@ -43,7 +44,7 @@ def _infer_licensed() -> bool:
             "PREFIX ex: <http://x#> CONSTRUCT { ?s ex:p ?o } WHERE { ?s ex:p ?o }"
         )
         return True
-    except BaseException:
+    except BaseException:  # noqa: BLE001 — pyo3's PanicException is not an Exception
         return False
 
 
@@ -88,7 +89,7 @@ def test_bank_depositors_maps():
         n_periods=0,
         random_seed=0,
     )
-    sim.fit({"Household": households, "Bank": banks})
+    sim.fit(world(Household=households, Bank=banks))
 
     holds = sim.model_.query(
         """
@@ -150,7 +151,7 @@ def test_bank_capital_updates():
         n_periods=1,
         random_seed=0,
     )
-    sim.fit({"Household": households, "Bank": banks})
+    sim.fit(world(Household=households, Bank=banks))
 
     cr = sim.model_.query(
         """
@@ -212,7 +213,7 @@ def test_infer_called():
         n_periods=1,
         random_seed=0,
     )
-    sim.fit({"Household": households, "Bank": banks})
+    sim.fit(world(Household=households, Bank=banks))
 
     distressed = sim.model_.query(
         """
