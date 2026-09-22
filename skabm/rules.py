@@ -7,8 +7,8 @@ the behaviour templates (``skabm.behaviour.*``) and the simulator
 
 SPARQL rule *logic* lives in ``skabm.behaviour`` (firm.py, household.py,
 macro.py).  This module carries only the plumbing: namespaces, ``render()``,
-``register_polars_random()``, ``register_math()`` and ``dbl()``.  Mapping is
-``skabm.templates``'s.
+``dbl()`` and the UDF registrars ``register_polars_random()``, ``register_math()``
+and ``register_geosparql()``.  Mapping is ``skabm.templates``'s.
 
 There is no ``state_extract`` here any more: what a model's per-agent frame
 should contain is derivable from the rules themselves, and ``skabm.ir`` derives
@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from string import Template
 
+import numpy as np
 import polars as pl
 import polars_random as pr
 from maplib import xsd
@@ -27,12 +28,14 @@ EX_NS = "http://example.net/skabm#"
 DEF_NS = "urn:maplib_default:"
 PR_NS = "urn:pr:"  # polars-random UDFs, registered by register_polars_random
 MATH_NS = "urn:math:"  # transcendental UDFs, registered by register_math
+GEOF_NS = "http://www.opengis.net/def/function/geosparql/"  # register_geosparql
 
 _PREFIXES = (
     f"PREFIX ex:<{EX_NS}>\n"
     f"PREFIX def:<{DEF_NS}>\n"
     f"PREFIX pr:<{PR_NS}>\n"
     f"PREFIX math:<{MATH_NS}>\n"
+    f"PREFIX geof:<{GEOF_NS}>\n"
     "PREFIX xsd:<http://www.w3.org/2001/XMLSchema#>\n"
 )
 
@@ -88,6 +91,81 @@ def register_math(model) -> None:
 
     model.add_udf(MATH_NS + "exp", _exp, xsd.double, [xsd.double])
     model.add_udf(MATH_NS + "log", _log, xsd.double, [xsd.double])
+
+
+def register_geosparql(model) -> None:
+    """Expose GeoSPARQL's ``geof:sfIntersects`` and ``geof:sfWithin`` as UDFs.
+
+    maplib stores WKT but implements no ``geof:`` function (0.20.29 answers
+    "Custom function not found ... define a function using m.add_udf()"), so
+    they arrive on the same seam as ``pr:`` and ``math:`` — under their
+    *standard* IRIs, which keeps a rule portable to any GeoSPARQL store::
+
+        FILTER(geof:sfIntersects(?road, ?zone))
+
+    Scope: the first argument a ``POINT`` or ``LINESTRING``, the second a
+    ``POLYGON`` whose outer ring is used (holes are ignored), coordinates
+    planar — lon/lat is fine at city scale.  Intersects means a vertex inside
+    or a segment crossing the ring; within means every vertex inside and no
+    crossing.  A vertex exactly on the boundary is decided by floating point.
+
+    ponytail: one Python iteration per row, ~20k geometries a second — an
+    init-rule cost.  Vectorise across rows if a rule calls it every tick.
+    """
+
+    def _topology(df: pl.DataFrame) -> tuple[np.ndarray, ...]:
+        any_in, all_in, crosses = (np.zeros(len(df), dtype=bool) for _ in range(3))
+        numbers = r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
+        frame = df.with_row_index("row").with_columns(
+            pl.col("0").str.extract_all(numbers).cast(pl.List(pl.Float64))
+        )
+        for (polygon,), rows in frame.group_by("1"):
+            outer = polygon.split("((")[1].split(")")[0].replace(",", " ").split()
+            a = np.array(outer, dtype=float).reshape(-1, 2)
+            b = np.roll(a, -1, axis=0)  # the ring's edges run a -> b
+            for row, xy in zip(rows["row"], rows["0"]):
+                p = np.asarray(xy).reshape(-1, 2)
+                hit = _ray_parity(p, a, b)
+                any_in[row], all_in[row] = hit.any(), hit.all()
+                crosses[row] = _crossing(p[:-1], p[1:], a, b)
+        return any_in, all_in, crosses
+
+    def _intersects(df: pl.DataFrame) -> pl.Series:
+        any_in, _, crosses = _topology(df)
+        return pl.Series("out", any_in | crosses)
+
+    def _within(df: pl.DataFrame) -> pl.Series:
+        _, all_in, crosses = _topology(df)
+        return pl.Series("out", all_in & ~crosses)
+
+    for name, udf in (("sfIntersects", _intersects), ("sfWithin", _within)):
+        model.add_udf(GEOF_NS + name, udf, xsd.boolean, [xsd.string, xsd.string])
+
+
+def _ray_parity(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Even-odd test: is each point of *p* inside the ring with edges a -> b?"""
+    y = p[:, 1:2]
+    straddles = (a[:, 1] > y) != (b[:, 1] > y)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x_cut = a[:, 0] + (y - a[:, 1]) * (b[:, 0] - a[:, 0]) / (b[:, 1] - a[:, 1])
+    return (straddles & (p[:, 0:1] < x_cut)).sum(axis=1) % 2 == 1
+
+
+def _crossing(p: np.ndarray, q: np.ndarray, a: np.ndarray, b: np.ndarray) -> bool:
+    """Does any segment p -> q properly cross any edge a -> b?"""
+
+    def side(u, v, w):
+        return np.sign(
+            (v[..., 0] - u[..., 0]) * (w[..., 1] - u[..., 1])
+            - (v[..., 1] - u[..., 1]) * (w[..., 0] - u[..., 0])
+        )
+
+    p, q = p[:, None], q[:, None]
+    return bool(
+        (
+            (side(p, q, a) * side(p, q, b) < 0) & (side(a, b, p) * side(a, b, q) < 0)
+        ).any()
+    )
 
 
 # maplib SPARQL gotcha, worth knowing before writing any rule: arithmetic

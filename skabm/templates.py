@@ -148,6 +148,45 @@ edge_template = agent_template(
 
 clock_template = agent_template("Clock", "t")
 
+# Traffic (skabm.behaviour.traffic).  A Route's links are many per route, so they
+# are not a column: `via_template` maps a long (id, via) frame onto routes that
+# `route_template` already typed.
+link_template = agent_template(
+    "Link",
+    "length t0 capacity car busway flow time",
+    {"src": LINK, "dst": LINK, "name": pl.String, "geometry": pl.String},
+    required=("src", "dst", "length", "t0", "capacity", "car", "busway"),
+)
+route_template = agent_template(
+    "Route",
+    "mode rank extra time open prob cum",
+    {"od": pl.String, "option": LINK},
+    required=("mode", "rank", "extra", "od", "option"),
+)
+option_template = agent_template(
+    "Option", "mode share0 s s0 share", {"od": pl.String}, ("mode", "share0", "od")
+)
+commuter_template = agent_template(
+    "Commuter",
+    "weight u time car bus bike walk",
+    # a commuter is somebody's household member going to somebody's firm: the link is
+    # optional, so a transport-only world leaves it null, and a world that also runs
+    # the economic rules has one graph rather than two vocabularies for one person.
+    {"od": pl.String, "route": LINK, "household": LINK},
+    required=("weight", "od", "route"),
+)
+area_template = agent_template(
+    "Area", "vkt", {"name": pl.String, "geometry": pl.String}, ("name", "geometry")
+)
+via_template = Template(
+    EX.suf("via"),
+    [
+        Parameter(Variable("id"), rdf_type=RDFType.IRI),
+        Parameter(Variable("via"), rdf_type=RDFType.IRI),
+    ],
+    [Triple(Variable("id"), DEF.suf("via"), Variable("via"))],
+)
+
 TEMPLATES = {
     template.iri.iri[len(EX_NS) :]: template
     for template in (
@@ -161,6 +200,11 @@ TEMPLATES = {
         occupation_template,
         edge_template,
         clock_template,
+        link_template,
+        route_template,
+        option_template,
+        commuter_template,
+        area_template,
     )
 }
 

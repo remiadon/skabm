@@ -240,6 +240,7 @@ imposable.
 | [notebooks/extraction](notebooks/extraction.ipynb) | what to *do* with derived state: Gini as one polars expression, an intervention that moves it, telemetry into JAX |
 | [notebooks/labour_automation](notebooks/labour_automation.ipynb) | occupational mobility under an automation shock — a labour-flow network whose central quantity lives on the *edge* |
 | [notebooks/schelling](notebooks/schelling.ipynb) | spatial segregation on the lattice; the continuous-geometry swap is covered by `tests/test_schelling.py` |
+| [notebooks/bayonne](notebooks/bayonne/app.py) | closing Bayonne's old town to cars: 9,400 commuters from the 2022 census on 37,000 OpenStreetMap links, day-to-day route and pivot-point mode choice, the closure as a graph edit — a Streamlit map, one working day per tick (`streamlit run notebooks/bayonne/app.py`) |
 
 ## Architecture
 
@@ -249,8 +250,8 @@ imposable.
 | `skabm.calibration.population` | Population samplers + constraint calibrators (GA, Metropolis–Hastings), sklearn estimator API |
 | `skabm.calibration.parameters` | Model calibration: `RDFSimulator` as a black-it `model(theta, N, seed)`, plus `noise_floor` |
 | `skabm.templates` | A registry of maplib `Template`s, one per agent class — the contract `Model.map` checks a population against — plus `DataFrame.with_iri`, which gives a frame its IRIs |
-| `skabm.rules` | Namespaces, `render` (param substitution) and the UDF registrars |
-| `skabm.behaviour` | The rule library by economic function: `firm`, `household`, `macro`, `bank`, `labour`, `learning` |
+| `skabm.rules` | Namespaces, `render` (param substitution) and the UDF registrars — random draws, `exp`/`log`, GeoSPARQL's `geof:sfIntersects`/`sfWithin` |
+| `skabm.behaviour` | The rule library by function: `firm`, `household`, `macro`, `bank`, `labour`, `learning`, `traffic` |
 | `skabm.ir` | Rule IR: read/write sets off the SPARQL algebra, the state/structure partition, the per-class schema, the observables implied |
 | `skabm.history` | Measuring the observables, and the DuckDB sidecar that persists and virtualizes them (chrontext) |
 | `skabm.simulation` | `RDFSimulator`: `fit`/`fit_iter` over SPARQL update rules |

@@ -473,9 +473,15 @@ class ModelIR:
                         "state",
                     )
                 )
+        named = set()
         for klass, predicate, expression in sorted(
             {r for rule in self.rules for r in rule.regimes}
         ):
+            # IF(c, 1e0, 0e0) has two bounds and one partition: the second share
+            # is the first's complement, and a repeated name is a query that fails
+            if (klass, predicate) in named:
+                continue
+            named.add((klass, predicate))
             found.append(
                 Observable(
                     "AVG",
