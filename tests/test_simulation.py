@@ -18,6 +18,7 @@ from worlds import world
 
 from skabm.behaviour.firm import firm_ownership, firm_produce
 from skabm.behaviour.household import household_income_init
+from skabm.behaviour.params import poledna_params
 from skabm.rules import DEF_NS
 from skabm.simulation import RDFSimulator
 from skabm.templates import firm_template, household_template
@@ -247,7 +248,8 @@ def test_production_respects_labor_capacity():
 
 
 def test_income_by_activity_status():
-    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(
+    # Poledna eq. 49 with Table 2's own θ^UB and θ^DIV (no params: the defaults)
+    sim = RDFSimulator(n_periods=1).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
     )
 
@@ -258,9 +260,9 @@ def test_income_by_activity_status():
         ).to_dicts()
     }
     assert income["hh_0"] == 30.0  # worker: employer's wage
-    assert income["hh_1"] >= 0.0  # investor: dividend clipped at 0
-    # unemployed: benefit_replacement * average wage = 0.4 * 35
-    assert income["hh_2"] == 0.4 * 35.0
+    assert income["hh_1"] == 0.0  # investor in a loss-maker: θ^DIV * max(0, profit)
+    # unemployed: θ^UB * average wage
+    assert income["hh_2"] == pytest.approx(poledna_params["benefit_replacement"] * 35.0)
 
 
 # FIRM_OWNERSHIP references households via the CONCAT'd full IRI, not an
