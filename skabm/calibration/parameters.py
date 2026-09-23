@@ -36,8 +36,6 @@ import numpy as np
 import polars as pl
 from maplib import Model
 
-from skabm.behaviour.params import poledna_params
-
 __all__ = ["noise_floor", "simulator_model"]
 
 
@@ -96,8 +94,8 @@ def simulator_model(
         worse than slow ones; ``model.ticks_`` reports how far the last call
         actually got, so a search can be checked rather than trusted.
     params : dict, optional
-        Base parameters the search perturbs.  Defaults to the canonical Poledna
-        values; a partial dict is merged over them.
+        Base parameters the search perturbs, laid over each rule's own defaults
+        (``behaviour.DefaultTemplate``).
     **simulator_kwargs
         Passed to ``RDFSimulator`` (``update_rules``, ``udfs``, ``infer``, ...).
         ``n_periods``, ``random_seed`` and ``warm_start`` are owned by the
@@ -123,7 +121,13 @@ def simulator_model(
     ... )
     >>> Calibrator(model=model, ...).calibrate(n_batches=6)   # doctest: +SKIP
     """
-    from skabm.simulation import RDFSimulator
+    from string import Template
+
+    from skabm.simulation import (
+        DEFAULT_INIT_RULES,
+        DEFAULT_UPDATE_RULES,
+        RDFSimulator,
+    )
 
     owned = {"n_periods", "random_seed", "warm_start"} & set(simulator_kwargs)
     if owned:
@@ -132,13 +136,20 @@ def simulator_model(
             "N and seed come from the calibrator, and fits are always cold."
         )
 
-    base = {**poledna_params, **(params or {})}
-    unknown = [name for name in free if name not in base]
+    base = dict(params or {})
+    rules = (
+        *simulator_kwargs.get("init_rules", DEFAULT_INIT_RULES),
+        *simulator_kwargs.get("update_rules", DEFAULT_UPDATE_RULES),
+    )
+    known = set(base) | {
+        name for r in rules if isinstance(r, Template) for name in r.get_identifiers()
+    }
+    unknown = [name for name in free if name not in known]
     if unknown:
         raise ValueError(
             f"free parameters {unknown} are not in the parameter set, so no rule "
             "template reads them and searching over them would change nothing. "
-            f"Known names: {sorted(base)}"
+            f"Known names: {sorted(known)}"
         )
 
     free = tuple(free)

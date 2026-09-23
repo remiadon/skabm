@@ -33,7 +33,7 @@ from collections.abc import Sequence
 
 import polars as pl
 
-from skabm.rules import _PREFIXES, DEF_NS, EX_NS
+from skabm.sparql import _PREFIXES, DEF_NS, EX_NS
 
 CT_NS = "https://github.com/DataTreehouse/chrontext#"
 

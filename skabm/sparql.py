@@ -8,7 +8,7 @@ the behaviour templates (``skabm.behaviour.*``) and the simulator
 SPARQL rule *logic* lives in ``skabm.behaviour`` (firm.py, household.py,
 macro.py).  This module carries only the plumbing: namespaces, ``render()``,
 ``dbl()`` and the UDF registrars ``register_polars_random()``, ``register_math()``
-and ``register_geosparql()``.  Mapping is ``skabm.templates``'s.
+and ``register_geosparql()``.  Mapping is ``skabm.ottr``'s.
 
 There is no ``state_extract`` here any more: what a model's per-agent frame
 should contain is derivable from the rules themselves, and ``skabm.ir`` derives
@@ -186,11 +186,19 @@ def dbl(x: float) -> str:
 def render(rule: Template | str, params: dict) -> str:
     """Substitute a rule Template's $-placeholders with xsd:double literals.
 
-    Numeric parameter values go through ``dbl`` so decimal literals can
-    never leak into the SPARQL; plain-string rules pass through unchanged.
-    Missing placeholders raise ``KeyError`` (loudly, at fit time).
+    *params* is laid over the rule's own ``default`` (``behaviour.DefaultTemplate``).
+    Numeric values go through ``dbl`` so decimal literals can never leak into
+    the SPARQL; plain-string rules pass through unchanged.  A placeholder with
+    neither a default nor a param raises ``KeyError`` naming it.
     """
     if isinstance(rule, Template):
+        params = {**getattr(rule, "default", {}), **params}
+        missing = sorted(set(rule.get_identifiers()) - set(params))
+        if missing:
+            raise KeyError(
+                f"rule needs parameters {missing}: pass them in params= "
+                "(a Template lists its own with .get_identifiers())"
+            )
         return rule.substitute(
             {k: dbl(v) if isinstance(v, (int, float)) else v for k, v in params.items()}
         )

@@ -9,10 +9,9 @@ Templates are ``string.Template`` objects with ``$placeholder`` references.
 
 from __future__ import annotations
 
-from string import Template
-
+from skabm.behaviour import DefaultTemplate
 from skabm.behaviour.learning import expect
-from skabm.rules import _PREFIXES
+from skabm.sparql import _PREFIXES
 
 # ---------------------------------------------------------------------------
 # household_income_init — initial income by activity status (init CONSTRUCT)
@@ -27,7 +26,7 @@ from skabm.rules import _PREFIXES
 # silently, permanently, and double-counted by every aggregate and extract
 # afterwards.  Initial conditions fill in only what the data left undefined.
 
-household_income_init = Template(
+household_income_init = DefaultTemplate(
     _PREFIXES
     + """
 CONSTRUCT { ?hh def:income ?income }
@@ -42,7 +41,11 @@ WHERE {
         IF(BOUND(?p), $dividend_ratio * IF(?p > 0e0, ?p, 0e0),
         $benefit_replacement * ?w_avg)) AS ?income)
 }
-"""
+""",
+    {
+        "dividend_ratio": 0.7768,  # θ^DIV, Poledna et al. (2023) Table 2
+        "benefit_replacement": 0.3586,  # θ^UB, Poledna et al. (2023) Table 2
+    },
 )
 
 # ---------------------------------------------------------------------------
@@ -52,7 +55,7 @@ WHERE {
 # the owned firm's evolving profit.  Placeholders: ``dividend_ratio``,
 # ``benefit_replacement``.
 
-household_income = Template(
+household_income = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?hh def:income ?i0 }
@@ -68,7 +71,11 @@ WHERE {
         IF(BOUND(?p), $dividend_ratio * IF(?p > 0e0, ?p, 0e0),
         $benefit_replacement * ?w_avg)) AS ?i1)
 }
-"""
+""",
+    {
+        "dividend_ratio": 0.7768,  # θ^DIV, Poledna et al. (2023) Table 2
+        "benefit_replacement": 0.3586,  # θ^UB, Poledna et al. (2023) Table 2
+    },
 )
 
 # ---------------------------------------------------------------------------
@@ -78,7 +85,7 @@ WHERE {
 # Run once after ``household_income_init``.  Placeholder: ``total_deposits``.
 # Guarded like ``household_income_init`` above — see the note there.
 
-household_wealth_init = Template(
+household_wealth_init = DefaultTemplate(
     _PREFIXES
     + """
 CONSTRUCT { ?hh def:wealth ?wealth }
@@ -88,7 +95,10 @@ WHERE {
     FILTER NOT EXISTS { ?hh def:wealth ?given }
     BIND($total_deposits * ?income / ?total AS ?wealth)
 }
-"""
+""",
+    {
+        "total_deposits": 222_933.2e6,  # D^H, Poledna et al. (2023) Table 2; rescale to the population
+    },
 )
 
 # ---------------------------------------------------------------------------
@@ -104,7 +114,7 @@ WHERE {
 # same learning machinery firms use for output and prices — so expected income
 # is this quarter's income carried forward one step.
 
-satisificing_consume = Template(
+satisificing_consume = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?hh def:wealth ?w0 }
@@ -120,7 +130,10 @@ WHERE {
     BIND(?psi * ?exp_income / (1e0 + $vat_rate) AS ?consumption)
     BIND(?w0 + (?inc - ?consumption) AS ?w1)
 }
-"""
+""",
+    {
+        "vat_rate": 0.1529,  # τ^VAT, Poledna et al. (2023) Table 2
+    },
 )
 
 # ---------------------------------------------------------------------------
@@ -130,7 +143,7 @@ WHERE {
 # above the VAT-adjusted subsistence.  Placeholders: ``subsistence``,
 # ``vat_rate``, ``psi_2``.
 
-kinked_consume = Template(
+kinked_consume = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?hh def:wealth ?w0 }
@@ -145,5 +158,8 @@ WHERE {
     BIND(?C0 + $psi_2 * ?above AS ?consumption)
     BIND(?w0 + ?inc - ?consumption AS ?w1)
 }
-"""
+""",
+    {
+        "vat_rate": 0.1529,  # τ^VAT, Poledna et al. (2023) Table 2
+    },
 )

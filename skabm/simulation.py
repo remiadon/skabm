@@ -2,12 +2,12 @@
 RDFSimulator: advance a maplib knowledge-graph ABM with SPARQL update rules.
 
 ``fit`` takes one argument, the world: a maplib ``Model``, simulated as given and
-advanced in place.  How the agents got into it — ``skabm.templates`` and
+advanced in place.  How the agents got into it — ``skabm.ottr`` and
 ``Model.map``, a deserialized file, another system — is not the simulator's business.
 
     world = Model()
     world.map(firm_template, firms.with_iri())
-    RDFSimulator(n_periods=12).fit(world)     # Poledna rules by default
+    RDFSimulator(params=params, n_periods=12).fit(world)   # Poledna rules by default
 
 ``fit_iter`` yields one ``{signal: level}`` row per tick — the observables
 ``skabm.ir`` derives from the rules, so nothing declares a reporter.  ``model_`` is
@@ -58,7 +58,6 @@ from skabm.behaviour.macro import (
     centralbank_rate,
     government_spend,
 )
-from skabm.behaviour.params import poledna_params
 from skabm.history import TABLE as HISTORY_TABLE
 from skabm.history import (
     apply_history_rules,
@@ -70,7 +69,7 @@ from skabm.history import (
     state_frame,
 )
 from skabm.ir import analyse, rule_name
-from skabm.rules import EX_NS, register_polars_random, render
+from skabm.sparql import EX_NS, register_polars_random, render
 
 # Canonical Poledna (2023) rule composition, sourced from behaviour/.
 # Users override via __init__(init_rules=..., update_rules=..., params=...).
@@ -172,6 +171,11 @@ class RDFSimulator(BaseEstimator):
         Pass a single rule string or a sequence of ``Template``/string rules;
         templates get their ``$placeholders`` substituted from ``params`` exactly
         like ``update_rules``, and plain strings pass through unrendered.
+    params : dict | None
+        Overrides for the rules' ``$placeholders``, by name, laid over each rule's
+        own cited defaults (``behaviour.DefaultTemplate``: ``rule.default``).  A
+        placeholder with no published value has no default and must be passed;
+        a missing one raises at fit time, naming it.
     n_periods : int
         Number of ticks ``fit`` runs (and ``fit_iter`` yields).
     warm_start : bool
@@ -256,7 +260,7 @@ class RDFSimulator(BaseEstimator):
         init_rules: Sequence[Template | str] = DEFAULT_INIT_RULES,
         update_rules: Sequence[Template | str] = DEFAULT_UPDATE_RULES,
         infer: Sequence[Template | str] | None = None,
-        params: dict = poledna_params,
+        params: dict | None = None,
         n_periods: int = 12,
         warm_start: bool = False,
         state_extract: Callable[[Model], pl.DataFrame] | None = None,
@@ -356,14 +360,11 @@ class RDFSimulator(BaseEstimator):
         if X is not None and not isinstance(X, Model):
             raise TypeError(
                 f"X is a maplib Model, not {type(X).__name__}: map populations into "
-                "one with skabm.templates and Model.map, then pass the model."
+                "one with skabm.ottr and Model.map, then pass the model."
             )
         if self.random_seed is not None:
             pr.set_random_seed(self.random_seed)
-        merged = {
-            **poledna_params,
-            **self.params,
-        }  # TODO remove poledna_params from here, it's already in self.params
+        merged = self.params or {}
         init_rules = [render(rule, merged) for rule in self.init_rules]
         update_rules = [render(rule, merged) for rule in self.update_rules]
         infer_rules: list[str] | None = None
@@ -458,10 +459,7 @@ class RDFSimulator(BaseEstimator):
                 apply_history_rules(
                     self.model_,
                     self.meta_,
-                    [
-                        render(rule, {**poledna_params, **self.params})
-                        for rule in self.history_rules
-                    ],
+                    [render(rule, self.params or {}) for rule in self.history_rules],
                 )
         return {"t": t, **row}
 

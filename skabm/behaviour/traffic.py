@@ -47,7 +47,6 @@ from __future__ import annotations
 
 import zlib
 from collections.abc import Sequence
-from string import Template
 
 import numpy as np
 import polars as pl
@@ -55,7 +54,8 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, dijkstra
 from scipy.spatial import cKDTree
 
-from skabm.rules import (
+from skabm.behaviour import DefaultTemplate
+from skabm.sparql import (
     _PREFIXES,
     register_geosparql,
     register_math,
@@ -82,7 +82,7 @@ _SOURCE = "Horowitz (1984) TR-B 18(1); Cascetta (1989) TR-B 23(1)"
 # Materialised once, so neither the per-tick accounting nor a closure pays for
 # geometry again.  A link crossing the boundary (a bridge into the zone) is in.
 
-area_membership = Template(
+area_membership = DefaultTemplate(
     _PREFIXES
     + """
 CONSTRUCT { ?l def:area ?a }
@@ -109,7 +109,7 @@ area_membership.metadata = {
 # the same congestion as cars — so a closure that empties a street speeds up the
 # buses still using it.  Placeholder: ``bus_factor``.
 
-route_time = Template(
+route_time = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?r def:time ?t0 . ?r def:open ?o0 }
@@ -129,7 +129,10 @@ WHERE {
     OPTIONAL { ?r def:open ?o0 }
     BIND(?x + ?sum AS ?t1)
 }
-"""
+""",
+    {
+        "bus_factor": 1.6,  # bus in-vehicle time over car time: stops and dwell
+    },
 )
 route_time.metadata = {
     "@id": "route_time",
@@ -146,7 +149,7 @@ route_time.metadata = {
 # census shares hold exactly; set it to 0 and S0_m freezes at the base.
 # Placeholders: ``theta``, ``anchor``.
 
-option_sum = Template(
+option_sum = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?o def:s ?s0 . ?o def:s0 ?b0 }
@@ -162,7 +165,11 @@ WHERE {
     OPTIONAL { ?o def:s0 ?b0 }
     BIND(IF($anchor > 0e0, ?s1, COALESCE(?b0, ?s1)) AS ?b1)
 }
-"""
+""",
+    {
+        "theta": 1 / 300,  # route-choice scale, per second: 5 minutes is a factor e
+        "anchor": 1.0,  # 1 while warming up the base, 0 to pivot against it
+    },
 )
 option_sum.metadata = {
     "@id": "option_sum",
@@ -178,7 +185,7 @@ option_sum.metadata = {
 # are all closed has S_m = 0 and drops out; an OD left with nothing keeps its
 # census shares rather than dividing by zero.  Placeholder: ``mu``.
 
-option_share = Template(
+option_share = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?o def:share ?p0 }
@@ -194,7 +201,10 @@ WHERE {
     BIND(IF(?s1 > 0e0 && ?b1 > 0e0, ?q1 * math:exp($mu * math:log(?s1 / ?b1)), 0e0) AS ?w1)
     BIND(IF(?total > 0e0, ?w1 / ?total, ?q1) AS ?p1)
 }
-"""
+""",
+    {
+        "mu": 0.3,  # mode-level scale over route-level, <= 1 (nested logit)
+    },
 )
 option_share.metadata = {
     "@id": "option_share",
@@ -210,7 +220,7 @@ option_share.metadata = {
 # routes ranked at or below r: the upper end of r's slice of [0, 1), which is
 # what ``choose`` draws against.  ``rank`` is any total order within an OD.
 
-route_prob = Template(
+route_prob = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?r def:prob ?p0 . ?r def:cum ?c0 }
@@ -236,7 +246,10 @@ WHERE {
             (?sh * COALESCE(?open, 1e0)) * (math:exp(0e0 - $theta * ?t) / ?s),
             0e0) AS ?p1)
 }
-"""
+""",
+    {
+        "theta": 1 / 300,  # route-choice scale, per second: 5 minutes is a factor e
+    },
 )
 route_prob.metadata = {
     "@id": "route_prob",
@@ -255,7 +268,7 @@ route_prob.metadata = {
 # smallest qualifying ``cum`` is what makes the pick unique even when two slices
 # meet at a floating-point seam.  Placeholder: ``replan``.
 
-choose = Template(
+choose = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?c def:route ?r0 }
@@ -274,7 +287,10 @@ WHERE {
     ?r1 a ex:Route ; def:od ?od ; def:cum ?h ; def:prob ?p1 .
     FILTER(?p1 > 1e-9)
 }
-"""
+""",
+    {
+        "replan": 0.1,  # share of commuters reconsidering each day (MATSim's usual)
+    },
 )
 choose.metadata = {
     "@id": "choose",
@@ -294,7 +310,7 @@ choose.metadata = {
 # calibrates.  ``demand`` is the period of the year: 1 on a school-term weekday.
 # Placeholders: ``peak_factor``, ``demand``, ``bpr_alpha``, ``bpr_beta``.
 
-link_load = Template(
+link_load = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?l def:flow ?f0 . ?l def:time ?t0 }
@@ -313,7 +329,13 @@ WHERE {
     BIND(COALESCE(?n, 0e0) * ($peak_factor * $demand) AS ?f1)
     BIND(?free * (1e0 + $bpr_alpha * math:exp($bpr_beta * math:log(?f1 / ?cap))) AS ?t1)
 }
-"""
+""",
+    {
+        "bpr_alpha": 0.15,  # BPR (1964)
+        "bpr_beta": 4.0,  # BPR (1964)
+        "peak_factor": 0.8,  # peak-hour vehicles per daily car commuter -- calibrate
+        "demand": 1.0,  # period of the year; 1 = school-term weekday
+    },
 )
 link_load.metadata = {
     "@id": "link_load",
@@ -330,7 +352,7 @@ link_load.metadata = {
 # declared.  The draw is materialised here, not drawn inside ``choose``: an
 # inline BIND would re-draw on every candidate route of the join.
 
-commuter_state = Template(
+commuter_state = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?c def:time ?t0 . ?c def:car ?a0 . ?c def:bus ?b0 .
@@ -362,7 +384,10 @@ WHERE {
     BIND(IF(?m = 3e0, 1e0, 0e0) AS ?w1)
     BIND(pr:uniform(0e0, 1e0) AS ?u1)
 }
-"""
+""",
+    {
+        "bus_factor": 1.6,  # bus in-vehicle time over car time: stops and dwell
+    },
 )
 commuter_state.metadata = {
     "@id": "commuter_state",
@@ -377,7 +402,7 @@ commuter_state.metadata = {
 # The exposure an old town's foundations feel: every car on every link that
 # touches the area, weighted by the link's length.  Buses are not counted.
 
-area_traffic = Template(
+area_traffic = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?a def:vkt ?v0 }
@@ -402,22 +427,8 @@ area_traffic.metadata = {
 
 
 # ---------------------------------------------------------------------------
-# Composition and defaults
+# Composition
 # ---------------------------------------------------------------------------
-
-# fmt: off
-traffic_params = {
-    "replan":      0.1,      # share of commuters reconsidering each day (MATSim's usual)
-    "theta":       1 / 300,  # route-choice scale, per second: 5 minutes is a factor e
-    "mu":          0.3,      # mode-level scale over route-level, <= 1 (nested logit)
-    "bpr_alpha":   0.15,     # BPR (1964)
-    "bpr_beta":    4.0,      # BPR (1964)
-    "bus_factor":  1.6,      # bus in-vehicle time over car time: stops and dwell
-    "peak_factor": 0.8,      # peak-hour vehicles per daily car commuter -- calibrate
-    "demand":      1.0,      # period of the year; 1 = school-term weekday
-    "anchor":      1.0,      # 1 while warming up the base, 0 to pivot against it
-}
-# fmt: on
 
 TRAFFIC_INIT_RULES = (area_membership,)
 TRAFFIC_UPDATE_RULES = (

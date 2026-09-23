@@ -31,11 +31,10 @@ occupations and 140M workers is 464 agents.
 
 from __future__ import annotations
 
-from string import Template
-
 import polars as pl
 
-from skabm.rules import _PREFIXES, register_math, register_polars_random
+from skabm.behaviour import DefaultTemplate
+from skabm.sparql import _PREFIXES, register_math, register_polars_random
 
 # The labour rules call math:exp; the model family is otherwise deterministic,
 # but pr:* stays registered so a stochastic variant can drop straight in.
@@ -50,7 +49,7 @@ LABOUR_UDFS = (register_polars_random, register_math)
 # exist somewhere in the graph.  It lives on a one-row ``Clock`` population,
 # and this rule is the only thing that touches it.
 
-clock_tick = Template(
+clock_tick = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?c def:t ?t0 }
@@ -86,7 +85,7 @@ clock_tick.metadata = {
 # never as rule logic.  Placeholders: ``weeks_per_step``, ``shock_start``,
 # ``shock_halfway``, ``shock_k``.
 
-target_demand = Template(
+target_demand = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?o def:target_demand ?d0 }
@@ -102,7 +101,13 @@ WHERE {
     BIND(math:exp(0e0 - $shock_k * (?since - $shock_halfway)) AS ?decay)
     BIND(IF(?since < 0e0, ?di, ?di + (?df - ?di) / (1e0 + ?decay)) AS ?d1)
 }
-"""
+""",
+    {
+        "weeks_per_step": 6.75,  # one time step, in weeks, del Rio-Chanona et al. (2021) Table 1
+        "shock_start": 20.0,  # scenario knob: years before the S-curve begins (past the burn-in)
+        "shock_halfway": 15.0,  # scenario knob: with shock_k, "30 years, mostly within 10"
+        "shock_k": 0.79,  # scenario knob: S-curve steepness
+    },
 )
 target_demand.metadata = {
     "@id": "target_demand",
@@ -124,7 +129,7 @@ target_demand.metadata = {
 # (paper, footnote 3) — the cap only ever binds under a violent shock.
 # Placeholders: ``delta_u``, ``delta_v``, ``gamma``.
 
-labour_adjustment = Template(
+labour_adjustment = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?o def:separations ?w0 . ?o def:openings ?n0 }
@@ -144,7 +149,12 @@ WHERE {
     BIND($delta_u * ?e + (1e0 - $delta_u) * ?excess_capped AS ?w1)
     BIND($delta_v * ?e + (1e0 - $delta_v) * ?shortfall_capped AS ?n1)
 }
-"""
+""",
+    {
+        "delta_u": 0.0160,  # spontaneous separation rate, del Rio-Chanona et al. (2021) Table 1
+        "delta_v": 0.0120,  # spontaneous vacancy-opening rate, del Rio-Chanona et al. (2021) Table 1
+        "gamma": 0.160,  # speed of adjustment to target demand, del Rio-Chanona et al. (2021) Table 1
+    },
 )
 labour_adjustment.metadata = {
     "@id": "labour_adjustment",
@@ -163,7 +173,7 @@ labour_adjustment.metadata = {
 # whose whole neighbourhood has zero vacancies gets 0 and is skipped downstream
 # — its unemployed have nowhere to apply this tick.
 
-application_norm = Template(
+application_norm = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?o def:app_norm ?z0 }
@@ -197,7 +207,7 @@ application_norm.metadata = {
 # pool competing for occupation j's vacancies — the quantity that decides how
 # many of them get filled.
 
-applications = Template(
+applications = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?o def:applications ?s0 }
@@ -244,7 +254,7 @@ applications.metadata = {
 # Self-loops (A_ii = r, the probability a job-changer stays in occupation) are
 # ordinary edges and need no special case.
 
-labour_flow = Template(
+labour_flow = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?edge def:flow ?f0 }
@@ -287,7 +297,7 @@ labour_flow.metadata = {
 # tick — is a by-product needed by ``unemployment_duration``; it is cheaper to
 # emit here, where the outflow is already in hand, than to re-derive it.
 
-labour_market_clearing = Template(
+labour_market_clearing = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?o def:employment ?e0 . ?o def:unemployment ?u0 .
@@ -344,7 +354,7 @@ labour_market_clearing.metadata = {
 # stages sum to ``def:unemployment`` by construction, which is the invariant
 # worth testing.
 
-unemployment_duration = Template(
+unemployment_duration = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?o def:u_spell1 ?a0 . ?o def:u_spell2 ?b0 .
@@ -376,24 +386,8 @@ unemployment_duration.metadata = {
 
 
 # ---------------------------------------------------------------------------
-# Composition and defaults
+# Composition
 # ---------------------------------------------------------------------------
-
-# Table 1 of the paper (calibrated on the US occupational mobility network).
-# The shock placeholders are scenario knobs, not fitted values: ``shock_start``
-# is the year the S-curve begins (set it past the burn-in), ``shock_halfway``
-# and ``shock_k`` reproduce the paper's "30 years, mostly within 10".
-# fmt: off
-labour_params = {
-    "delta_u":        0.0160,  # spontaneous separation rate
-    "delta_v":        0.0120,  # spontaneous vacancy-opening rate
-    "gamma":          0.160,   # speed of adjustment to target demand
-    "weeks_per_step": 6.75,    # duration of one time step, in weeks
-    "shock_start":   20.0,     # years before the automation S-curve begins
-    "shock_halfway": 15.0,     # years from shock start to the midpoint (t_0)
-    "shock_k":        0.79,    # S-curve steepness
-}
-# fmt: on
 
 # ``r`` of eq. 21 — the probability a job-changer stays in her own occupation —
 # is not a rule parameter: it is baked into A_ij by ``mobility_network`` before

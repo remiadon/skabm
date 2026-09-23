@@ -19,13 +19,11 @@ from maplib import Model
 from skabm import history as H
 from skabm import ir as IR
 from skabm.behaviour.learning import expect, register_sac, sac_learning
-from skabm.rules import DEF_NS
+from skabm.ottr import firm_template
 from skabm.simulation import RDFSimulator
-from skabm.templates import firm_template
+from skabm.sparql import DEF_NS
 
 _PREFIX = f"PREFIX def:<{DEF_NS}> PREFIX ex:<http://example.net/skabm#>"
-PARAMS = {"total_deposits": 1000.0}
-SHOCKED = {**PARAMS, "growth_sigma": 0.02}  # flat without shocks; see below
 OUTPUT = ("SUM", "Firm", "output")
 
 FIRMS = pl.DataFrame(
@@ -49,6 +47,16 @@ def firms() -> Model:
     world = Model()
     world.map(firm_template, FIRMS)
     return world
+
+
+@pytest.fixture
+def params(poledna_params):
+    return {**poledna_params, "total_deposits": 1000.0}
+
+
+@pytest.fixture
+def shocked(params):
+    return {**params, "growth_sigma": 0.02}  # flat without shocks; see below
 
 
 def sac_by_numpy(levels) -> float:
@@ -144,7 +152,7 @@ def test_measuring_needs_no_database_and_signals_are_what_open_one():
     assert set(row) == {"t"}  # this rule set consumes nothing, so nothing is left
 
 
-def test_measurement_covers_every_observable_of_every_class_present():
+def test_measurement_covers_every_observable_of_every_class_present(params):
     """One value per observable per tick, and an absent class is dropped.
 
     Firm-only, so every Household / Government / CentralBank observable the
@@ -152,7 +160,7 @@ def test_measurement_covers_every_observable_of_every_class_present():
     the run and no row is written for them, while the Firm ones are all there
     and not just the two the rules read back.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=4)
+    sim = RDFSimulator(params=params, n_periods=4)
     run = pl.DataFrame(sim.fit_iter(firms()))
     history = H.state_frame(sim.connection_)
     recorded = set(history["signal"])
@@ -168,7 +176,9 @@ def test_measurement_covers_every_observable_of_every_class_present():
     assert history.filter(pl.col("signal") == "sig__SUM__Firm__output").height == 5
 
 
-def test_history_rule_results_are_upserted_as_predicates_on_their_subject(tmp_path):
+def test_history_rule_results_are_upserted_as_predicates_on_their_subject(
+    tmp_path, params
+):
     """The generic write-back contract, plus the storage lifecycle around it.
 
     A history rule projects a subject IRI first and value columns after it,
@@ -177,7 +187,7 @@ def test_history_rule_results_are_upserted_as_predicates_on_their_subject(tmp_pa
     warm start continues it, and a file-backed run outlives the process.
     """
     path = str(tmp_path / "history.duckdb")
-    sim = RDFSimulator(params=PARAMS, n_periods=4, duckdb_connection=path)
+    sim = RDFSimulator(params=params, n_periods=4, duckdb_connection=path)
     sim.fit(firms())
 
     written = sim.model_.query(f"{_PREFIX} SELECT ?s ?f WHERE {{ ?s def:forecast ?f }}")
@@ -204,13 +214,13 @@ def test_history_rule_results_are_upserted_as_predicates_on_their_subject(tmp_pa
         assert con.execute(f"SELECT COUNT(*) FROM {H.TABLE}").fetchone()[0] > 0
 
 
-def test_virtualization_is_kept_off_the_simulation_graph():
+def test_virtualization_is_kept_off_the_simulation_graph(params):
     """``add_virtualization`` nulls every graph-local aggregate on its model.
 
     That is why the learner is a separate ``Model``.  Pinned because violating
     it would silently no-op firm_sales and the Taylor rule rather than raise.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=3).fit(firms())
+    sim = RDFSimulator(params=params, n_periods=3).fit(firms())
     total = sim.model_.query(
         f"{_PREFIX} SELECT (SUM(?y) AS ?total) WHERE {{ ?f a ex:Firm ; def:output ?y }}"
     )["total"][0]
@@ -253,7 +263,7 @@ def test_order_by_is_what_puts_the_series_in_time_order(learner_over):
     assert unordered != pytest.approx(sac_by_numpy(levels))
 
 
-def test_expectations_are_learned_end_to_end_from_an_empty_history():
+def test_expectations_are_learned_end_to_end_from_an_empty_history(params, shocked):
     """The full loop, and the steady state that follows from having no prior.
 
     Nothing is assumed about growth, so a deterministic run never leaves its
@@ -262,13 +272,13 @@ def test_expectations_are_learned_end_to_end_from_an_empty_history():
     something to estimate, and what gets published must equal the forecast
     recomputed by hand from the recorded series.
     """
-    flat = RDFSimulator(params=PARAMS, n_periods=5).fit(firms())
+    flat = RDFSimulator(params=params, n_periods=5).fit(firms())
     levels = H.state_frame(flat.connection_).filter(
         pl.col("signal") == "sig__SUM__Firm__output"
     )["level"]
     assert levels.n_unique() == 1  # steady state: no prior to push it off
 
-    sim = RDFSimulator(params=SHOCKED, n_periods=10, random_seed=7).fit(firms())
+    sim = RDFSimulator(params=shocked, n_periods=10, random_seed=7).fit(firms())
     shocked = (
         H.state_frame(sim.connection_)
         .filter(pl.col("signal") == "sig__SUM__Firm__output")
@@ -283,7 +293,7 @@ def test_expectations_are_learned_end_to_end_from_an_empty_history():
     assert published == pytest.approx(sac_by_numpy(shocked))
 
 
-def test_aggregates_on_the_sidecar_are_the_price_of_the_split():
+def test_aggregates_on_the_sidecar_are_the_price_of_the_split(params):
     """The gotcha that forces two models, pinned from the other direction.
 
     ``test_virtualization_is_kept_off_the_simulation_graph`` shows ``model_``
@@ -291,7 +301,7 @@ def test_aggregates_on_the_sidecar_are_the_price_of_the_split():
     that *does* carry the virtualization, the same aggregate returns None — no
     error, no warning.  Anything reading ``meta_`` counts rows in Python.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(firms())
+    sim = RDFSimulator(params=params, n_periods=1).fit(firms())
     assert sim.virtualized_
 
     every = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }"

@@ -12,8 +12,17 @@ Rules:
 
 skABM is only as credible as its calibration, so tests split in two:
 
-- **Model tests** (anything exercising `skabm/behaviour/*` or `skabm/schelling.py` rules) assert only what a cited source says: a published parameter value (Poledna et al. 2023 Table 2 is the model), an equation of the paper evaluated at those values, or a result the paper reports (e.g. the Beveridge curve slopes down). Cite the source (table, equation, section) next to the assertion. No invented parameters, no hand-picked targets, no asserting a constant against itself, no "row exists" smoke checks.
+- **Model tests** (anything exercising `skabm/behaviour/*` or `skabm/behaviour/schelling.py` rules) assert only what a cited source says: a published parameter value (Poledna et al. 2023 Table 2 is the model), an equation of the paper evaluated at those values, or a result the paper reports (e.g. the Beveridge curve slopes down). Cite the source (table, equation, section) next to the assertion. No invented parameters, no hand-picked targets, no asserting a constant against itself, no "row exists" smoke checks.
 - **Engine tests** (simulator, IR, history, templates, calibration machinery, loaders) pin software contracts and may use any numbers.
 - A behaviour with no published calibration (e.g. the bank extension) gets no model tests until it has one. Say so in the test module, don't fake one.
-- New parameters in `poledna_params` must be either in `TABLE_2` or explicitly listed in `UNSOURCED` (`tests/test_poledna_calibration.py`).
+- The `poledna_params` fixture (`tests/conftest.py`) is the independent copy of Table 2. `test_default_rules_carry_the_cited_values` checks the rules' own defaults against it.
 - Trimming a test must not lower line coverage: run `uv run --with pytest-cov pytest --cov=skabm` before and after.
+
+## Parameters
+
+A parameter's value lives on the rule that reads it, and nowhere else in `skabm/`.
+
+- Every rule in `skabm.behaviour` is a `DefaultTemplate` (`skabm/behaviour/__init__.py`): SPARQL with `$placeholders`, plus a `default` dict with a citation comment per value (`# τ^VAT, Poledna et al. (2023) Table 2`, or `# unsourced: ...`, or `# scenario knob: ...`). A plain `string.Template` or a module-level `*_params` dict is a bug. `test_behaviour_rules_carry_consistent_defaults` enforces both, and that a name shared by several rules has one value.
+- No published value, no default. The placeholder stays required and `render` raises a `KeyError` naming it (e.g. `firm_entry`'s `entry_barrier`).
+- Callers override by name only: `RDFSimulator(params={"peak_factor": 1.5})`. Read a default as `rule.default["name"]`. Never copy the full set into a notebook, app or test.
+- Language namespaces: `skabm.sparql` is SPARQL (render, prefixes, UDFs), `skabm.ottr` is the OTTR templates that map DataFrames into the graph, `skabm.behaviour` is the rules.

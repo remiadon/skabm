@@ -11,7 +11,6 @@ import pytest
 from worlds import world
 
 from skabm.behaviour.bank import bank_capital, bank_depositors, interbank_contagion
-from skabm.behaviour.params import poledna_params
 from skabm.simulation import RDFSimulator
 
 
@@ -43,7 +42,7 @@ LICENSED = _infer_licensed()
 @pytest.mark.skipif(
     not LICENSED, reason="Model.infer needs the licensed (academic) maplib build"
 )
-def test_infer_called():
+def test_infer_called(poledna_params):
     """The simulator should call infer when infer= is passed."""
     banks = pl.DataFrame(
         {
@@ -81,6 +80,7 @@ def test_infer_called():
         infer=interbank_contagion,
         params={
             **poledna_params,
+            "bank_asset_scale": 1e3,
             "distress_threshold": 0.03,
             "flee_amount_threshold": 5.0,
         },

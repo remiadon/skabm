@@ -3,48 +3,40 @@
 Paper: "Economic forecasting with an agent-based model."
        European Economic Review 151, 104306.  Austria, reference quarter 2010:Q4.
 
-Covered: the shipped parameter set against Table 2 (and a tripwire so no
-unsourced parameter slips in), census activity shares (Section 4.1.1), and the
-IO-table firm coefficients built from the same Eurostat tables the paper uses
-(Section 4.1.2).
+Covered: the default rule set's own defaults are the values the ``poledna_params``
+fixture cites, one for every placeholder; census activity shares (Section 4.1.1), and the IO-table firm
+coefficients built from the same Eurostat tables the paper uses (Section 4.1.2).
 """
 
 from __future__ import annotations
 
+from string import Template
+
 import polars as pl
 import pytest
 
-from skabm.behaviour.params import poledna_params
 from skabm.calibration import make_dataset, weighted_enum
 from skabm.datasets import build_firm_io_df
-
-# fmt: off
-TABLE_2 = {
-    "dividend_ratio":      0.7768,     # θ^DIV
-    "benefit_replacement": 0.3586,     # θ^UB
-    "vat_rate":            0.1529,     # τ^VAT
-    "total_deposits":      222_933.2e6,  # D^H
-    "rho":                 0.9263,     # Taylor-rule smoothing
-    "r_star":             -0.0034,     # r*
-    "pi_star":             0.005,      # π*
-    "xi_pi":               0.3214,     # ξ^π
-    "xi_gamma":            1.2994,     # ξ^γ
-}
-# Parameters with no Table 2 entry.  Adding one here is a decision, not a default.
-UNSOURCED = {
-    "firm_ownership_ratio", "gov_growth",
-    "growth_sigma", "inflation_sigma", "gov_growth_sigma",  # 0 = deterministic
-    "distress_threshold", "bank_asset_scale", "flee_amount_threshold",  # bank extension
-}
-# fmt: on
+from skabm.simulation import (
+    DEFAULT_HISTORY_RULES,
+    DEFAULT_INIT_RULES,
+    DEFAULT_UPDATE_RULES,
+)
 
 H_ACTIVE = 4_729_215  # H^act, census
 H_INACTIVE = 4_130_385  # H^inact, census
 
 
-def test_params_are_table_2():
-    assert {k: poledna_params[k] for k in TABLE_2} == TABLE_2
-    assert set(poledna_params) == set(TABLE_2) | UNSOURCED
+def test_default_rules_carry_the_cited_values(poledna_params):
+    """Every placeholder defaults to the paper's number, and no cited value goes unread."""
+    rules = [
+        r
+        for r in (*DEFAULT_INIT_RULES, *DEFAULT_UPDATE_RULES, *DEFAULT_HISTORY_RULES)
+        if isinstance(r, Template)
+    ]
+    for rule in rules:
+        assert rule.default == {k: poledna_params[k] for k in rule.get_identifiers()}
+    assert {k for r in rules for k in r.default} == set(poledna_params)
 
 
 def test_household_census_shares():

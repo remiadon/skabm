@@ -28,12 +28,11 @@ value per input row and cannot reorder its output.
 
 from __future__ import annotations
 
-from string import Template
-
 import polars as pl
 
+from skabm.behaviour import DefaultTemplate
 from skabm.history import CT_NS, signal_name
-from skabm.rules import _PREFIXES
+from skabm.sparql import _PREFIXES
 
 SAC_NS = "urn:sac:"
 
@@ -143,7 +142,7 @@ def expect(agg: str, klass: str, predicate: str, out: str) -> str:
 # Projects ?sig then ?forecast: subject IRI first, remaining columns become
 # def: predicates (history.apply_history_rules), so this writes exactly the
 # def:forecast triples ``expect`` reads.
-sac_learning = Template(
+sac_learning = DefaultTemplate(
     _PREFIXES
     + f"PREFIX ct:<{CT_NS}>\nPREFIX sac:<{SAC_NS}>\n"
     + """

@@ -5,7 +5,7 @@ The point of this module is the templates, and the way to use one is maplib's
 own ``Model.map``::
 
     from maplib import Model
-    from skabm.templates import firm_template   # also registers DataFrame.with_iri
+    from skabm.ottr import firm_template   # also registers DataFrame.with_iri
 
     world = Model()
     world.map(firm_template, firms.with_iri())
@@ -37,7 +37,7 @@ from maplib import (
     xsd,
 )
 
-from skabm.rules import DEF_NS, EX_NS
+from skabm.sparql import DEF_NS, EX_NS
 
 EX = Prefix(EX_NS)
 DEF = Prefix(DEF_NS)

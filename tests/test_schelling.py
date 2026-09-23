@@ -1,6 +1,6 @@
 """Schelling segregation on the RDFSimulator machinery — a tiny suite.
 
-The model lives in skabm/schelling.py: the 2D grid is a `Cell` population,
+The model lives in skabm/behaviour/schelling.py: the 2D grid is a `Cell` population,
 the Moore neighbourhood a CONSTRUCT, the people are *derived* by the SETTLE
 rule from `$density`, and HAPPINESS / DRAW / RELOCATE advance the world.
 There is no Eurostat access and no calibration layer here — the `Cell` frame
@@ -20,17 +20,16 @@ import polars as pl
 import polars_random as pr
 from worlds import world
 
-from skabm.rules import _PREFIXES
-from skabm.schelling import (
+from skabm.behaviour.schelling import (
+    RELOCATE,
     SCHELLING_GEO_INIT_RULES,
-    SCHELLING_GEO_PARAMS,
     SCHELLING_INIT_RULES,
-    SCHELLING_PARAMS,
     SCHELLING_UPDATE_RULES,
     geo_state_extract,
     state_extract,
 )
 from skabm.simulation import RDFSimulator
+from skabm.sparql import _PREFIXES
 
 
 def grid(size: int) -> pl.DataFrame:
@@ -52,7 +51,7 @@ def test_settle_derives_population():
     # is occupied (the occupancy draw is always < 1), so the count is exactly
     # the cell count — no statistics needed.  Each settler sits on a distinct
     # cell, and both groups appear.
-    params = dict(SCHELLING_PARAMS, density=1.0)
+    params = {"density": 1.0}
     sim = RDFSimulator(
         init_rules=SCHELLING_INIT_RULES,
         update_rules=SCHELLING_UPDATE_RULES,
@@ -84,7 +83,6 @@ def test_settle_yields_to_user_population():
     sim = RDFSimulator(
         init_rules=SCHELLING_INIT_RULES,
         update_rules=SCHELLING_UPDATE_RULES,
-        params=SCHELLING_PARAMS,
         n_periods=1,
         state_extract=state_extract,
         random_seed=0,
@@ -101,7 +99,6 @@ def test_one_person_per_cell_invariant():
     sim = RDFSimulator(
         init_rules=SCHELLING_INIT_RULES,
         update_rules=SCHELLING_UPDATE_RULES,
-        params=SCHELLING_PARAMS,
         n_periods=8,
         state_extract=state_extract,
         random_seed=0,
@@ -115,11 +112,10 @@ def test_one_person_per_cell_invariant():
 def test_segregation_rises_and_converges():
     # The result Schelling is famous for: mild same-group preference drives the
     # share of similar neighbours up until nobody is unhappy.
-    want = SCHELLING_PARAMS["want_similar"]
+    want = RELOCATE.default["want_similar"]
     sim = RDFSimulator(
         init_rules=SCHELLING_INIT_RULES,
         update_rules=SCHELLING_UPDATE_RULES,
-        params=SCHELLING_PARAMS,
         n_periods=30,
         state_extract=state_extract,
         random_seed=0,
@@ -139,7 +135,6 @@ def test_reproducible_under_random_seed():
         sim = RDFSimulator(
             init_rules=SCHELLING_INIT_RULES,
             update_rules=SCHELLING_UPDATE_RULES,
-            params=SCHELLING_PARAMS,
             n_periods=10,
             state_extract=state_extract,
             random_seed=seed,
@@ -158,7 +153,7 @@ def test_geo_variant_plugs_in():
     # neighbourhood rule (GEO_NEIGHBORHOOD) and the coordinate column: SETTLE,
     # the update rules and RDFSimulator are reused verbatim, and segregation
     # still rises.  (maplib has no geof: functions, so the distance test is
-    # hand-rolled from the WKT string — see skabm/schelling.py.)
+    # hand-rolled from the WKT string — see skabm/behaviour/schelling.py.)
     pr.set_random_seed(0)  # reproducible point positions
     cells = (
         pl.select(
@@ -174,7 +169,6 @@ def test_geo_variant_plugs_in():
     sim = RDFSimulator(
         init_rules=SCHELLING_GEO_INIT_RULES,
         update_rules=SCHELLING_UPDATE_RULES,
-        params=SCHELLING_GEO_PARAMS,
         n_periods=15,
         state_extract=geo_state_extract,
         random_seed=0,

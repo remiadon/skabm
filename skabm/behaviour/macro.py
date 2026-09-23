@@ -8,9 +8,8 @@ All templates anchor on their respective classes (``ex:Government``,
 
 from __future__ import annotations
 
-from string import Template
-
-from skabm.rules import _PREFIXES
+from skabm.behaviour import DefaultTemplate
+from skabm.sparql import _PREFIXES
 
 # ---------------------------------------------------------------------------
 # government_spend — AR(1) consumption process (update)
@@ -18,7 +17,7 @@ from skabm.rules import _PREFIXES
 # Poledna eq. 51 (linearized): budget(t+1) = budget(t) * (1 + gov_growth + eps).
 # Placeholder: ``gov_growth``, ``gov_growth_sigma``.
 
-government_spend = Template(
+government_spend = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?j def:budget ?b0 }
@@ -28,7 +27,11 @@ WHERE {
         def:budget ?b0 .
     BIND(?b0 * (1e0 + $gov_growth + pr:normal(0e0, $gov_growth_sigma)) AS ?b1)
 }
-"""
+""",
+    {
+        "gov_growth": 0.005,  # unsourced: eq. 51 drift
+        "gov_growth_sigma": 0.0,  # AR(1) innovation std; 0 = deterministic
+    },
 )
 
 # ---------------------------------------------------------------------------
@@ -40,7 +43,7 @@ WHERE {
 # where gamma(t) = Y(t)/Y(t-1) - 1, pi(t) = P(t)/P(t-1) - 1.
 # Floored at 0.  Placeholders: ``rho``, ``r_star``, ``pi_star``, ``xi_pi``, ``xi_gamma``.
 
-centralbank_rate = Template(
+centralbank_rate = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?cb def:policy_rate ?r0 .
@@ -64,5 +67,12 @@ WHERE {
             + $xi_gamma * ?growth) AS ?r_raw)
     BIND(IF(?r_raw > 0e0, ?r_raw, 0e0) AS ?r1)
 }
-"""
+""",
+    {
+        "rho": 0.9263,  # policy-rate smoothing, Poledna et al. (2023) Table 2
+        "r_star": -0.0034,  # real equilibrium rate, Poledna et al. (2023) Table 2
+        "pi_star": 0.005,  # inflation target, Poledna et al. (2023) Table 2
+        "xi_pi": 0.3214,  # inflation-gap weight, Poledna et al. (2023) Table 2
+        "xi_gamma": 1.2994,  # growth-gap weight, Poledna et al. (2023) Table 2
+    },
 )

@@ -35,11 +35,10 @@ from skabm.behaviour.traffic import (
     TRAFFIC_UPDATE_RULES,
     pedestrianize,
     routes,
-    traffic_params,
 )
-from skabm.rules import _PREFIXES
+from skabm.sparql import _PREFIXES
 from skabm.simulation import RDFSimulator
-from skabm.templates import (
+from skabm.ottr import (
     area_template,
     commuter_template,
     link_template,
@@ -441,7 +440,7 @@ PERIODS = {
     "July (fêtes de Bayonne)": 0.85,
     "August": 0.7,
 }
-PARAMS = {**traffic_params, "peak_factor": 0.7}
+PARAMS = {"peak_factor": 0.7}
 # Cars on the road in each half hour, as a share of the 8 o'clock peak the rules settle.
 # An assumption, and the first thing a permanent counter's own hourly profile replaces.
 MORNING = {"06:00": 0.22, "06:30": 0.35, "07:00": 0.55, "07:30": 0.78, "08:00": 1.0}

@@ -20,11 +20,8 @@ from skabm.behaviour.traffic import (
     TRAFFIC_UPDATE_RULES,
     pedestrianize,
     routes,
-    traffic_params,
 )
-from skabm.rules import _PREFIXES, register_geosparql
-from skabm.simulation import RDFSimulator
-from skabm.templates import (
+from skabm.ottr import (
     agent_template,
     area_template,
     commuter_template,
@@ -33,6 +30,8 @@ from skabm.templates import (
     route_template,
     via_template,
 )
+from skabm.simulation import RDFSimulator
+from skabm.sparql import _PREFIXES, register_geosparql
 
 #        W ---- A ====== C ====== B ---- E        centre street, 50 km/h
 #                \     [Area]    /
@@ -102,7 +101,7 @@ ODS = pl.DataFrame(
     }
 )
 SHARES = {"car": 0.8, "bus": 0.2}
-PARAMS = {**traffic_params, "peak_factor": 1.5}  # few agents, a real jam
+PARAMS = {"peak_factor": 1.5}  # few agents, a real jam
 
 
 def car_links(model: Model) -> pl.DataFrame:

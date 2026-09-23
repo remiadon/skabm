@@ -10,10 +10,9 @@ All SPARQL strings use triple-quoted formatting — no ``\n`` concatenation.
 
 from __future__ import annotations
 
-from string import Template
-
+from skabm.behaviour import DefaultTemplate
 from skabm.behaviour.learning import expect
-from skabm.rules import _PREFIXES, EX_NS
+from skabm.sparql import _PREFIXES, EX_NS
 
 # ---------------------------------------------------------------------------
 # firm_ownership — assign firm owners to investor households (init CONSTRUCT)
@@ -23,7 +22,7 @@ from skabm.rules import _PREFIXES, EX_NS
 # ``pr:uniform`` UDF could randomise it.  Run once after mapping.
 # Placeholder: ``firm_ownership_ratio``.
 
-firm_ownership = Template(
+firm_ownership = DefaultTemplate(
     _PREFIXES
     + f"""
 CONSTRUCT {{ ?owner def:owns ?f }}
@@ -34,7 +33,10 @@ WHERE {{
     BIND(xsd:integer(FLOOR(?j / $firm_ownership_ratio)) AS ?i)
     BIND(IRI(CONCAT("{EX_NS}hh_", STR(?i))) AS ?owner)
 }}
-"""
+""",
+    {
+        "firm_ownership_ratio": 0.03,  # unsourced: investor share of households (§3.2)
+    },
 )
 firm_ownership.metadata = {
     "@id": "firm_ownership",
@@ -55,7 +57,7 @@ firm_ownership.metadata = {
 # every tick into its history table and re-estimates the AR(1) by Sample-
 # Autocorrelation Learning.  Placeholder: ``growth_sigma``.
 
-firm_produce = Template(
+firm_produce = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?f def:output ?y0 }
@@ -71,7 +73,10 @@ WHERE {
     BIND(?alpha * ?n AS ?y_capacity)
     BIND(IF(?y_desired < ?y_capacity, ?y_desired, ?y_capacity) AS ?y1)
 }
-"""
+""",
+    {
+        "growth_sigma": 0.0,  # AR(1) innovation std; 0 = deterministic drift
+    },
 )
 firm_produce.metadata = {
     "@id": "firm_produce",
@@ -93,7 +98,7 @@ firm_produce.metadata = {
 # exist.
 # Placeholder: ``inflation_sigma``.
 
-firm_price = Template(
+firm_price = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?f def:price ?p0 }
@@ -105,7 +110,10 @@ WHERE {
     + """
     BIND(?p0 * (1e0 + ?inflation_e + pr:normal(0e0, $inflation_sigma)) AS ?p1)
 }
-"""
+""",
+    {
+        "inflation_sigma": 0.0,  # AR(1) innovation std; 0 = deterministic drift
+    },
 )
 firm_price.metadata = {
     "@id": "firm_price",
@@ -121,7 +129,7 @@ firm_price.metadata = {
 # capped by supply.  profit = margin * revenue; liquidity accumulates profit.
 # Placeholder: ``vat_rate``.
 
-firm_sales = Template(
+firm_sales = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?f def:profit ?pi0 . ?f def:liquidity ?d0 }
@@ -147,7 +155,10 @@ WHERE {
     BIND(?mrg * ?revenue AS ?pi1)
     BIND(?d0 + ?pi1 AS ?d1)
 }
-"""
+""",
+    {
+        "vat_rate": 0.1529,  # τ^VAT, Poledna et al. (2023) Table 2
+    },
 )
 firm_sales.metadata = {
     "@id": "firm_sales",
@@ -162,7 +173,7 @@ firm_sales.metadata = {
 # Poledna eq. 9 + 11.  Proportional hiring: dL / L = (desired_output - current)/
 # current, capped by available workers.  Placeholder: none (reads firm predicates).
 
-firm_labor = Template(
+firm_labor = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?f def:size ?n0 }
@@ -191,7 +202,7 @@ firm_labor.metadata = {
 # Placeholder: ``entry_barrier``, ``entry_sigma``.  One new firm per tick max
 # (proxy for the paper's continuous-time entry rate).
 
-firm_entry = Template(
+firm_entry = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?f def:output ?y0 . ?f def:price ?p0 }
@@ -221,7 +232,7 @@ firm_entry.metadata = {
 # Poledna eq. 14: dividend = dividend_ratio * max(0, profit).
 # Placeholder: ``dividend_ratio``.
 
-firm_dividends = Template(
+firm_dividends = DefaultTemplate(
     _PREFIXES
     + """
 DELETE { ?f def:profit ?pi0 . ?f def:dividend ?div0 }
@@ -233,7 +244,10 @@ WHERE {
     BIND($dividend_ratio * IF(?pi0 > 0e0, ?pi0, 0e0) AS ?div1)
     BIND(?pi0 - ?div1 AS ?pi1)
 }
-"""
+""",
+    {
+        "dividend_ratio": 0.7768,  # θ^DIV, Poledna et al. (2023) Table 2
+    },
 )
 firm_dividends.metadata = {
     "@id": "firm_dividends",

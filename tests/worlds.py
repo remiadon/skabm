@@ -2,7 +2,7 @@
 
 from maplib import Model, RDFType
 
-from skabm.templates import LINK, TEMPLATES, agent_template
+from skabm.ottr import LINK, TEMPLATES, agent_template
 
 
 def world(links: tuple = (), **populations) -> Model:

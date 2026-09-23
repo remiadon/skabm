@@ -45,7 +45,7 @@ from rdflib.plugins.sparql.parser import parseQuery, parseUpdate
 from rdflib.plugins.sparql.parserutils import CompValue
 from rdflib.term import Literal, URIRef, Variable
 
-from skabm.rules import _PREFIXES, DEF_NS, EX_NS
+from skabm.sparql import _PREFIXES, DEF_NS, EX_NS
 
 RDF_TYPE = URIRef("http://www.w3.org/1999/02/22-rdf-syntax-ns#type")
 

@@ -6,8 +6,8 @@ leave them passive: no interbank market, no contagion, no deposit flight.  This 
 adds ``bank_depositors`` (an init CONSTRUCT: which agents hold deposits at which bank),
 ``bank_capital`` (a per-tick update: the capital ratio responds to deposit outflows) and
 ``interbank_contagion`` (a recursive CONSTRUCT evaluated by ``Model.infer``: distress
-propagates through the depositor network to a fixed point).  Placeholders are
-parameterised in ``skabm.behaviour.params``; rule logic never contains numeric defaults.
+propagates through the depositor network to a fixed point).  Placeholder
+defaults sit on each ``DefaultTemplate``; the SPARQL itself never contains a number.
 
 **Licensing.**  ``bank_depositors`` and ``bank_capital`` run on the free maplib core.
 Only ``interbank_contagion`` needs the licensed reasoning add-on — free for academic
@@ -26,9 +26,8 @@ rule here keeps ``} WHERE {`` on one line.
 
 from __future__ import annotations
 
-from string import Template
-
-from skabm.rules import _PREFIXES, EX_NS
+from skabm.behaviour import DefaultTemplate
+from skabm.sparql import _PREFIXES, EX_NS
 
 # ---------------------------------------------------------------------------
 # bank_depositors - init CONSTRUCT, structural, runs once after mapping
@@ -39,7 +38,7 @@ from skabm.rules import _PREFIXES, EX_NS
 # - same contract as ``schelling.SETTLE`` and ``firm.firm_ownership``.
 # This is a one-time CONSTRUCT, NOT an update rule.
 
-bank_depositors = Template(
+bank_depositors = DefaultTemplate(
     _PREFIXES
     + """CONSTRUCT { ?agent def:holds_at ?bank } WHERE {
     { ?agent a ex:Household ; def:wealth ?w }
@@ -71,7 +70,7 @@ bank_depositors.metadata = {
 # set it from the deposit base (``total_deposits / n_banks``, say) for a
 # realistically scaled one, or every flight event drives the ratio to nonsense.
 
-bank_capital = Template(
+bank_capital = DefaultTemplate(
     _PREFIXES
     + """DELETE { ?b def:capital_ratio ?cr0 }
 INSERT { ?b def:capital_ratio ?cr1 }
@@ -87,7 +86,10 @@ WHERE {
         } GROUP BY ?b
     }
     BIND(?cr0 - IF(BOUND(?outflow), ?outflow / (?lev * $bank_asset_scale), 0e0) AS ?cr1)
-}"""
+}""",
+    {
+        "bank_asset_scale": 1e3,  # unsourced: deposit base per unit of leverage; scale with the population
+    },
 )
 bank_capital.metadata = {
     "@id": "bank_capital",
@@ -132,19 +134,23 @@ bank_capital.metadata = {
 # therefore carried as a ``true`` object, and every match tests it as
 # ``?b ex:is_distressed true``.
 interbank_contagion = [
-    Template(
+    DefaultTemplate(
         f"PREFIX ex: <{EX_NS}>"
         f"PREFIX def: <urn:maplib_default:>"
-        f"CONSTRUCT {{ ?b ex:is_distressed true }} WHERE {{ ?b a ex:Bank ; def:capital_ratio ?cr . FILTER(?cr < $distress_threshold) . }}"
+        f"CONSTRUCT {{ ?b ex:is_distressed true }} WHERE {{ ?b a ex:Bank ; def:capital_ratio ?cr . FILTER(?cr < $distress_threshold) . }}",
+        {"distress_threshold": 0.03},  # ζ, the Basel III minimum capital ratio
     ),
-    Template(
+    DefaultTemplate(
         f"PREFIX ex: <{EX_NS}>"
         f"PREFIX def: <urn:maplib_default:>"
         f"CONSTRUCT {{ ?agent def:flees_to ?safe ; def:flees_amount ?amount }} WHERE {{ {{ ?agent a ex:Household ; def:holds_at ?distressed ; def:wealth ?amount }} UNION {{ ?agent a ex:Firm ; def:holds_at ?distressed ; def:liquidity ?amount }} ?distressed ex:is_distressed true . ?safe a ex:Bank . FILTER NOT EXISTS {{ ?safe ex:is_distressed true }} . }}"
     ),
-    Template(
+    DefaultTemplate(
         f"PREFIX ex: <{EX_NS}>"
         f"PREFIX def: <urn:maplib_default:>"
-        f"CONSTRUCT {{ ?b ex:is_distressed true }} WHERE {{ ?other def:flees_to ?b ; def:flees_amount ?amount . ?b a ex:Bank ; def:capital_ratio ?cr . FILTER(?amount > $flee_amount_threshold) . }}"
+        f"CONSTRUCT {{ ?b ex:is_distressed true }} WHERE {{ ?other def:flees_to ?b ; def:flees_amount ?amount . ?b a ex:Bank ; def:capital_ratio ?cr . FILTER(?amount > $flee_amount_threshold) . }}",
+        {
+            "flee_amount_threshold": 10.0
+        },  # unsourced: outflow that destabilises the receiving bank
     ),
 ]

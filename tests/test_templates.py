@@ -1,31 +1,34 @@
-"""Agent templates (``skabm.templates``) — the three failures ``map_default``
+"""Agent templates (``skabm.ottr``) — the three failures ``map_default``
 could not catch, the one thing it did that still has to work, and a drift tripwire:
 the templates are hand-written, so only a test keeps them in step with the rules.
 """
+
+import importlib
+import pkgutil
+from string import Template
 
 import polars as pl
 import pytest
 from maplib import Model
 
-from skabm.behaviour.labour import LABOUR_UPDATE_RULES, labour_params
-from skabm.behaviour.params import poledna_params
-from skabm.ir import analyse, rule_name
-from skabm.rules import EX_NS, render
-from skabm.schelling import (
+import skabm.behaviour
+from skabm.behaviour import DefaultTemplate
+from skabm.behaviour.labour import LABOUR_UPDATE_RULES
+from skabm.behaviour.schelling import (
     SCHELLING_GEO_INIT_RULES,
-    SCHELLING_GEO_PARAMS,
     SCHELLING_INIT_RULES,
-    SCHELLING_PARAMS,
     SCHELLING_UPDATE_RULES,
 )
-from skabm.simulation import DEFAULT_INIT_RULES, DEFAULT_UPDATE_RULES
-from skabm.templates import (
+from skabm.ir import analyse, rule_name
+from skabm.ottr import (
     LINK,
     TEMPLATES,
     agent_template,
     firm_template,
     household_template,
 )
+from skabm.simulation import DEFAULT_INIT_RULES, DEFAULT_UPDATE_RULES
+from skabm.sparql import EX_NS, render
 
 FIRMS = pl.DataFrame(
     {
@@ -37,16 +40,10 @@ FIRMS = pl.DataFrame(
 ).with_iri()
 
 RULE_SETS = {
-    "poledna": ((*DEFAULT_INIT_RULES, *DEFAULT_UPDATE_RULES), poledna_params),
-    "schelling": (
-        (*SCHELLING_INIT_RULES, *SCHELLING_UPDATE_RULES),
-        SCHELLING_PARAMS,
-    ),
-    "schelling_geo": (
-        (*SCHELLING_GEO_INIT_RULES, *SCHELLING_UPDATE_RULES),
-        SCHELLING_GEO_PARAMS,
-    ),
-    "labour": (LABOUR_UPDATE_RULES, labour_params),
+    "poledna": (*DEFAULT_INIT_RULES, *DEFAULT_UPDATE_RULES),
+    "schelling": (*SCHELLING_INIT_RULES, *SCHELLING_UPDATE_RULES),
+    "schelling_geo": (*SCHELLING_GEO_INIT_RULES, *SCHELLING_UPDATE_RULES),
+    "labour": LABOUR_UPDATE_RULES,
 }
 
 
@@ -134,11 +131,51 @@ def test_an_undeclared_link_is_named_not_guessed():
 @pytest.mark.parametrize("name", sorted(RULE_SETS))
 def test_every_predicate_the_rules_cannot_produce_is_declared(name):
     """Structure is what no rule writes, so only a population can supply it."""
-    rules, params = RULE_SETS[name]
-    ir = analyse(
-        (rule_name(rule, i), render(rule, params)) for i, rule in enumerate(rules)
-    )
+    rules = RULE_SETS[name]
+    ir = analyse((rule_name(rule, i), render(rule, {})) for i, rule in enumerate(rules))
     for klass, predicate in ir.structure:
         assert klass in TEMPLATES, f"{name}: no template for {klass}"
         declared = {p.variable.name for p in TEMPLATES[klass].parameters}
         assert predicate in declared, f"{name}: {klass} template lacks {predicate}"
+
+
+def behaviour_rules() -> dict[str, Template]:
+    """Every rule template shipped in ``skabm.behaviour``, by qualified name."""
+    rules = {}
+    for info in pkgutil.iter_modules(skabm.behaviour.__path__):
+        module = importlib.import_module(f"skabm.behaviour.{info.name}")
+        for name, value in vars(module).items():
+            for i, rule in enumerate(value if isinstance(value, list) else [value]):
+                if isinstance(rule, Template):
+                    rules[f"{info.name}.{name}[{i}]"] = rule
+    return rules
+
+
+def test_behaviour_rules_carry_consistent_defaults():
+    """A rule is a DefaultTemplate, and a placeholder means one number everywhere.
+
+    Defaults are written on each rule next to their citation, so a value shared
+    by several rules (``vat_rate``, ``theta``) is written more than once; this is
+    what keeps the copies from drifting apart.
+    """
+    rules = behaviour_rules()
+    plain = [
+        name for name, rule in rules.items() if not isinstance(rule, DefaultTemplate)
+    ]
+    assert not plain, f"plain string.Template rules: {plain}"
+
+    seen: dict[str, set] = {}
+    for rule in rules.values():
+        assert set(rule.default) <= set(rule.get_identifiers()), rule.default
+        for key, value in rule.default.items():
+            seen.setdefault(key, set()).add(value)
+    assert {k: v for k, v in seen.items() if len(v) > 1} == {}
+
+
+def test_default_template_substitutes_its_defaults_as_doubles():
+    rule = DefaultTemplate("FILTER(?x < $a && ?y < $b)", {"a": 0.5})
+    assert rule.substitute(b=2) == "FILTER(?x < 5.000000e-01 && ?y < 2.000000e+00)"
+    assert rule.substitute({"a": 1.0, "b": 2.0}).startswith("FILTER(?x < 1.000000e+00")
+    assert rule.safe_substitute() == "FILTER(?x < 5.000000e-01 && ?y < $b)"
+    with pytest.raises(KeyError, match="b"):
+        rule.substitute()

@@ -1,6 +1,6 @@
 # skabm
 
-![coverage](https://img.shields.io/badge/coverage-96%25-brightgreen)
+![coverage](https://img.shields.io/badge/coverage-95%25-brightgreen)
 
 **scikit-learn-style agent-based modeling on a knowledge graph.**
 
@@ -20,11 +20,32 @@ You bring behavioural rules and data. These come back without your writing them:
 | | |
 |---|---|
 | **Populations from public data** | `skabm.datasets` pulls Eurostat IO tables and business demography; `calibration.population` fits agent *rows* to accounting identities and known margins by permutation, so every marginal survives exactly |
-| **Behaviour as data** | a rule is a SPARQL `string.Template` passed to `__init__`, so `get_params()`/`clone()` work and a rule set is serialisable, diffable and shareable — logic in the template, numbers in `params` |
+| **Behaviour as data** | a rule is a SPARQL `DefaultTemplate` passed to `__init__`, so `get_params()`/`clone()` work and a rule set is serialisable, diffable and shareable — logic in the template, each number on the rule next to its citation, overridable through `params` |
 | **Derived observables** | Mesa makes you declare `model_reporters`, Agents.jl `adata`, NetLogo a metric list — their rules are opaque host-language functions. skabm's are SPARQL, so it parses them through a real algebra and derives the `(class, predicate, aggregate)` triples they imply. Every binding constraint becomes a series too: the `min` in eq. 5 gives the share of firms pinned at `alpha * size`, the `max` in the Taylor rule the share of quarters at the zero lower bound |
 | **A graph with memory** | a rule naming an `ex:sig__<agg>__<Class>__<predicate>` signal opens a DuckDB history; `history_rules` re-run over the accumulated series each tick and upsert their results back as triples. SAC learning is one `SELECT` plus one polars UDF; a moving average or an RL update is another, with no engine change |
 | **Fixed-point propagation** | `infer=` hands recursive CONSTRUCT rules to maplib's reasoner, so contagion, transitive closure and reachability propagate across the whole graph in one call rather than hand-tuned sub-tick passes |
 | **First-class interventions** | `model_` is a regular maplib model post-fit: rewire an ownership edge, delete a bank, halve a sector's demand with `model_.update(...)`, then continue with `warm_start=True` |
+
+### A rule knows its parameters
+
+Importing a rule is enough to see what it reads and what it assumes. Every rule is a
+`DefaultTemplate`, a `string.Template` that also carries its published values:
+
+```python
+from skabm.behaviour.firm import firm_entry, firm_sales
+from skabm.behaviour.macro import centralbank_rate
+
+firm_sales.get_identifiers()    # ['vat_rate']
+firm_sales.default              # {'vat_rate': 0.1529}: τ^VAT, Poledna et al. (2023) Table 2
+centralbank_rate.default["rho"] # 0.9263, the Taylor-rule smoothing
+
+firm_entry.get_identifiers()    # ['entry_barrier', 'entry_sigma']
+firm_entry.default              # {}: no published calibration, so you must pass both
+assert firm_sales.default == {"vat_rate": 0.1529} and firm_entry.default == {}
+```
+
+`RDFSimulator(params={"vat_rate": 0.2})` overrides a default by name, and a placeholder with
+no default raises at fit time, naming itself.
 
 ### What a run yields
 
@@ -33,7 +54,7 @@ import polars as pl
 from maplib import Model
 
 from skabm.simulation import RDFSimulator
-from skabm.templates import firm_template, household_template  # + DataFrame.with_iri
+from skabm.ottr import firm_template, household_template  # + DataFrame.with_iri
 
 firms = pl.DataFrame({"id": ["firm_0", "firm_1"], "output": [100.0, 120.0],
                       "price": [1.0, 1.1], "alpha": [10.0, 10.0], "size": [12.0, 13.0],
@@ -81,7 +102,7 @@ panel.lazy().group_by("t").agg(gini("wealth")).sort("t").collect()
 
 **The world is an argument.** `fit` takes one thing: a maplib `Model`, advanced in place — one
 you mapped, a graph another system built, or one you deserialized and intervened on.
-`skabm.templates` is a registry of maplib `Template`s, one per agent class, and mapping a
+`skabm.ottr` is a registry of maplib `Template`s, one per agent class, and mapping a
 population is maplib's own `Model.map` — which checks the frame before anything simulates:
 
 ```python continuation
@@ -96,7 +117,7 @@ frame lacking one is a run of nothing. Quantities are `xsd:double`, which takes 
 width as is; an integer column is refused by name, because an `xsd:long` never equals the
 doubles the rules write and would join with nothing, silently. Columns a template does not
 declare are refused too: drop them, or declare your own class with `agent_template`.
-Importing `skabm.templates` registers `DataFrame.with_iri(*links)`, which turns `id` and the
+Importing `skabm.ottr` registers `DataFrame.with_iri(*links)`, which turns `id` and the
 named link columns into the IRIs the graph needs — and mints `id` from row position, like
 `with_row_index`, when a frame has none (`prefix=` keeps two such classes apart).
 
@@ -159,7 +180,7 @@ from maplib import Model
 
 from skabm.datasets import build_firm_io_df
 from skabm.simulation import RDFSimulator
-from skabm.templates import firm_template, household_template
+from skabm.ottr import firm_template, household_template
 
 # 1. Real data: Austrian input-output table + business demography (Poledna §4.1).
 io = build_firm_io_df("AT", 2010).drop_nulls(["n_firms", "alpha_s"])
@@ -249,8 +270,8 @@ imposable.
 | `skabm.datasets` | Eurostat loaders (IO tables, business demography) |
 | `skabm.calibration.population` | Population samplers + constraint calibrators (GA, Metropolis–Hastings), sklearn estimator API |
 | `skabm.calibration.parameters` | Model calibration: `RDFSimulator` as a black-it `model(theta, N, seed)`, plus `noise_floor` |
-| `skabm.templates` | A registry of maplib `Template`s, one per agent class — the contract `Model.map` checks a population against — plus `DataFrame.with_iri`, which gives a frame its IRIs |
-| `skabm.rules` | Namespaces, `render` (param substitution) and the UDF registrars — random draws, `exp`/`log`, GeoSPARQL's `geof:sfIntersects`/`sfWithin` |
+| `skabm.ottr` | A registry of maplib `Template`s, one per agent class — the contract `Model.map` checks a population against — plus `DataFrame.with_iri`, which gives a frame its IRIs |
+| `skabm.sparql` | Namespaces, `render` (param substitution) and the UDF registrars — random draws, `exp`/`log`, GeoSPARQL's `geof:sfIntersects`/`sfWithin` |
 | `skabm.behaviour` | The rule library by function: `firm`, `household`, `macro`, `bank`, `labour`, `learning`, `traffic` |
 | `skabm.ir` | Rule IR: read/write sets off the SPARQL algebra, the state/structure partition, the per-class schema, the observables implied |
 | `skabm.history` | Measuring the observables, and the DuckDB sidecar that persists and virtualizes them (chrontext) |
@@ -258,7 +279,7 @@ imposable.
 
 | Design decision, in sklearn vocabulary | |
 |---|---|
-| **X is the world** | a maplib `Model`, populations mapped into it with `skabm.templates` and `Model.map`. Predicates are column names — the DataFrame schema *is* the graph schema — and an IRI-valued column (`employer`, `owns`) is a graph edge. Invariants that always hold ship as init rules (`firm_ownership`) rather than being re-encoded per dataset |
+| **X is the world** | a maplib `Model`, populations mapped into it with `skabm.ottr` and `Model.map`. Predicates are column names — the DataFrame schema *is* the graph schema — and an IRI-valued column (`employer`, `owns`) is a graph edge. Invariants that always hold ship as init rules (`firm_ownership`) rather than being re-encoded per dataset |
 | **Rules are hyperparameters** | `string.Template` objects in `__init__`, so `get_params`/`clone` work. `init_rules` set initial conditions once after mapping; `update_rules` are the dynamics, upserted every tick in the paper's event order. The default set self-scopes: rules whose classes are all absent match nothing |
 | **`model_` is the fitted artifact** | the graph where data and rules blend into one evolving world. Cold `fit` rebuilds it; `warm_start=True` continues it |
 | **Structure vs state** | predicates no update rule touches (links, coefficients) are *structure*, written at fit and edited only by intervention; predicates the rules upsert are *state*, owned by the rules after t=0. Derived, not asserted — `skabm.ir` reads it off the algebra, and it settles both the extract's columns and the observables |

@@ -4,7 +4,7 @@ No Eurostat access — populations are tiny hand-written DataFrames mapped
 into a fresh maplib Model per fit (``worlds.world``: shipped templates,
 predicates = column names).  Rules are the default
 string.Template objects; test-specific numbers come in through the params
-dict, merged over rules.POLEDNA_PARAMS.  Covered: iteration yielding
+dict, laid over the ``poledna_params`` fixture.  Covered: iteration yielding
 per-agent state, cold-fit rebuild semantics, warm_start continuation,
 upsert semantics, the paper's capacity cap, income by activity status,
 unreferenced-population warning, and sklearn get_params/clone compatibility.
@@ -16,12 +16,11 @@ from maplib import Model
 from sklearn.base import clone
 from worlds import world
 
-from skabm.behaviour.firm import firm_ownership, firm_produce
+from skabm.behaviour.firm import firm_entry, firm_ownership, firm_produce
 from skabm.behaviour.household import household_income_init
-from skabm.behaviour.params import poledna_params
-from skabm.rules import DEF_NS
+from skabm.ottr import firm_template, household_template
 from skabm.simulation import RDFSimulator
-from skabm.templates import firm_template, household_template
+from skabm.sparql import DEF_NS
 
 _PREFIX = f"PREFIX def:<{DEF_NS}> PREFIX ex:<http://example.net/skabm#>"
 
@@ -64,8 +63,8 @@ CENTRAL_BANK = pl.DataFrame(
     }
 )
 
-# overrides merged over rules.POLEDNA_PARAMS at fit time
-PARAMS = {
+# laid over the poledna_params fixture by the ``params`` fixture below
+OVERRIDES = {
     "dividend_ratio": 0.8,
     "benefit_replacement": 0.4,
     "total_deposits": 3000.0,
@@ -82,7 +81,16 @@ PARAMS = {
 # growth it then learns from is zero, and the model sits at a steady state.
 # Shocks are what give the AR(1) something to estimate, so tests that need a
 # non-flat trajectory use these params together with a fixed random_seed.
-SHOCKED = {**PARAMS, "growth_sigma": 0.02}
+
+
+@pytest.fixture
+def params(poledna_params):
+    return {**poledna_params, **OVERRIDES}
+
+
+@pytest.fixture
+def shocked(params):
+    return {**params, "growth_sigma": 0.02}
 
 
 def gdp(state: pl.DataFrame) -> float:
@@ -101,8 +109,8 @@ def path(sim) -> list:
     ]
 
 
-def test_fit_iter_yields_measurements_per_tick():
-    sim = RDFSimulator(params=SHOCKED, n_periods=4, random_seed=11)
+def test_fit_iter_yields_measurements_per_tick(shocked):
+    sim = RDFSimulator(params=shocked, n_periods=4, random_seed=11)
 
     run = pl.DataFrame(
         sim.fit_iter(world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK))
@@ -121,8 +129,8 @@ def test_fit_iter_yields_measurements_per_tick():
     assert len(set(gdp_path)) == 4
 
 
-def test_warm_start_continues_the_world():
-    sim = RDFSimulator(params=SHOCKED, n_periods=2, random_seed=5).fit(
+def test_warm_start_continues_the_world(shocked):
+    sim = RDFSimulator(params=shocked, n_periods=2, random_seed=5).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
     )
     gdp_after_cold = gdp(
@@ -132,7 +140,7 @@ def test_warm_start_continues_the_world():
         )
     )
 
-    warm = RDFSimulator(params=SHOCKED, n_periods=2, warm_start=True, random_seed=5)
+    warm = RDFSimulator(params=shocked, n_periods=2, warm_start=True, random_seed=5)
     warm.model_ = sim.model_
     rows = list(warm.fit_iter())
     assert [r["t"] for r in rows] == [1, 2]
@@ -142,7 +150,7 @@ def test_warm_start_continues_the_world():
         warm.fit({"Firm": FIRMS})  # populations are mapped by the caller, not here
 
 
-def test_fit_takes_a_model_someone_else_built():
+def test_fit_takes_a_model_someone_else_built(params):
     """The world is an argument, not something the simulator has to construct.
 
     Anything reachable through maplib is therefore reachable here: a graph
@@ -156,7 +164,7 @@ def test_fit_takes_a_model_someone_else_built():
         f"{_PREFIX} DELETE {{ ?f def:price ?p }} INSERT {{ ?f def:price 3e0 }} "
         "WHERE { ?f a ex:Firm ; def:price ?p }"
     )
-    sim = RDFSimulator(params=PARAMS, n_periods=2, random_seed=3)
+    sim = RDFSimulator(params=params, n_periods=2, random_seed=3)
     run = pl.DataFrame(sim.fit_iter(world))
 
     assert sim.model_ is world  # advanced in place, not copied
@@ -166,14 +174,14 @@ def test_fit_takes_a_model_someone_else_built():
     assert run["sig__AVG__Firm__price"][0] > 2.0
 
 
-def test_warm_start_takes_the_model_to_continue():
+def test_warm_start_takes_the_model_to_continue(params):
     """The replacement for assigning ``model_`` and flipping the flag."""
-    cold = RDFSimulator(params=PARAMS, n_periods=2, random_seed=3).fit(
+    cold = RDFSimulator(params=params, n_periods=2, random_seed=3).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS)
     )
     owners = cold.model_.query(f"{_PREFIX} SELECT ?h WHERE {{ ?h def:owns ?f }}").height
 
-    warm = RDFSimulator(params=PARAMS, n_periods=2, warm_start=True, random_seed=3)
+    warm = RDFSimulator(params=params, n_periods=2, warm_start=True, random_seed=3)
     rows = list(warm.fit_iter(cold.model_))
 
     assert warm.model_ is cold.model_ and len(rows) == 2
@@ -184,20 +192,20 @@ def test_warm_start_takes_the_model_to_continue():
     )
 
 
-def test_default_params_present():
-    # no params given: the published Table 2 values run out of the box
-    sim = RDFSimulator(n_periods=1).fit(
-        world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
-    )
-    wealth = sim.model_.query(f"{_PREFIX} SELECT ?h ?w WHERE {{ ?h def:wealth ?w }}")
-    assert wealth.height == 3
+def test_a_placeholder_without_a_published_value_is_named():
+    # firm_entry's barrier has no published calibration, so no default: the
+    # caller is told rather than handed a number nobody chose
+    with pytest.raises(KeyError, match="entry_barrier"):
+        RDFSimulator(init_rules=(), update_rules=(firm_entry,), n_periods=1).fit(
+            world(Firm=FIRMS)
+        )
 
 
-def test_default_rules_scoped_to_passed_kinds():
+def test_default_rules_scoped_to_passed_kinds(shocked):
     # only firms: default rules anchored on absent classes (Household,
     # CentralBank) match nothing and no-op — SPARQL pattern matching scopes
     # the full default rule set to the kinds actually mapped
-    sim = RDFSimulator(params=SHOCKED, n_periods=2, random_seed=5).fit(
+    sim = RDFSimulator(params=shocked, n_periods=2, random_seed=5).fit(
         world(Firm=FIRMS)
     )
 
@@ -208,8 +216,8 @@ def test_default_rules_scoped_to_passed_kinds():
     assert incomes.height == 0  # no household rules without Household=
 
 
-def test_unreferenced_population_warns():
-    sim = RDFSimulator(params=PARAMS, n_periods=1)
+def test_unreferenced_population_warns(params):
+    sim = RDFSimulator(params=params, n_periods=1)
     ghosts = pl.DataFrame({"id": ["ghost_0"], "x": [1.0]})
     with pytest.warns(UserWarning, match="Ghost"):
         sim.fit(
@@ -219,8 +227,8 @@ def test_unreferenced_population_warns():
         )
 
 
-def test_upserts_do_not_duplicate_state():
-    sim = RDFSimulator(params=PARAMS, n_periods=3).fit(
+def test_upserts_do_not_duplicate_state(params):
+    sim = RDFSimulator(params=params, n_periods=3).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
     )
 
@@ -236,7 +244,7 @@ def test_production_respects_labor_capacity():
     sim = RDFSimulator(
         init_rules=[],
         update_rules=[firm_produce],
-        params={"growth_e": 0.5},
+        params={"growth_sigma": 0.0},
         n_periods=10,
     ).fit(world(Firm=FIRMS))
 
@@ -247,9 +255,9 @@ def test_production_respects_labor_capacity():
     assert (outputs["y"] <= outputs["alpha"] * outputs["n"] + 1e-9).all()
 
 
-def test_income_by_activity_status():
-    # Poledna eq. 49 with Table 2's own θ^UB and θ^DIV (no params: the defaults)
-    sim = RDFSimulator(n_periods=1).fit(
+def test_income_by_activity_status(poledna_params):
+    # Poledna eq. 49 with Table 2's own θ^UB and θ^DIV
+    sim = RDFSimulator(params=poledna_params, n_periods=1).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
     )
 
@@ -317,10 +325,10 @@ def test_firm_ownership_preserves_data_defined_owner():
     assert sum(f == "firm_1" for _, f in owners) == 1  # not overwritten
 
 
-def test_class_free_rule_survives_kind_filter():
+def test_class_free_rule_survives_kind_filter(params):
     # household_wealth_init names no ex:Class (it reads derived def:income); the
     # fit-time filter must keep it, else household wealth never materializes
-    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(
+    sim = RDFSimulator(params=params, n_periods=1).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS)
     )
     wealth = sim.model_.query(f"{_PREFIX} SELECT ?h ?w WHERE {{ ?h def:wealth ?w }}")
@@ -329,7 +337,7 @@ def test_class_free_rule_survives_kind_filter():
 
 
 @pytest.mark.filterwarnings("ignore:population 'Firm'")
-def test_bare_link_resolves_from_model():
+def test_bare_link_resolves_from_model(params):
     # both id and the employer link are bare local names; map_population recognizes
     # "firm_0" as a reference (a firm with that id was mapped first) and
     # prefixes it, so the income rule traverses employer -> firm.
@@ -344,13 +352,13 @@ def test_bare_link_resolves_from_model():
     )
     households = pl.DataFrame({"id": ["hh_0"], "employer": ["firm_0"], "psi": [0.9]})
     sim = RDFSimulator(
-        init_rules=[household_income_init], update_rules=[], n_periods=0
+        init_rules=[household_income_init], update_rules=[], params=params, n_periods=0
     ).fit(world(Firm=firms, Household=households))
     income = sim.model_.query(f"{_PREFIX} SELECT ?i WHERE {{ ?h def:income ?i }}")
     assert income["i"].to_list() == [30.0]
 
 
-def test_ar_shocks_opt_in_and_reproducible():
+def test_ar_shocks_opt_in_and_reproducible(params, shocked):
     # AR(1) innovations (pr:normal UDF) are opt-in: sigma defaults to 0 so the
     # default run is a deterministic drift, reproducible with no seed at all.
     def outputs(sim):
@@ -361,13 +369,13 @@ def test_ar_shocks_opt_in_and_reproducible():
             )["y"]
         )
 
-    base = outputs(RDFSimulator(params=PARAMS, n_periods=3).fit(world(Firm=FIRMS)))
+    base = outputs(RDFSimulator(params=params, n_periods=3).fit(world(Firm=FIRMS)))
     assert base == outputs(
-        RDFSimulator(params=PARAMS, n_periods=3).fit(world(Firm=FIRMS))
+        RDFSimulator(params=params, n_periods=3).fit(world(Firm=FIRMS))
     )
 
     # growth_sigma > 0 turns FIRM_PRODUCTION stochastic; random_seed pins it.
-    shocked = dict(PARAMS, growth_sigma=0.02)
+    shocked = dict(params, growth_sigma=0.02)
     s1 = outputs(
         RDFSimulator(params=shocked, n_periods=3, random_seed=1).fit(world(Firm=FIRMS))
     )
@@ -382,10 +390,10 @@ def test_ar_shocks_opt_in_and_reproducible():
     assert s1 != s3  # the seed matters
 
 
-def test_get_params_and_clone():
-    sim = RDFSimulator(params=PARAMS, n_periods=7)
-    params = sim.get_params()
-    assert set(params) == {
+def test_get_params_and_clone(params):
+    sim = RDFSimulator(params=params, n_periods=7)
+    got = sim.get_params()
+    assert set(got) == {
         "init_rules",
         "update_rules",
         "infer",
@@ -399,15 +407,15 @@ def test_get_params_and_clone():
         "history_rules",
         "duckdb_connection",
     }
-    assert params["n_periods"] == 7
-    assert params["params"]["total_deposits"] == 3000.0
+    assert got["n_periods"] == 7
+    assert got["params"]["total_deposits"] == 3000.0
 
     # clone deep-copies params; Template lacks __eq__, so compare the text
     fresh = clone(sim)
     fresh_params = fresh.get_params()
-    assert fresh_params["params"] == PARAMS and fresh_params["n_periods"] == 7
+    assert fresh_params["params"] == params and fresh_params["n_periods"] == 7
     assert [t.template for t in fresh_params["update_rules"]] == [
-        t.template for t in params["update_rules"]
+        t.template for t in got["update_rules"]
     ]
     assert fresh.model_.query("SELECT ?s WHERE { ?s ?p ?o }").height == 0
 
@@ -434,7 +442,7 @@ def test_inject_metadata_adds_triples():
     assert "http://example.net/skabm#behaviour" in pvals
 
 
-def test_the_world_and_the_sidecar_stay_separate():
+def test_the_world_and_the_sidecar_stay_separate(params):
     """``model_`` is agents; ``meta_`` is everything the simulator knows about them.
 
     The split is load-bearing rather than tidy: a virtualization registered on a
@@ -443,7 +451,7 @@ def test_the_world_and_the_sidecar_stay_separate():
     ``?s ?p ?o`` over ``model_`` returns the world, so the simulation graph
     stays portable.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(
+    sim = RDFSimulator(params=params, n_periods=1).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS)
     )
 
@@ -459,14 +467,14 @@ def test_the_world_and_the_sidecar_stay_separate():
     assert sim.meta_.query(f"{_PREFIX} SELECT ?f WHERE {{ ?f a ex:Firm }}").height == 0
 
 
-def test_the_ir_decides_what_the_frontend_shows():
+def test_the_ir_decides_what_the_frontend_shows(params):
     """The IR is machinery: it is never exposed, but it settles both frontends.
 
     ``extract()``'s columns and the yielded row's keys are both consequences of
     the state / structure partition, which is why nothing in either has to be
     named by hand.  Pinned through the public surface, not through ``_ir``.
     """
-    sim = RDFSimulator(params=PARAMS, n_periods=1).fit(
+    sim = RDFSimulator(params=params, n_periods=1).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS)
     )
     assert not hasattr(sim, "ir_"), "the IR is machinery, not an interface"
@@ -480,7 +488,7 @@ def test_the_ir_decides_what_the_frontend_shows():
     assert not any("__alpha" in s for s in signals)  # structure never moves
 
 
-def test_init_rules_fill_in_rather_than_pile_on():
+def test_init_rules_fill_in_rather_than_pile_on(params):
     """A CONSTRUCT applied through ``insert`` adds; initial conditions must not.
 
     Passing a column an init rule also computes used to leave *two* values on
@@ -488,7 +496,7 @@ def test_init_rules_fill_in_rather_than_pile_on():
     double-counted.  The ``FILTER NOT EXISTS`` guards make the data win.
     """
     carried = HOUSEHOLDS.with_columns(income=pl.lit(3.0), wealth=pl.lit(7.0))
-    sim = RDFSimulator(params=PARAMS, n_periods=0).fit(
+    sim = RDFSimulator(params=params, n_periods=0).fit(
         world(Firm=FIRMS, Household=carried)
     )
 
@@ -503,11 +511,11 @@ def test_init_rules_fill_in_rather_than_pile_on():
 
     # and with nothing carried, the init rules still populate both
     bare = HOUSEHOLDS.drop("income", "wealth", strict=False)
-    fresh = RDFSimulator(params=PARAMS, n_periods=0).fit(
+    fresh = RDFSimulator(params=params, n_periods=0).fit(
         world(Firm=FIRMS, Household=bare)
     )
     filled = fresh.model_.query(f"{_PREFIX} SELECT ?v WHERE {{ ?h def:wealth ?v }}")
     # one value per household, summing to the deposits they were meant to share
     # (a household whose only income would be a loss-making dividend gets zero)
     assert filled.height == bare.height
-    assert filled["v"].sum() == pytest.approx(PARAMS["total_deposits"])
+    assert filled["v"].sum() == pytest.approx(params["total_deposits"])

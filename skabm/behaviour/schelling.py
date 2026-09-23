@@ -1,7 +1,7 @@
 """
 Schelling's spatial segregation model on the Poledna machinery.
 
-A stress test of ``skabm.rules`` + ``RDFSimulator``: same ``Template`` rules, same
+A stress test of ``skabm.sparql`` + ``RDFSimulator``: same ``Template`` rules, same
 mapping, same ``fit_iter`` loop, a different model family.  Nothing in ``RDFSimulator``
 knows about space, because **the grid is a population, not a module**::
 
@@ -31,11 +31,10 @@ Everything is xsd:double, coordinates included: SPARQL BGPs join on RDF *terms*,
 values, so an ``xsd:integer`` from ``?x + ?dx`` would never match a stored ``xsd:long``.
 """
 
-from string import Template
-
 import polars as pl
 
-from skabm.rules import _PREFIXES, EX_NS
+from skabm.behaviour import DefaultTemplate
+from skabm.sparql import _PREFIXES, EX_NS
 
 # ---------------------------------------------------------------------------
 # Initialization rules — Model.insert, once, right after mapping
@@ -48,7 +47,7 @@ from skabm.rules import _PREFIXES, EX_NS
 # like the AMBER reference.  Note this never touches cell *ids* — unlike
 # rules.FIRM_OWNERSHIP, which parses "firm_<j>" out of the IRI — so the id
 # convention stays free.
-GRID_NEIGHBORHOOD = Template(
+GRID_NEIGHBORHOOD = DefaultTemplate(
     _PREFIXES
     + """
     CONSTRUCT { ?c def:neighbor ?c2 }
@@ -82,7 +81,7 @@ GRID_NEIGHBORHOOD = Template(
 # on it are free.  Users override by passing their own `Person=` population —
 # FILTER NOT EXISTS makes SETTLE no-op the moment any Person already exists,
 # exactly as FIRM_OWNERSHIP only fills firms without a data-defined owner.
-SETTLE = Template(
+SETTLE = DefaultTemplate(
     _PREFIXES
     + """
     CONSTRUCT {
@@ -101,7 +100,11 @@ SETTLE = Template(
     + EX_NS
     + """settler_", STRAFTER(STR(?c), "#"))) AS ?p)
     }
-    """
+    """,
+    {
+        "density": 0.8,  # AMBER's p['density']: per-cell occupancy probability
+        "n_groups": 2.0,  # AMBER's p['n_groups']
+    },
 )
 
 
@@ -113,7 +116,7 @@ SETTLE = Template(
 # The aggregate lives in a subselect grouped by ?p, joined back through
 # OPTIONAL so that an agent with no occupied neighbour at all still gets a
 # value: a GROUP BY drops empty groups entirely, it does not yield 0.
-HAPPINESS = Template(
+HAPPINESS = DefaultTemplate(
     _PREFIXES
     + """
     DELETE { ?p def:share_similar ?s0 }
@@ -141,7 +144,7 @@ HAPPINESS = Template(
 # than drawn inline — an inline BIND would re-draw on each side of the join.
 # Anchored on `?a a ?cls` so it refreshes every agent kind (cells + persons)
 # in one pass.
-DRAW = Template(
+DRAW = DefaultTemplate(
     _PREFIXES
     + """
     DELETE { ?a def:draw ?d0 }
@@ -165,7 +168,7 @@ DRAW = Template(
 #
 # If movers outnumber vacant cells the surplus high ranks find no partner and
 # stay put — which agent is squeezed out is random, since the ranking is.
-RELOCATE = Template(
+RELOCATE = DefaultTemplate(
     _PREFIXES
     + """
     DELETE { ?p def:location ?c0 }
@@ -187,7 +190,10 @@ RELOCATE = Template(
           } GROUP BY ?c1 }
         ?p def:location ?c0 .
     }
-    """
+    """,
+    {
+        "want_similar": 0.375,  # 3 of 8 Moore neighbours, the classic threshold
+    },
 )
 
 
@@ -243,7 +249,7 @@ def state_extract(model) -> pl.DataFrame:
 # every string column is typed; a fully conformant graph would tag the
 # literal `geo:wktLiteral` and link it via `geo:asWKT`, a mapping detail
 # orthogonal to the dynamics.
-GEO_NEIGHBORHOOD = Template(
+GEO_NEIGHBORHOOD = DefaultTemplate(
     _PREFIXES
     + """
     CONSTRUCT { ?c def:neighbor ?c2 }
@@ -257,7 +263,10 @@ GEO_NEIGHBORHOOD = Template(
         BIND(xsd:double(STRAFTER(?xy1, " ")) - xsd:double(STRAFTER(?xy2, " ")) AS ?dy)
         FILTER(?dx * ?dx + ?dy * ?dy <= $radius * $radius)
     }
-    """
+    """,
+    {
+        "radius": 1.7,  # neighbour cutoff
+    },
 )
 
 
@@ -285,14 +294,8 @@ def geo_state_extract(model) -> pl.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# Defaults
+# Composition
 # ---------------------------------------------------------------------------
-
-SCHELLING_PARAMS = {
-    "want_similar": 0.375,  # 3 of 8 Moore neighbours, the classic threshold
-    "density": 0.8,  # AMBER's p['density']: per-cell occupancy probability
-    "n_groups": 2.0,  # AMBER's p['n_groups']
-}
 
 # GRID_NEIGHBORHOOD wires the topology; SETTLE derives the Person population
 # onto the passed grid (unless the caller supplies their own).
@@ -302,8 +305,6 @@ SCHELLING_INIT_RULES = (GRID_NEIGHBORHOOD, SETTLE)
 # same update rules, same RDFSimulator — proof that the spatial structure is a
 # single swappable seam.
 SCHELLING_GEO_INIT_RULES = (GEO_NEIGHBORHOOD, SETTLE)
-
-SCHELLING_GEO_PARAMS = {**SCHELLING_PARAMS, "radius": 1.7}  # neighbour cutoff
 
 SCHELLING_UPDATE_RULES = (
     HAPPINESS,  # AMBER: Person.update_happiness, in Model.update

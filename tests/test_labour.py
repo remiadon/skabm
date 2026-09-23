@@ -28,13 +28,12 @@ from skabm.behaviour.labour import (
     LABOUR_UDFS,
     LABOUR_UPDATE_RULES,
     labour_flow,
-    labour_params,
     mobility_network,
     occupations,
     reallocate_demand,
 )
-from skabm.rules import _PREFIXES
 from skabm.simulation import RDFSimulator
+from skabm.sparql import _PREFIXES
 
 NEVER = 1e6  # shock_start far enough away that the S-curve stays dormant
 
@@ -71,7 +70,7 @@ def market(n: int = 8, employment: float = 1000.0, **overrides):
     sim = RDFSimulator(
         init_rules=(),
         update_rules=LABOUR_UPDATE_RULES,
-        params={**labour_params, "shock_start": NEVER, **overrides.pop("params", {})},
+        params={"shock_start": NEVER, **overrides.pop("params", {})},
         udfs=LABOUR_UDFS,
         **overrides,
     )
@@ -236,7 +235,7 @@ def shock_outcome(edges: pl.DataFrame, n: int) -> tuple[dict, dict]:
     sim = RDFSimulator(
         init_rules=(),
         update_rules=LABOUR_UPDATE_RULES,
-        params={**labour_params, "shock_start": NEVER},
+        params={"shock_start": NEVER},
         udfs=LABOUR_UDFS,
         n_periods=60,
     )
@@ -254,9 +253,7 @@ def shock_outcome(edges: pl.DataFrame, n: int) -> tuple[dict, dict]:
             BIND(IF(?i < {n // 2}, ?d * 0.5e0, ?d * 1.5e0) AS ?f1)
         }}"""
     )
-    sim.set_params(
-        n_periods=200, warm_start=True, params={**labour_params, "shock_start": 0.0}
-    )
+    sim.set_params(n_periods=200, warm_start=True, params={"shock_start": 0.0})
     *_, shocked = sim.fit_iter()
     return before, macro(shocked)
 
