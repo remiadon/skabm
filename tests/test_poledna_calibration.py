@@ -10,33 +10,26 @@ coefficients built from the same Eurostat tables the paper uses (Section 4.1.2).
 
 from __future__ import annotations
 
-from string import Template
-
 import polars as pl
 import pytest
 
+from skabm.behaviour import defaults
 from skabm.calibration import make_dataset, weighted_enum
 from skabm.datasets import build_firm_io_df
-from skabm.simulation import (
-    DEFAULT_HISTORY_RULES,
-    DEFAULT_INIT_RULES,
-    DEFAULT_UPDATE_RULES,
-)
+from skabm.simulation import DEFAULT_INIT_RULES, DEFAULT_UPDATE_RULES
+from skabm.sparql import parameters
 
 H_ACTIVE = 4_729_215  # H^act, census
 H_INACTIVE = 4_130_385  # H^inact, census
 
 
 def test_default_rules_carry_the_cited_values(poledna_params):
-    """Every placeholder defaults to the paper's number, and no cited value goes unread."""
-    rules = [
-        r
-        for r in (*DEFAULT_INIT_RULES, *DEFAULT_UPDATE_RULES, *DEFAULT_HISTORY_RULES)
-        if isinstance(r, Template)
-    ]
-    for rule in rules:
-        assert rule.default == {k: poledna_params[k] for k in rule.get_identifiers()}
-    assert {k for r in rules for k in r.default} == set(poledna_params)
+    """Every parameter the default rules read defaults to the paper's number, and no
+    cited value goes unread."""
+    rules = (*DEFAULT_INIT_RULES, *DEFAULT_UPDATE_RULES)
+    read = set().union(*map(parameters, rules))
+    assert read == set(poledna_params)
+    assert {k: defaults()[k] for k in read} == poledna_params
 
 
 def test_household_census_shares():

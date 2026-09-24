@@ -36,8 +36,6 @@ from skabm.behaviour.traffic import (
     pedestrianize,
     routes,
 )
-from skabm.sparql import _PREFIXES
-from skabm.simulation import RDFSimulator
 from skabm.ottr import (
     area_template,
     commuter_template,
@@ -46,6 +44,8 @@ from skabm.ottr import (
     route_template,
     via_template,
 )
+from skabm.simulation import RDFSimulator
+from skabm.sparql import _PREFIXES
 
 CACHE = Path(__file__).resolve().parent.parent / "data" / "bayonne"
 # Every street from Biarritz to Tarnos, the coast to the A63/A64 junction; and the
@@ -526,7 +526,7 @@ def at_hour(flows: pl.DataFrame, links: pl.DataFrame, share: float, params: dict
     that loading scaled by ``MORNING`` — so the flows fall linearly and the delay does
     not, which is the jam forming.  No queue carries over from one half hour to the next.
 
-    ponytail: the BPR of ``traffic.link_load`` written once more, in polars, because a
+    ponytail: the BPR of ``traffic.link_time`` written once more, in polars, because a
     replay does not re-run the rules.  Keep the two in step.
     """
     knobs = {**PARAMS, **(params or {})}
@@ -555,5 +555,5 @@ elif __name__ == "__main__":  # python world.py — the replay must agree with t
     gap = graph.join(replay.select("id", replayed="time"), on="id").select(
         (pl.col("time") - pl.col("replayed")).abs().max()
     ).item()
-    assert gap < 1e-6, f"at_hour drifted from traffic.link_load by {gap} s"
+    assert gap < 1e-6, f"at_hour drifted from traffic.link_time by {gap} s"
     print(f"at_hour matches the rule's BPR on {graph.height:,} links (worst gap {gap:.2e} s)")

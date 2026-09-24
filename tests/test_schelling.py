@@ -2,7 +2,7 @@
 
 The model lives in skabm/behaviour/schelling.py: the 2D grid is a `Cell` population,
 the Moore neighbourhood a CONSTRUCT, the people are *derived* by the SETTLE
-rule from `$density`, and HAPPINESS / DRAW / RELOCATE advance the world.
+rule from `$density`, and SCHELLING_UPDATE_RULES advance the world.
 There is no Eurostat access and no calibration layer here — the `Cell` frame
 is purely spatial (x/y + id), no random column.
 
@@ -21,12 +21,13 @@ import polars_random as pr
 from worlds import world
 
 from skabm.behaviour.schelling import (
-    RELOCATE,
+    PARAMETERS,
     SCHELLING_GEO_INIT_RULES,
     SCHELLING_INIT_RULES,
     SCHELLING_UPDATE_RULES,
     geo_state_extract,
     state_extract,
+    want_similar,
 )
 from skabm.simulation import RDFSimulator
 from skabm.sparql import _PREFIXES
@@ -72,7 +73,7 @@ def test_settle_derives_population():
 def test_settle_yields_to_user_population():
     # The SETTLE gate (FILTER NOT EXISTS a ex:Person) mirrors FIRM_OWNERSHIP:
     # a caller-supplied Person population turns settlement off entirely.  Such
-    # persons need no rng column — DRAW assigns def:draw each tick.
+    # persons need no rng column: the rules draw def:draw each tick.
     persons = pl.DataFrame(
         {
             "id": ["alice", "bob"],
@@ -112,7 +113,7 @@ def test_one_person_per_cell_invariant():
 def test_segregation_rises_and_converges():
     # The result Schelling is famous for: mild same-group preference drives the
     # share of similar neighbours up until nobody is unhappy.
-    want = RELOCATE.default["want_similar"]
+    want = PARAMETERS[want_similar]  # 3 of 8 Moore neighbours, Schelling (1971)
     sim = RDFSimulator(
         init_rules=SCHELLING_INIT_RULES,
         update_rules=SCHELLING_UPDATE_RULES,

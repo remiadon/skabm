@@ -12,23 +12,17 @@ import pytest
 from maplib import Model
 
 import skabm.behaviour
-from skabm.behaviour import DefaultTemplate
-from skabm.behaviour.labour import LABOUR_UPDATE_RULES
-from skabm.behaviour.schelling import (
-    SCHELLING_GEO_INIT_RULES,
-    SCHELLING_INIT_RULES,
-    SCHELLING_UPDATE_RULES,
-)
-from skabm.ir import analyse, rule_name
+from skabm.dsl import is_rule
 from skabm.ottr import (
     LINK,
+    SCHEMA,
     TEMPLATES,
+    Link,
     agent_template,
     firm_template,
     household_template,
 )
-from skabm.simulation import DEFAULT_INIT_RULES, DEFAULT_UPDATE_RULES
-from skabm.sparql import EX_NS, render
+from skabm.sparql import EX_NS, parameters, render
 
 FIRMS = pl.DataFrame(
     {
@@ -38,13 +32,6 @@ FIRMS = pl.DataFrame(
         "size": [3.0, 4.0],
     }
 ).with_iri()
-
-RULE_SETS = {
-    "poledna": (*DEFAULT_INIT_RULES, *DEFAULT_UPDATE_RULES),
-    "schelling": (*SCHELLING_INIT_RULES, *SCHELLING_UPDATE_RULES),
-    "schelling_geo": (*SCHELLING_GEO_INIT_RULES, *SCHELLING_UPDATE_RULES),
-    "labour": LABOUR_UPDATE_RULES,
-}
 
 
 def predicates(model) -> set:
@@ -128,54 +115,42 @@ def test_an_undeclared_link_is_named_not_guessed():
     assert edge.height == 1
 
 
-@pytest.mark.parametrize("name", sorted(RULE_SETS))
-def test_every_predicate_the_rules_cannot_produce_is_declared(name):
-    """Structure is what no rule writes, so only a population can supply it."""
-    rules = RULE_SETS[name]
-    ir = analyse((rule_name(rule, i), render(rule, {})) for i, rule in enumerate(rules))
-    for klass, predicate in ir.structure:
-        assert klass in TEMPLATES, f"{name}: no template for {klass}"
-        declared = {p.variable.name for p in TEMPLATES[klass].parameters}
-        assert predicate in declared, f"{name}: {klass} template lacks {predicate}"
+def test_every_template_field_says_what_it_is():
+    """What a reader, and a model translating English into rules, is told about a class.
+
+    A description per field, and a link's target a class that exists.
+    """
+    blank = {k: [f for f, (_, doc) in SCHEMA[k].items() if not doc] for k in TEMPLATES}
+    assert {k: v for k, v in blank.items() if v} == {}
+    targets = {
+        str(kind)
+        for klass in TEMPLATES
+        for kind, _ in SCHEMA[klass].values()
+        if isinstance(kind, Link) and kind
+    }
+    assert targets <= set(TEMPLATES)
 
 
-def behaviour_rules() -> dict[str, Template]:
-    """Every rule template shipped in ``skabm.behaviour``, by qualified name."""
-    rules = {}
+def test_every_cited_value_is_read_and_has_one_value():
+    """A module's PARAMETERS gives only what its rules read, and a name shared by
+    several modules (``vat_rate``, ``dividend_ratio``) has one value everywhere."""
     for info in pkgutil.iter_modules(skabm.behaviour.__path__):
         module = importlib.import_module(f"skabm.behaviour.{info.name}")
-        for name, value in vars(module).items():
-            for i, rule in enumerate(value if isinstance(value, list) else [value]):
-                if isinstance(rule, Template):
-                    rules[f"{info.name}.{name}[{i}]"] = rule
-    return rules
+        rules = [
+            rule
+            for value in vars(module).values()
+            for rule in (value if isinstance(value, list) else [value])
+            if is_rule(rule) or isinstance(rule, Template)
+        ]
+        cited = {str(k) for k in getattr(module, "PARAMETERS", {})}
+        assert cited <= set().union(*map(parameters, rules)), info.name
+    assert skabm.behaviour.defaults()  # raises on a name with two values
 
 
-def test_behaviour_rules_carry_consistent_defaults():
-    """A rule is a DefaultTemplate, and a placeholder means one number everywhere.
-
-    Defaults are written on each rule next to their citation, so a value shared
-    by several rules (``vat_rate``, ``theta``) is written more than once; this is
-    what keeps the copies from drifting apart.
-    """
-    rules = behaviour_rules()
-    plain = [
-        name for name, rule in rules.items() if not isinstance(rule, DefaultTemplate)
-    ]
-    assert not plain, f"plain string.Template rules: {plain}"
-
-    seen: dict[str, set] = {}
-    for rule in rules.values():
-        assert set(rule.default) <= set(rule.get_identifiers()), rule.default
-        for key, value in rule.default.items():
-            seen.setdefault(key, set()).add(value)
-    assert {k: v for k, v in seen.items() if len(v) > 1} == {}
-
-
-def test_default_template_substitutes_its_defaults_as_doubles():
-    rule = DefaultTemplate("FILTER(?x < $a && ?y < $b)", {"a": 0.5})
-    assert rule.substitute(b=2) == "FILTER(?x < 5.000000e-01 && ?y < 2.000000e+00)"
-    assert rule.substitute({"a": 1.0, "b": 2.0}).startswith("FILTER(?x < 1.000000e+00")
-    assert rule.safe_substitute() == "FILTER(?x < 5.000000e-01 && ?y < $b)"
+def test_a_template_renders_its_parameters_as_doubles():
+    rule = Template("FILTER(?x < $a && ?y < $b)")
+    assert render(rule, {"a": 0.5, "b": 2}) == (
+        "FILTER(?x < 5.000000e-01 && ?y < 2.000000e+00)"
+    )
     with pytest.raises(KeyError, match="b"):
-        rule.substitute()
+        render(rule, {"a": 0.5})

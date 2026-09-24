@@ -94,8 +94,8 @@ def simulator_model(
         worse than slow ones; ``model.ticks_`` reports how far the last call
         actually got, so a search can be checked rather than trusted.
     params : dict, optional
-        Base parameters the search perturbs, laid over each rule's own defaults
-        (``behaviour.DefaultTemplate``).
+        Base parameters the search perturbs, laid over
+        ``skabm.behaviour.defaults()``.
     **simulator_kwargs
         Passed to ``RDFSimulator`` (``update_rules``, ``udfs``, ``infer``, ...).
         ``n_periods``, ``random_seed`` and ``warm_start`` are owned by the
@@ -121,13 +121,13 @@ def simulator_model(
     ... )
     >>> Calibrator(model=model, ...).calibrate(n_batches=6)   # doctest: +SKIP
     """
-    from string import Template
 
     from skabm.simulation import (
         DEFAULT_INIT_RULES,
         DEFAULT_UPDATE_RULES,
         RDFSimulator,
     )
+    from skabm.sparql import parameters
 
     owned = {"n_periods", "random_seed", "warm_start"} & set(simulator_kwargs)
     if owned:
@@ -141,9 +141,7 @@ def simulator_model(
         *simulator_kwargs.get("init_rules", DEFAULT_INIT_RULES),
         *simulator_kwargs.get("update_rules", DEFAULT_UPDATE_RULES),
     )
-    known = set(base) | {
-        name for r in rules if isinstance(r, Template) for name in r.get_identifiers()
-    }
+    known = set(base).union(*map(parameters, rules))
     unknown = [name for name in free if name not in known]
     if unknown:
         raise ValueError(

@@ -1,53 +1,56 @@
+"""Schelling's segregation model: people living on the cells of a grid. Five rules, in this
+order.
+
+1. A cell's occupied, resident and draw update together, in one rule. Its occupied
+becomes the number of people whose location is this cell, whatever their group: the sum,
+over those people, of 1. Its resident becomes the sum of group over the people whose
+location is this cell. Its draw becomes a fresh uniform draw between 0 and 1.
+
+2. A person's share_similar and draw update together, in one rule. Their share_similar
+becomes the sum, over the cells neighbouring their location, of 1 for a cell whose
+occupied is greater than 0 and whose resident equals the person's group, and 0 for any
+other cell, divided by the larger of 1 and the sum of occupied over the cells
+neighbouring their location. Their draw becomes a fresh uniform draw between 0 and 1.
+
+3. A cell's rank becomes the running sum over all cells, in order of draw, of 1 for a
+vacant cell, whose occupied equals 0, and 0 for any other cell.
+
+4. A person's rank becomes the running sum over all people, in order of draw, of 1 for a
+person whose share_similar is below the parameter want_similar, and 0 for any other
+person.
+
+5. A person's location becomes the cell they pick, or stays their location when they
+pick none. The condition for picking a cell is that the cell's occupied equals 0, the
+cell's rank equals the person's rank, and the person's share_similar is below the
+parameter want_similar; among such cells the order is the cell's rank.
 """
-Schelling's spatial segregation model on the Poledna machinery.
 
-A stress test of ``skabm.sparql`` + ``RDFSimulator``: same ``Template`` rules, same
-mapping, same ``fit_iter`` loop, a different model family.  Nothing in ``RDFSimulator``
-knows about space, because **the grid is a population, not a module**::
-
-    world = Model()
-    world.map(cell_template, cells.with_iri())
-    sim.fit(world)
-
-``Cell`` carries ``x``/``y``, ``Person`` carries ``group`` and a ``location`` link into
-a cell.  Occupancy is the *absence* of an inbound ``def:location`` edge (``FILTER NOT
-EXISTS``), and the Moore neighbourhood is a ``def:neighbor`` relation CONSTRUCTed once
-at init — topology as an init rule, like ``firm_ownership``.
-
-Two things Schelling needs that pure SPARQL does not give.  **Randomness**: the
-``pr:uniform`` UDF, called in-rule via ``BIND``, with which ``SETTLE`` draws occupancy
-and group and ``DRAW`` materialises a fresh ``def:draw`` per agent each tick;
-``random_seed=`` pins the run.  **One-to-one matching**: ``RELOCATE`` works around
-SPARQL's lack of an assignment operator with a *rank join* — movers ranked by
-``def:draw``, vacant cells by theirs, rank *k* paired with rank *k*.  Uniform random
-matching in one batch, quadratic in movers; fine at 10^3, not at 10^6.
-
-Deliberate differences from the AMBER reference: activation is simultaneous
-(``RELOCATE``'s pool is the cells vacant at the *start* of the tick), there is no move
-cap, and ``share_similar`` is pre-move, so tick *t*'s index describes the configuration
-movers reacted to.
-
-Everything is xsd:double, coordinates included: SPARQL BGPs join on RDF *terms*, not
-values, so an ``xsd:integer`` from ``?x + ?dx`` would never match a stored ``xsd:long``.
-"""
+from string import Template
 
 import polars as pl
+import sympy as sp
+from sympy.stats import Uniform
 
-from skabm.behaviour import DefaultTemplate
+from skabm.dsl import Agents, coalesce, pick, running_sum, sum_over
 from skabm.sparql import _PREFIXES, EX_NS
 
-# ---------------------------------------------------------------------------
-# Initialization rules — Model.insert, once, right after mapping
-# ---------------------------------------------------------------------------
+# Schelling (1971), J. Math. Sociology 1(2); AMBER segregation demo
+density, n_groups, radius = sp.symbols("density n_groups radius")
+want_similar = sp.symbols("want_similar")
+PARAMETERS = {
+    density: 0.8,  # AMBER's p['density']: per-cell occupancy probability
+    n_groups: 2.0,  # AMBER's p['n_groups']
+    radius: 1.7,  # scenario knob: neighbour cutoff, in the points' units
+    want_similar: 0.375,  # 3 of 8 Moore neighbours, Schelling (1971)
+}
 
-# Moore neighbourhood as an explicit relation.  The eight offsets are a
-# VALUES block, so `?c2 def:x ?nx ; def:y ?ny` is an equality join (hash,
-# O(8N)) rather than the O(N^2) coordinate FILTER a naive encoding invites.
-# Off-grid neighbours simply match no cell: the grid is bounded, not toroidal,
-# like the AMBER reference.  Note this never touches cell *ids* — unlike
-# rules.FIRM_OWNERSHIP, which parses "firm_<j>" out of the IRI — so the id
-# convention stays free.
-GRID_NEIGHBORHOOD = DefaultTemplate(
+# coordinates are doubles: a join on ?x + ?dx matches terms, not values
+# The space is one relation, def:neighbor: GRID_NEIGHBORHOOD builds it on a lattice,
+# GEO_NEIGHBORHOOD from WKT points (no geof:distance in maplib yet, so the distance
+# is parsed out of the strings).
+# A cell's neighbours are the up to eight cells one step away in x, y or both: a
+# bounded Moore neighbourhood.
+GRID_NEIGHBORHOOD = Template(
     _PREFIXES
     + """
     CONSTRUCT { ?c def:neighbor ?c2 }
@@ -64,24 +67,9 @@ GRID_NEIGHBORHOOD = DefaultTemplate(
     }
     """
 )
-
-# Settlement: the population is *derived*, not passed.  Where Poledna's
-# FIRM_OWNERSHIP hands users the `owns` relation for free, here the whole
-# Person population is free — the caller passes only the grid (`Cell=`), and
-# each cell is independently occupied with probability $density (AMBER's
-# `p['density']`), spawning one Person located on it, in one of $n_groups
-# groups drawn uniformly.  Both draws come straight from the pr:uniform UDF,
-# so occupancy is genuinely stochastic: the count is ~$density*|cells|, not
-# AMBER's exact int(density*size^2) — one Bernoulli draw per cell.
-#
-# This is the one point where the grid asymmetry with Poledna bites: SPARQL
-# CONSTRUCT can only bind over rows that exist, so it can populate a passed
-# grid but cannot *generate* one (a density<1 world has more cells than
-# agents).  The lattice therefore stays a passed population; only the agents
-# on it are free.  Users override by passing their own `Person=` population —
-# FILTER NOT EXISTS makes SETTLE no-op the moment any Person already exists,
-# exactly as FIRM_OWNERSHIP only fills firms without a data-defined owner.
-SETTLE = DefaultTemplate(
+# Unless people already exist, each cell is settled with probability density by one
+# person, of a group drawn uniformly among n_groups.
+SETTLE = Template(
     _PREFIXES
     + """
     CONSTRUCT {
@@ -92,121 +80,73 @@ SETTLE = DefaultTemplate(
         ?c a ex:Cell .
         BIND(pr:uniform(0e0, 1e0) AS ?u_occ)
         FILTER(?u_occ < $density)
-        # xsd:double cast: FLOOR yields an integer-valued result maplib would
-        # otherwise store as Int64, an unwelcome type for a group label.
         BIND(pr:uniform(0e0, 1e0) AS ?u_grp)
         BIND(xsd:double(FLOOR(?u_grp * $n_groups)) AS ?g)
         BIND(IRI(CONCAT(\""""
     + EX_NS
     + """settler_", STRAFTER(STR(?c), "#"))) AS ?p)
     }
-    """,
-    {
-        "density": 0.8,  # AMBER's p['density']: per-cell occupancy probability
-        "n_groups": 2.0,  # AMBER's p['n_groups']
-    },
+    """
 )
-
-
-# ---------------------------------------------------------------------------
-# Update rules — Model.update, every tick (upsert pattern)
-# ---------------------------------------------------------------------------
-
-# share_similar = |same-group occupied neighbours| / |occupied neighbours|.
-# The aggregate lives in a subselect grouped by ?p, joined back through
-# OPTIONAL so that an agent with no occupied neighbour at all still gets a
-# value: a GROUP BY drops empty groups entirely, it does not yield 0.
-HAPPINESS = DefaultTemplate(
+# A cell's neighbours are the other cells whose point lies within radius of its own.
+GEO_NEIGHBORHOOD = Template(
     _PREFIXES
     + """
-    DELETE { ?p def:share_similar ?s0 }
-    INSERT { ?p def:share_similar ?s1 }
+    CONSTRUCT { ?c def:neighbor ?c2 }
     WHERE {
-        ?p a ex:Person .
-        OPTIONAL { ?p def:share_similar ?s0 }
-        OPTIONAL {
-            { SELECT ?p (SUM(?same) AS ?n_similar) (COUNT(?n) AS ?n_total)
-              WHERE {
-                  ?p a ex:Person ; def:group ?g ; def:location ?c .
-                  ?c def:neighbor ?cn .
-                  ?n def:location ?cn ; def:group ?gn .
-                  BIND(IF(?gn = ?g, 1e0, 0e0) AS ?same)
-              } GROUP BY ?p }
-        }
-        BIND(IF(BOUND(?n_total), ?n_similar / ?n_total, 0e0) AS ?s1)
+        ?c  a ex:Cell ; def:geometry ?w1 .
+        ?c2 a ex:Cell ; def:geometry ?w2 .
+        FILTER(?c != ?c2)
+        BIND(STRBEFORE(STRAFTER(?w1, "("), ")") AS ?xy1)
+        BIND(STRBEFORE(STRAFTER(?w2, "("), ")") AS ?xy2)
+        BIND(xsd:double(STRBEFORE(?xy1, " ")) - xsd:double(STRBEFORE(?xy2, " ")) AS ?dx)
+        BIND(xsd:double(STRAFTER(?xy1, " ")) - xsd:double(STRAFTER(?xy2, " ")) AS ?dy)
+        FILTER(?dx * ?dx + ?dy * ?dy <= $radius * $radius)
     }
     """
 )
+Cell, Person = Agents("Cell"), Agents("Person")
 
-# Fresh per-agent random draw for this tick, straight from the pr:uniform UDF.
-# RELOCATE ranks movers and vacant cells by this value, so it must be
-# *materialised* (a stored triple stable across RELOCATE's self-join) rather
-# than drawn inline — an inline BIND would re-draw on each side of the join.
-# Anchored on `?a a ?cls` so it refreshes every agent kind (cells + persons)
-# in one pass.
-DRAW = DefaultTemplate(
-    _PREFIXES
-    + """
-    DELETE { ?a def:draw ?d0 }
-    INSERT { ?a def:draw ?d1 }
-    WHERE {
-        ?a a ?cls .
-        OPTIONAL { ?a def:draw ?d0 }
-        BIND(pr:uniform(0e0, 1e0) AS ?d1)
-    }
-    """
-)
-
-# The move, as a rank join.  Movers (share_similar < $want_similar) are
-# ranked by this tick's def:draw; vacant cells (no inbound def:location) by
-# theirs.  Both subselects project ?rank, so the natural join pairs the k-th
-# mover with the k-th cell — a uniform random matching, since both orders are
-# random.  Rank is COUNT(peers with draw <= mine); the `<=` (rather than `<`,
-# which would be the natural rank) is what keeps the agent's own row in its
-# own group, so the minimum never silently vanishes.  The off-by-one is
-# identical on both sides and therefore cancels in the join.
-#
-# If movers outnumber vacant cells the surplus high ranks find no partner and
-# stay put — which agent is squeezed out is random, since the ranking is.
-RELOCATE = DefaultTemplate(
-    _PREFIXES
-    + """
-    DELETE { ?p def:location ?c0 }
-    INSERT { ?p def:location ?c1 }
-    WHERE {
-        { SELECT ?p (COUNT(?q) AS ?rank) WHERE {
-              ?p a ex:Person ; def:draw ?rp ; def:share_similar ?sp .
-              FILTER(?sp < $want_similar)
-              ?q a ex:Person ; def:draw ?rq ; def:share_similar ?sq .
-              FILTER(?sq < $want_similar)
-              FILTER(?rq <= ?rp)
-          } GROUP BY ?p }
-        { SELECT ?c1 (COUNT(?d) AS ?rank) WHERE {
-              ?c1 a ex:Cell ; def:draw ?rc .
-              FILTER NOT EXISTS { ?u def:location ?c1 }
-              ?d a ex:Cell ; def:draw ?rd .
-              FILTER NOT EXISTS { ?v def:location ?d }
-              FILTER(?rd <= ?rc)
-          } GROUP BY ?c1 }
-        ?p def:location ?c0 .
-    }
-    """,
-    {
-        "want_similar": 0.375,  # 3 of 8 Moore neighbours, the classic threshold
-    },
-)
-
-
-# ---------------------------------------------------------------------------
-# State extract — one row per person, no aggregation
-# ---------------------------------------------------------------------------
+OCCUPANCY = {
+    Cell.occupied: sum_over(Person.location, 1),
+    Cell.resident: sum_over(Person.location, Person.group),
+    Cell.draw: Uniform("u", 0, 1),
+}
+around = Person.location.neighbor
+HAPPINESS = {
+    Person.share_similar: sum_over(
+        around,
+        sp.Piecewise(
+            (1, sp.Eq(around.resident, Person.group) & (around.occupied > 0)),
+            (0, True),
+        ),
+    )
+    / sp.Max(sum_over(around, around.occupied), 1),
+    Person.draw: Uniform("u", 0, 1),
+}
+CELL_RANK = {
+    Cell.rank: running_sum(
+        Cell.draw, sp.Piecewise((1, sp.Eq(Cell.occupied, 0)), (0, True))
+    )
+}
+unhappy = Person.share_similar < want_similar
+PERSON_RANK = {
+    Person.rank: running_sum(Person.draw, sp.Piecewise((1, unhappy), (0, True)))
+}
+RELOCATE = {
+    Person.location: coalesce(
+        pick(
+            Cell,
+            sp.Eq(Cell.rank, Person.rank) & (sp.Eq(Cell.occupied, 0)) & unhappy,
+            Cell.rank,
+        ),
+        Person.location,
+    )
+}
 
 
 def state_extract(model) -> pl.DataFrame:
-    """Per-person state: group, current coordinates, share of similar
-    neighbours.  The segregation index and the unhappy count are plain polars
-    expressions on the caller's side (see the demo) — same contract as
-    ``rules.state_extract``."""
+    """One row per person: group, cell coordinates, share of similar neighbours."""
     return model.query(
         _PREFIXES
         + """
@@ -222,59 +162,8 @@ def state_extract(model) -> pl.DataFrame:
     )
 
 
-# ---------------------------------------------------------------------------
-# Swapping the spatial structure — GeoSPARQL points instead of a lattice
-# ---------------------------------------------------------------------------
-#
-# The whole spatial model is captured by ONE relation: `def:neighbor`.
-# HAPPINESS, RELOCATE, SETTLE and DRAW never mention coordinates — they
-# route through `?c def:neighbor ?cn` and occupancy (`def:location`).  So a
-# different space is a different `def:neighbor` rule and nothing else: the
-# lattice's 8 integer offsets become "cells within radius R of each other",
-# and continuous, irregular locations (real places, not a grid) drop in.
-#
-# maplib reality check (0.20.19): it *stores* GeoSPARQL geometry — a
-# `"POINT(x y)"^^geo:wktLiteral` round-trips and keeps its datatype — but
-# every `geof:` function (`geof:distance`, `geof:sfWithin`, `geof:buffer`, ...)
-# is "not implemented yet".  So the distance test can't be the one-liner it
-# should be; it's hand-rolled here by parsing x/y out of the WKT string and
-# comparing squared Euclidean distance.  The moment maplib ships `geof:`, the
-# WHERE body collapses to `FILTER(geof:distance(?g1, ?g2, uom:metre) < $radius)`
-# and the parsing BINDs delete — the seam does not move.
-#
-# Cost: unlike GRID_NEIGHBORHOOD's O(8N) VALUES join this is an O(N^2) pair
-# scan (no spatial index without `geof:`), fine for hundreds of locations,
-# not for a country of them.  The geometry is carried as a plain string under
-# `def:geometry` because `templates.cell_template` declares it `xsd:string`, as
-# every string column is typed; a fully conformant graph would tag the
-# literal `geo:wktLiteral` and link it via `geo:asWKT`, a mapping detail
-# orthogonal to the dynamics.
-GEO_NEIGHBORHOOD = DefaultTemplate(
-    _PREFIXES
-    + """
-    CONSTRUCT { ?c def:neighbor ?c2 }
-    WHERE {
-        ?c  a ex:Cell ; def:geometry ?w1 .
-        ?c2 a ex:Cell ; def:geometry ?w2 .
-        FILTER(?c != ?c2)
-        BIND(STRBEFORE(STRAFTER(?w1, "("), ")") AS ?xy1)
-        BIND(STRBEFORE(STRAFTER(?w2, "("), ")") AS ?xy2)
-        BIND(xsd:double(STRBEFORE(?xy1, " ")) - xsd:double(STRBEFORE(?xy2, " ")) AS ?dx)
-        BIND(xsd:double(STRAFTER(?xy1, " ")) - xsd:double(STRAFTER(?xy2, " ")) AS ?dy)
-        FILTER(?dx * ?dx + ?dy * ?dy <= $radius * $radius)
-    }
-    """,
-    {
-        "radius": 1.7,  # neighbour cutoff
-    },
-)
-
-
 def geo_state_extract(model) -> pl.DataFrame:
-    """Geo counterpart of ``state_extract``: identical shape (one row per
-    person, group / x / y / share_similar), so any visualization or summary
-    written against the grid extract works unchanged — coordinates are just
-    parsed out of the WKT point instead of read from ``def:x``/``def:y``."""
+    """``state_extract`` with the coordinates parsed out of the cell's WKT point."""
     return model.query(
         _PREFIXES
         + """
@@ -293,21 +182,6 @@ def geo_state_extract(model) -> pl.DataFrame:
     )
 
 
-# ---------------------------------------------------------------------------
-# Composition
-# ---------------------------------------------------------------------------
-
-# GRID_NEIGHBORHOOD wires the topology; SETTLE derives the Person population
-# onto the passed grid (unless the caller supplies their own).
 SCHELLING_INIT_RULES = (GRID_NEIGHBORHOOD, SETTLE)
-
-# The GeoSPARQL variant: identical except the neighbourhood rule.  Same SETTLE,
-# same update rules, same RDFSimulator — proof that the spatial structure is a
-# single swappable seam.
 SCHELLING_GEO_INIT_RULES = (GEO_NEIGHBORHOOD, SETTLE)
-
-SCHELLING_UPDATE_RULES = (
-    HAPPINESS,  # AMBER: Person.update_happiness, in Model.update
-    DRAW,  # this tick's random draw per agent (pr:uniform UDF)
-    RELOCATE,  # AMBER: Person.find_new_home, in Model.step
-)
+SCHELLING_UPDATE_RULES = (OCCUPANCY, HAPPINESS, CELL_RANK, PERSON_RANK, RELOCATE)

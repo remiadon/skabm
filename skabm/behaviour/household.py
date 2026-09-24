@@ -1,165 +1,70 @@
-"""
-Household behaviour templates — income, wealth, and consumption.
+"""Households, Poledna et al. (2023). Five rules, in this order.
 
-All templates anchor on ``ex:Household`` and read/write ``def:wealth``,
-``def:income``, ``def:psi``.
+1. At the start, a household keeps its income if it has one: its income becomes the
+first that exists of its own income; its employer's w_bar; the parameter dividend_ratio
+times the larger of 0 and the profit of the firm it owns; the parameter
+benefit_replacement times the mean over firms of their w_bar.
 
-Templates are ``string.Template`` objects with ``$placeholder`` references.
+2. Each step, its income becomes the first that exists of its employer's w_bar; the
+parameter dividend_ratio times the larger of 0 and the profit of the firm it owns; the
+parameter benefit_replacement times the mean over firms of their w_bar.
+
+3. At the start, a household keeps its wealth if it has one: its wealth becomes the
+first that exists of its own wealth; the parameter total_deposits times its income
+divided by the total over households of their income.
+
+4. Each step, its wealth becomes its wealth plus its income minus psi times its income
+times (1 + the expected growth of the total over households of their income), divided by
+(1 + the parameter vat_rate).
+
+5. Alternatively, with kinked consumption, its wealth becomes its wealth plus its income
+minus (the parameter subsistence plus the parameter psi_2 times the larger of 0 and (its
+income minus subsistence times (1 + vat_rate))).
 """
 
 from __future__ import annotations
 
-from skabm.behaviour import DefaultTemplate
+import sympy as sp
+
 from skabm.behaviour.learning import expect
-from skabm.sparql import _PREFIXES
+from skabm.dsl import Agents, coalesce, mean, total
 
-# ---------------------------------------------------------------------------
-# household_income_init — initial income by activity status (init CONSTRUCT)
-# ---------------------------------------------------------------------------
-# Poledna eq. 49.  Income priority: wage > dividend > unemployment benefit.
-# Run once after mapping.  Placeholders: ``dividend_ratio``, ``benefit_replacement``.
-#
-# The ``FILTER NOT EXISTS`` is load-bearing, for the same reason it is in
-# ``firm_ownership``: an init rule is a CONSTRUCT applied through ``insert``,
-# which *adds* triples.  Without the guard, a population that already carries an
-# ``income`` column ends up with two ``def:income`` values on every household —
-# silently, permanently, and double-counted by every aggregate and extract
-# afterwards.  Initial conditions fill in only what the data left undefined.
+Household, Firm = Agents("Household"), Agents("Firm")
+dividend_ratio, benefit_replacement = sp.symbols("dividend_ratio benefit_replacement")
+total_deposits, vat_rate = sp.symbols("total_deposits vat_rate")
+subsistence, psi_2 = sp.symbols("subsistence psi_2")
 
-household_income_init = DefaultTemplate(
-    _PREFIXES
-    + """
-CONSTRUCT { ?hh def:income ?income }
-WHERE {
-    { SELECT (AVG(?any_w) AS ?w_avg) WHERE { ?any_f def:w_bar ?any_w } }
-    ?hh a ex:Household .
-    FILTER NOT EXISTS { ?hh def:income ?given }
-    OPTIONAL { ?hh def:employer ?f . ?f def:w_bar ?w . }
-    OPTIONAL { ?hh def:owns ?g . ?g def:profit ?p . }
-    BIND(
-        IF(BOUND(?w), ?w,
-        IF(BOUND(?p), $dividend_ratio * IF(?p > 0e0, ?p, 0e0),
-        $benefit_replacement * ?w_avg)) AS ?income)
+PARAMETERS = {  # subsistence and psi_2 are unpublished: no default
+    dividend_ratio: 0.7768,  # θ^DIV, Poledna et al. (2023) Table 2
+    benefit_replacement: 0.3586,  # θ^UB, Poledna et al. (2023) Table 2
+    total_deposits: 222_933.2e6,  # D^H, Poledna et al. (2023) Table 2; rescale to the population
+    vat_rate: 0.1529,  # τ^VAT, Poledna et al. (2023) Table 2
 }
-""",
-    {
-        "dividend_ratio": 0.7768,  # θ^DIV, Poledna et al. (2023) Table 2
-        "benefit_replacement": 0.3586,  # θ^UB, Poledna et al. (2023) Table 2
-    },
+
+# Poledna et al. (2023) eq. 49
+income = coalesce(
+    Household.employer.w_bar,
+    dividend_ratio * sp.Max(Household.owns.profit, 0),
+    benefit_replacement * mean(Firm.w_bar),
 )
-
-# ---------------------------------------------------------------------------
-# household_income — per-tick income refresh (update)
-# ---------------------------------------------------------------------------
-# Same logic as ``household_income_init`` but as an upsert, so dividends track
-# the owned firm's evolving profit.  Placeholders: ``dividend_ratio``,
-# ``benefit_replacement``.
-
-household_income = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?hh def:income ?i0 }
-INSERT { ?hh def:income ?i1 }
-WHERE {
-    { SELECT (AVG(?any_w) AS ?w_avg) WHERE { ?any_f def:w_bar ?any_w } }
-    ?hh a ex:Household .
-    OPTIONAL { ?hh def:income ?i0 }
-    OPTIONAL { ?hh def:employer ?f . ?f def:w_bar ?w . }
-    OPTIONAL { ?hh def:owns ?g . ?g def:profit ?p . }
-    BIND(
-        IF(BOUND(?w), ?w,
-        IF(BOUND(?p), $dividend_ratio * IF(?p > 0e0, ?p, 0e0),
-        $benefit_replacement * ?w_avg)) AS ?i1)
+household_income_init = {Household.income: coalesce(Household.income, income)}
+household_income = {Household.income: income}
+# Poledna et al. (2023) Section 5.2
+household_wealth_init = {
+    Household.wealth: coalesce(
+        Household.wealth, total_deposits * Household.income / total(Household.income)
+    )
 }
-""",
-    {
-        "dividend_ratio": 0.7768,  # θ^DIV, Poledna et al. (2023) Table 2
-        "benefit_replacement": 0.3586,  # θ^UB, Poledna et al. (2023) Table 2
-    },
+# Poledna et al. (2023) eqs. 40, 50
+spent = (
+    Household.psi
+    * Household.income
+    * (1 + expect("SUM", "Household", "income"))
+    / (1 + vat_rate)
 )
-
-# ---------------------------------------------------------------------------
-# household_wealth_init — initial wealth proportional to initial income (init)
-# ---------------------------------------------------------------------------
-# Poledna Section 5.2: D_h(0) = total_deposits * Y_h(0) / sum Y_h(0).
-# Run once after ``household_income_init``.  Placeholder: ``total_deposits``.
-# Guarded like ``household_income_init`` above — see the note there.
-
-household_wealth_init = DefaultTemplate(
-    _PREFIXES
-    + """
-CONSTRUCT { ?hh def:wealth ?wealth }
-WHERE {
-    { SELECT (SUM(?any_i) AS ?total) WHERE { ?any_hh def:income ?any_i } }
-    ?hh def:income ?income .
-    FILTER NOT EXISTS { ?hh def:wealth ?given }
-    BIND($total_deposits * ?income / ?total AS ?wealth)
-}
-""",
-    {
-        "total_deposits": 222_933.2e6,  # D^H, Poledna et al. (2023) Table 2; rescale to the population
-    },
+satisificing_consume = {Household.wealth: Household.wealth + Household.income - spent}
+# unsourced: CANVAS-style kinked consumption
+spent_kinked = subsistence + psi_2 * sp.Max(
+    Household.income - subsistence * (1 + vat_rate), 0
 )
-
-# ---------------------------------------------------------------------------
-# satisificing_consume — fixed fraction psi of income (update)
-# ---------------------------------------------------------------------------
-# Poledna eq. 40 + 50.  C = psi * expected_income / (1 + vat_rate); savings
-# absorb the rest.  Placeholder: ``vat_rate``.  ``psi`` is an agent attribute
-# (def:psi), not a parameter.
-#
-# Eq. 40 budgets out of *expected* income, not realized income: households
-# smooth consumption against where they think their income is heading.  ?ig_e is
-# the SAC-learned growth of realized SUM(def:income) over ex:Household — the
-# same learning machinery firms use for output and prices — so expected income
-# is this quarter's income carried forward one step.
-
-satisificing_consume = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?hh def:wealth ?w0 }
-INSERT { ?hh def:wealth ?w1 }
-WHERE {
-    ?hh a ex:Household ;
-        def:wealth ?w0 ;
-        def:psi ?psi ;
-        def:income ?inc ."""
-    + expect("SUM", "Household", "income", out="ig_e")
-    + """
-    BIND(?inc * (1e0 + ?ig_e) AS ?exp_income)
-    BIND(?psi * ?exp_income / (1e0 + $vat_rate) AS ?consumption)
-    BIND(?w0 + (?inc - ?consumption) AS ?w1)
-}
-""",
-    {
-        "vat_rate": 0.1529,  # τ^VAT, Poledna et al. (2023) Table 2
-    },
-)
-
-# ---------------------------------------------------------------------------
-# kinked_consume — subsistence floor + higher propensity above it (update)
-# ---------------------------------------------------------------------------
-# CANVAS-style: households spend subsistence C0 first, then psi_2 on income
-# above the VAT-adjusted subsistence.  Placeholders: ``subsistence``,
-# ``vat_rate``, ``psi_2``.
-
-kinked_consume = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?hh def:wealth ?w0 }
-INSERT { ?hh def:wealth ?w1 }
-WHERE {
-    ?hh a ex:Household ;
-        def:wealth ?w0 ;
-        def:income ?inc .
-    BIND($subsistence AS ?C0)
-    BIND(?C0 * (1e0 + $vat_rate) AS ?subs_real)
-    BIND(IF(?inc > ?subs_real, ?inc - ?subs_real, 0e0) AS ?above)
-    BIND(?C0 + $psi_2 * ?above AS ?consumption)
-    BIND(?w0 + ?inc - ?consumption AS ?w1)
-}
-""",
-    {
-        "vat_rate": 0.1529,  # τ^VAT, Poledna et al. (2023) Table 2
-    },
-)
+kinked_consume = {Household.wealth: Household.wealth + Household.income - spent_kinked}

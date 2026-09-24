@@ -9,18 +9,15 @@ dependencies = [
     "polars-random>=0.5.0",
     "pyarrow>=20.0.0",
     "scikit-learn>=1.6.0",
+    "sympy>=1.14",
 ]
 
-# State history (skabm.history) is the only thing that needs a database, and
-# only a rule set that declares an ex:sig__ signal ever opens one — Schelling,
-# the labour market and the interbank rules run on the core install.  maplib's
-# virtualization takes a SQLAlchemy Select (it calls .subquery() on it), so
-# both are needed together or not at all; the imports are function-scoped so
-# the package imports fine without them.
+# Persisting the observables (RDFSimulator(duckdb_connection=...)) is the only
+# thing that needs a database, and only when asked; every rule set runs on the
+# core install.  The import is function-scoped, so the package imports without it.
 [project.optional-dependencies]
 history = [
     "duckdb>=1.5.5",
-    "sqlalchemy>=2.0.52",
 ]
 # Model calibration (searching `params` to match macro series) is a different
 # problem from the population calibration in skabm.calibration, and black-it
@@ -29,6 +26,16 @@ history = [
 # hence the override below; its own `python <3.13` bound applies to this extra.
 model-calibration = [
     "black-it>=0.3.3",
+]
+# skabm.dsl.jax_tick: the differentiable backend for rules written with skabm.dsl.
+jax = [
+    "jax>=0.10",
+]
+# skabm.translate.rules: a small local model writing DSL under the templates' grammar.
+llm = [
+    "llguidance>=1.8",
+    "torch>=2",
+    "transformers>=5",
 ]
 
 [tool.setuptools.packages.find]
@@ -74,4 +81,5 @@ dev = [
     "pytest-testmon>=2.2.0",
     "flax>=0.12.0",
     "ipykernel>=7.3.0",
+    "llguidance>=1.8",
 ]

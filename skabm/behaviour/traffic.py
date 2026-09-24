@@ -1,60 +1,82 @@
-"""
-Traffic behaviour templates — commuters choosing a mode and a route, day after day, on a
-road network whose congestion is the sum of their choices.
+"""Commuters choosing a mode and a route each morning on a congestible road network,
+Horowitz (1984) and Cascetta (1989). Twelve rules, in this order.
 
-A fourth model family on the same machinery.  The agents are ``Commuter``s, a sample of
-real workers each standing for ``def:weight`` of them.  What they choose between are
-``Route``s — one path for one origin-destination pair (OD) by one mode, its road
-``Link``s attached as ``def:via`` — grouped into ``Option``s, one per OD x mode.  An
-``Area`` is a polygon a policy talks about ("Grand Bayonne"), tied at init to the links it
-touches by GeoSPARQL (``geof:sfIntersects``, from ``rules.register_geosparql``).
+1. A route's time and open update together, in one rule. Its time becomes its extra plus
+the sum, over the road links it goes via, of the link's leg time: for a car route (mode
+0), the link's time if it has one, else its t0; for any other route, the parameter
+bus_factor times the link's t0 on a bus lane (busway above 0), and bus_factor times (the
+link's time if it has one, else its t0) elsewhere. In the same rule its open becomes 0
+for a car route (mode 0) whose sum over its links of (1 - car) is above 0, and 1 for any
+other route.
 
-**One tick is one working day's morning peak** — the day-to-day process of Horowitz
-(1984) and Cascetta (1989), MATSim's co-evolutionary loop in spirit (Horni, Nagel &
-Axhausen 2016).  Choices use today's network (closures are known) but yesterday's
-congestion (expectations are learned); what a commuter *experiences* is today's.  The
-rule order is that event order: time the routes, update the choice probabilities,
-choose, load the network, record what happened.
+2. An option's s becomes the sum, over the routes whose option is this one, of their
+open times exp(-the parameter theta times their time).
 
-**Mode choice is pivot-point** (incremental logit: Koppelman 1983; Daly, Fox & Tsang
-2005).  Each Option carries ``share0``, the OD's observed mode share (the census), and
-the model only ever moves it by the change in that mode's logsum since the base::
+3. Then an option's s0 becomes its s when the parameter anchor is above 0; otherwise it
+keeps its s0 if it has one, else its s.
 
-    share_m  ∝  share0_m * (S_m / S0_m) ** mu,     S_m = sum over its routes of exp(-theta * T_r)
+4. An option's share becomes its weight divided by the total weight over the options
+with the same od, when that total is above 0, and otherwise its share0, where its weight
+is share0 times (s divided by s0) to the power the parameter mu when s and s0 are both
+above 0, else 0.
 
-which is nested logit with routes nested in modes (Ben-Akiva & Lerman 1985) and ``mu``
-the nest scale ratio.  Base shares are reproduced exactly, and errors in *absolute*
-times — connector lengths, bus waits, parking — cancel; only changes move anyone.  The
-base is whatever the model sees while ``$anchor`` is 1: warm up with it on, then switch it
-off and intervene.  The price: a mode nobody on an OD uses today stays unused.
+5. A route's prob becomes, when its option's s is above 0, its option's share times its
+open times exp(-the parameter theta times its time) divided by its option's s, and
+otherwise 0.
 
-**Route generation is not a rule.**  SPARQL has no shortest path, so ``routes`` (scipy)
-builds the choice set and the graph only ever chooses *within* it.  A closure is a graph
-edit (``pedestrianize``) that makes routes infeasible — their commuters must replan the
-next morning — and new routes are generated against the edited graph and mapped in; the
-stable ``rank`` makes re-adding a known route a no-op.  ``def:via`` being many-valued, the
-IR-derived ``sim.extract()`` repeats a route once per link it uses: query the classes you
-need directly (``notebooks/bayonne/world.py`` does) or pass ``state_extract=``.
+6. Then a route's cum becomes the running sum of prob, in order of rank, over the routes
+with the same od.
 
-**What it leaves out**, deliberately: departure-time choice, destination change and trip
-suppression (the other channels of "traffic evaporation", Cairns, Hass-Klau & Goodwin
-1998 — here traffic can only switch route or mode), spillback (BPR is a static
-volume-delay function, so a queue never blocks the link upstream), and car ownership
-(commuters on an OD are exchangeable, so the census gives no one a reason to keep a car).
+7. A commuter replans when u is below the parameter replan or when their route's open is
+0. Their draw is u divided by replan when u is below replan, else (u - replan) divided
+by (1 - replan). A commuter who replans takes the route with the same od whose prob is
+above 1e-9 and whose cum is above the draw, picking the least cum. A commuter with no
+such route, and anyone who does not replan, keeps their route.
+
+8. A route's load becomes the sum of weight over the commuters whose route is this one.
+
+9. A link's flow becomes the sum, over the routes going via this link, of their load for
+a car route (mode 0) and 0 for any other, times the parameter peak_factor times the
+parameter demand.
+
+10. Then a link's time becomes its t0 times (1 + the parameter bpr_alpha times (its flow
+divided by its capacity) to the power the parameter bpr_beta).
+
+11. A commuter's time, car, bus, bike, walk and u update together, in one rule. Their
+time becomes their route's extra plus the sum, over the road links their route goes via,
+of the link's leg time: for a car route (mode 0), the link's time if it has one, else
+its t0; for any other route, the parameter bus_factor times the link's t0 on a bus lane
+(busway above 0), and bus_factor times (the link's time if it has one, else its t0)
+elsewhere. In the same rule their car, bus, bike and walk become 1 when their route's
+mode is 0, 1, 2 and 3 respectively, else 0, and their u becomes a fresh uniform draw
+between 0 and 1.
+
+12. An area's vkt becomes the sum, over the links in this area, of flow times length,
+divided by 1000.
 """
 
 from __future__ import annotations
 
 import zlib
 from collections.abc import Sequence
+from string import Template
 
 import numpy as np
 import polars as pl
+import sympy as sp
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components, dijkstra
 from scipy.spatial import cKDTree
+from sympy.stats import Uniform
 
-from skabm.behaviour import DefaultTemplate
+from skabm.dsl import (
+    Agents,
+    coalesce,
+    pick,
+    running_sum,
+    sum_over,
+    total_by,
+)
 from skabm.sparql import (
     _PREFIXES,
     register_geosparql,
@@ -62,384 +84,151 @@ from skabm.sparql import (
     register_polars_random,
 )
 
+# Routes come from routes() (scipy shortest paths), not from a rule: the graph only
+# chooses within the set it is given, and pedestrianize() edits it.
 TRAFFIC_UDFS = (register_polars_random, register_math, register_geosparql)
 
-# Route and Option ``def:mode`` codes.  Bike and walk routes carry a constant time and
-# no links: no scenario here changes them, and under a pivot a constant only has to be
-# the same before and after.
+# def:mode codes; bike and walk routes have no links, their time is their extra
 MODES = {"car": 0.0, "bus": 1.0, "bike": 2.0, "walk": 3.0}
 
-_SOURCE = "Horowitz (1984) TR-B 18(1); Cascetta (1989) TR-B 23(1)"
-
-# maplib gotcha: an OPTIONAL value defaulted with IF(BOUND(?x), ?x, 0e0) becomes a
-# struct column when *no* row binds it (day one, before any link was loaded), and
-# SUM over it panics.  COALESCE(?x, 0e0) stays a double, so every default below is one.
-
-
-# ---------------------------------------------------------------------------
-# area_membership — which links each Area touches (init, GeoSPARQL)
-# ---------------------------------------------------------------------------
-# Materialised once, so neither the per-tick accounting nor a closure pays for
-# geometry again.  A link crossing the boundary (a bridge into the zone) is in.
-
-area_membership = DefaultTemplate(
+# A road link belongs to every area its geometry intersects, a link crossing the
+# boundary included (OGC GeoSPARQL 1.1, geof:sfIntersects).
+area_membership = Template(
     _PREFIXES
     + """
-CONSTRUCT { ?l def:area ?a }
-WHERE {
-    ?a a ex:Area ; def:geometry ?zone .
-    ?l a ex:Link ; def:geometry ?g .
-    FILTER(geof:sfIntersects(?g, ?zone))
-}
-"""
-)
-area_membership.metadata = {
-    "@id": "area_membership",
-    "@type": "Behaviour",
-    "agentClass": "ex:Link",
-    "source": "OGC GeoSPARQL 1.1, geof:sfIntersects",
-}
-
-# ---------------------------------------------------------------------------
-# route_time — every route timed on today's network (update)
-# ---------------------------------------------------------------------------
-# Yesterday's link times (free flow before the first load), today's closures.  A
-# car route is ``open`` only if every link on it admits cars; buses run on every
-# link of their own routes, on bus lanes at free-flow speed, elsewhere stuck in
-# the same congestion as cars — so a closure that empties a street speeds up the
-# buses still using it.  Placeholder: ``bus_factor``.
-
-route_time = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?r def:time ?t0 . ?r def:open ?o0 }
-INSERT { ?r def:time ?t1 . ?r def:open ?o1 }
-WHERE {
-    { SELECT ?r (SUM(?tau) AS ?sum) (MIN(?ok) AS ?o1)
-      WHERE {
-          ?r a ex:Route ; def:mode ?m ; def:via ?l .
-          ?l def:t0 ?free ; def:car ?car ; def:busway ?bw .
-          OPTIONAL { ?l def:time ?loaded }
-          BIND(COALESCE(?loaded, ?free) AS ?lt)
-          BIND(IF(?m = 0e0, ?lt, $bus_factor * IF(?bw > 0e0, ?free, ?lt)) AS ?tau)
-          BIND(IF(?m = 0e0, ?car, 1e0) AS ?ok)
-      } GROUP BY ?r }
-    ?r def:extra ?x .
-    OPTIONAL { ?r def:time ?t0 }
-    OPTIONAL { ?r def:open ?o0 }
-    BIND(?x + ?sum AS ?t1)
-}
-""",
-    {
-        "bus_factor": 1.6,  # bus in-vehicle time over car time: stops and dwell
-    },
-)
-route_time.metadata = {
-    "@id": "route_time",
-    "@type": "Behaviour",
-    "agentClass": "ex:Route",
-    "source": _SOURCE,
-}
-
-# ---------------------------------------------------------------------------
-# option_sum — each nest's logsum argument S_m (update)
-# ---------------------------------------------------------------------------
-# S_m = sum over the option's open routes of exp(-theta T_r).  While ``$anchor``
-# is 1 the base S0_m follows it, so the pivot below is the identity and the
-# census shares hold exactly; set it to 0 and S0_m freezes at the base.
-# Placeholders: ``theta``, ``anchor``.
-
-option_sum = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?o def:s ?s0 . ?o def:s0 ?b0 }
-INSERT { ?o def:s ?s1 . ?o def:s0 ?b1 }
-WHERE {
-    { SELECT ?o (SUM(?e) AS ?s1)
-      WHERE {
-          ?r a ex:Route ; def:option ?o ; def:time ?t .
-          OPTIONAL { ?r def:open ?open }
-          BIND(COALESCE(?open, 1e0) * math:exp(0e0 - $theta * ?t) AS ?e)
-      } GROUP BY ?o }
-    OPTIONAL { ?o def:s ?s0 }
-    OPTIONAL { ?o def:s0 ?b0 }
-    BIND(IF($anchor > 0e0, ?s1, COALESCE(?b0, ?s1)) AS ?b1)
-}
-""",
-    {
-        "theta": 1 / 300,  # route-choice scale, per second: 5 minutes is a factor e
-        "anchor": 1.0,  # 1 while warming up the base, 0 to pivot against it
-    },
-)
-option_sum.metadata = {
-    "@id": "option_sum",
-    "@type": "Behaviour",
-    "agentClass": "ex:Option",
-    "source": "Ben-Akiva & Lerman (1985), Discrete Choice Analysis, ch. 10",
-}
-
-# ---------------------------------------------------------------------------
-# option_share — pivot-point mode shares (update)
-# ---------------------------------------------------------------------------
-# w_m = share0_m (S_m / S0_m)^mu, normalised over the OD.  A mode whose routes
-# are all closed has S_m = 0 and drops out; an OD left with nothing keeps its
-# census shares rather than dividing by zero.  Placeholder: ``mu``.
-
-option_share = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?o def:share ?p0 }
-INSERT { ?o def:share ?p1 }
-WHERE {
-    { SELECT ?od (SUM(?w) AS ?total)
-      WHERE {
-          ?k a ex:Option ; def:od ?od ; def:share0 ?q ; def:s ?s ; def:s0 ?b .
-          BIND(IF(?s > 0e0 && ?b > 0e0, ?q * math:exp($mu * math:log(?s / ?b)), 0e0) AS ?w)
-      } GROUP BY ?od }
-    ?o a ex:Option ; def:od ?od ; def:share0 ?q1 ; def:s ?s1 ; def:s0 ?b1 .
-    OPTIONAL { ?o def:share ?p0 }
-    BIND(IF(?s1 > 0e0 && ?b1 > 0e0, ?q1 * math:exp($mu * math:log(?s1 / ?b1)), 0e0) AS ?w1)
-    BIND(IF(?total > 0e0, ?w1 / ?total, ?q1) AS ?p1)
-}
-""",
-    {
-        "mu": 0.3,  # mode-level scale over route-level, <= 1 (nested logit)
-    },
-)
-option_share.metadata = {
-    "@id": "option_share",
-    "@type": "Behaviour",
-    "agentClass": "ex:Option",
-    "source": "Koppelman (1983) J. Transp. Eng. 109(4); Daly, Fox & Tsang (2005)",
-}
-
-# ---------------------------------------------------------------------------
-# route_prob — choice probability and cumulative interval per route (update)
-# ---------------------------------------------------------------------------
-# p_r = share_m * exp(-theta T_r) / S_m, and cum_r = sum of p over the OD's
-# routes ranked at or below r: the upper end of r's slice of [0, 1), which is
-# what ``choose`` draws against.  ``rank`` is any total order within an OD.
-
-route_prob = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?r def:prob ?p0 . ?r def:cum ?c0 }
-INSERT { ?r def:prob ?p1 . ?r def:cum ?c1 }
-WHERE {
-    { SELECT ?r (SUM(?pk) AS ?c1)
-      WHERE {
-          ?r a ex:Route ; def:od ?od ; def:rank ?rank .
-          ?k a ex:Route ; def:od ?od ; def:rank ?rk ; def:time ?tk ; def:option ?ok .
-          FILTER(?rk <= ?rank)
-          ?ok def:share ?shk ; def:s ?sk .
-          OPTIONAL { ?k def:open ?openk }
-          BIND(IF(?sk > 0e0,
-                  (?shk * COALESCE(?openk, 1e0)) * (math:exp(0e0 - $theta * ?tk) / ?sk),
-                  0e0) AS ?pk)
-      } GROUP BY ?r }
-    ?r def:time ?t ; def:option ?o .
-    ?o def:share ?sh ; def:s ?s .
-    OPTIONAL { ?r def:open ?open }
-    OPTIONAL { ?r def:prob ?p0 }
-    OPTIONAL { ?r def:cum ?c0 }
-    BIND(IF(?s > 0e0,
-            (?sh * COALESCE(?open, 1e0)) * (math:exp(0e0 - $theta * ?t) / ?s),
-            0e0) AS ?p1)
-}
-""",
-    {
-        "theta": 1 / 300,  # route-choice scale, per second: 5 minutes is a factor e
-    },
-)
-route_prob.metadata = {
-    "@id": "route_prob",
-    "@type": "Behaviour",
-    "agentClass": "ex:Route",
-    "source": "Daganzo & Sheffi (1977) Transp. Sci. 11(3)",
-}
-
-# ---------------------------------------------------------------------------
-# choose — who replans, and onto which route (update)
-# ---------------------------------------------------------------------------
-# A commuter replans when its draw falls below ``$replan`` (inertia: most people
-# drive yesterday's route), or unconditionally when its route closed overnight.
-# The one draw serves twice — rescaled to [0, 1) on whichever side of $replan it
-# fell, it picks the route whose slice (cum - prob, cum] contains it.  Taking the
-# smallest qualifying ``cum`` is what makes the pick unique even when two slices
-# meet at a floating-point seam.  Placeholder: ``replan``.
-
-choose = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?c def:route ?r0 }
-INSERT { ?c def:route ?r1 }
-WHERE {
-    { SELECT ?c (MIN(?hi) AS ?h)
-      WHERE {
-          ?c a ex:Commuter ; def:u ?u ; def:od ?od ; def:route ?now .
-          OPTIONAL { ?now def:open ?still }
-          FILTER(?u < $replan || COALESCE(?still, 1e0) = 0e0)
-          BIND(IF(?u < $replan, ?u / $replan, (?u - $replan) / (1e0 - $replan)) AS ?v)
-          ?r a ex:Route ; def:od ?od ; def:cum ?hi ; def:prob ?p .
-          FILTER(?p > 1e-9 && ?v < ?hi)
-      } GROUP BY ?c }
-    ?c def:od ?od ; def:route ?r0 .
-    ?r1 a ex:Route ; def:od ?od ; def:cum ?h ; def:prob ?p1 .
-    FILTER(?p1 > 1e-9)
-}
-""",
-    {
-        "replan": 0.1,  # share of commuters reconsidering each day (MATSim's usual)
-    },
-)
-choose.metadata = {
-    "@id": "choose",
-    "@type": "Behaviour",
-    "agentClass": "ex:Commuter",
-    "source": "Horni, Nagel & Axhausen (2016), The Multi-Agent Transport Simulation MATSim",
-}
-
-# ---------------------------------------------------------------------------
-# link_load — flows and congested times (update)
-# ---------------------------------------------------------------------------
-# flow = (commuters driving through) x peak_factor x demand, in vehicles per
-# peak hour, and the BPR volume-delay function t = t0 (1 + alpha (v/c)^beta).
-# ``peak_factor`` turns one daily commuter into peak-hour vehicles — the share
-# of commutes in the peak hour, times the uplift for everything that is not a
-# commute (school runs, deliveries, through traffic) — and is the knob a count
-# calibrates.  ``demand`` is the period of the year: 1 on a school-term weekday.
-# Placeholders: ``peak_factor``, ``demand``, ``bpr_alpha``, ``bpr_beta``.
-
-link_load = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?l def:flow ?f0 . ?l def:time ?t0 }
-INSERT { ?l def:flow ?f1 . ?l def:time ?t1 }
-WHERE {
-    ?l a ex:Link ; def:t0 ?free ; def:capacity ?cap .
-    OPTIONAL { ?l def:flow ?f0 }
-    OPTIONAL { ?l def:time ?t0 }
-    OPTIONAL {
-        { SELECT ?l (SUM(?w) AS ?n)
-          WHERE {
-              ?c a ex:Commuter ; def:weight ?w ; def:route ?r .
-              ?r def:mode 0e0 ; def:via ?l .
-          } GROUP BY ?l }
+    CONSTRUCT { ?l def:area ?a }
+    WHERE {
+        ?a a ex:Area ; def:geometry ?zone .
+        ?l a ex:Link ; def:geometry ?g .
+        FILTER(geof:sfIntersects(?g, ?zone))
     }
-    BIND(COALESCE(?n, 0e0) * ($peak_factor * $demand) AS ?f1)
-    BIND(?free * (1e0 + $bpr_alpha * math:exp($bpr_beta * math:log(?f1 / ?cap))) AS ?t1)
+    """
+)
+
+Route, Option, Commuter = Agents("Route"), Agents("Option"), Agents("Commuter")
+Link, Area = Agents("Link"), Agents("Area")
+bus_factor, theta, anchor, mu, replan = sp.symbols("bus_factor theta anchor mu replan")
+peak_factor, demand, bpr_alpha, bpr_beta = sp.symbols(
+    "peak_factor demand bpr_alpha bpr_beta"
+)
+PARAMETERS = {
+    bus_factor: 1.6,  # unsourced: bus over car in-vehicle time, stops and dwell
+    theta: 1 / 300,  # unsourced: route-choice scale per second, 5 minutes is a factor e
+    anchor: 1.0,  # scenario knob: 1 while warming up the base, 0 to pivot against it
+    mu: 0.3,  # unsourced: mode over route scale, <= 1 for a nested logit
+    replan: 0.1,  # share reconsidering each day, Horni, Nagel & Axhausen (2016)
+    peak_factor: 0.8,  # unsourced: peak-hour vehicles per daily car commuter, calibrate
+    demand: 1.0,  # scenario knob: period of the year, 1 = school-term weekday
+    bpr_alpha: 0.15,  # Bureau of Public Roads (1964)
+    bpr_beta: 4.0,  # Bureau of Public Roads (1964)
 }
-""",
-    {
-        "bpr_alpha": 0.15,  # BPR (1964)
-        "bpr_beta": 4.0,  # BPR (1964)
-        "peak_factor": 0.8,  # peak-hour vehicles per daily car commuter -- calibrate
-        "demand": 1.0,  # period of the year; 1 = school-term weekday
+
+
+def _leg(route):
+    """Seconds on each link of *route* (``Route`` or ``Commuter.route``): cars in
+    yesterday's congestion (free flow before any load), buses slower by bus_factor,
+    at free flow on a bus lane."""
+    loaded = coalesce(route.via.time, route.via.t0)
+    bus = sp.Piecewise((route.via.t0, route.via.busway > 0), (loaded, True))
+    return sp.Piecewise((loaded, sp.Eq(route.mode, 0)), (bus_factor * bus, True))
+
+
+# Horowitz (1984) TR-B 18(1); Cascetta (1989) TR-B 23(1)
+route_time = {
+    Route.time: Route.extra + sum_over(Route.via, _leg(Route)),
+    Route.open: sp.Piecewise(
+        (0, sp.Eq(Route.mode, 0) & (sum_over(Route.via, 1 - Route.via.car) > 0)),
+        (1, True),
+    ),
+}
+# Ben-Akiva & Lerman (1985), Discrete Choice Analysis, ch. 10
+option_sum = {
+    Option.s: sum_over(Route.option, Route.open * sp.exp(-theta * Route.time))
+}
+# Koppelman (1983) J. Transp. Eng. 109(4)
+option_base = {
+    Option.s0: sp.Piecewise(
+        (Option.s, anchor > 0), (coalesce(Option.s0, Option.s), True)
+    )
+}
+weight = sp.Piecewise(
+    (Option.share0 * (Option.s / Option.s0) ** mu, (Option.s > 0) & (Option.s0 > 0)),
+    (0, True),
+)
+# Koppelman (1983) J. Transp. Eng. 109(4); Daly, Fox & Tsang (2005)
+option_share = {
+    Option.share: sp.Piecewise(
+        (weight / total_by(Option.od, weight), total_by(Option.od, weight) > 0),
+        (Option.share0, True),
+    )
+}
+prob = sp.Piecewise(
+    (
+        Route.option.share * Route.open * sp.exp(-theta * Route.time) / Route.option.s,
+        Route.option.s > 0,
+    ),
+    (0, True),
+)
+# Daganzo & Sheffi (1977) Transp. Sci. 11(3)
+route_prob = {Route.prob: prob}
+route_cum = {Route.cum: running_sum(Route.rank, Route.prob, Route.od)}
+draw = sp.Piecewise(
+    (Commuter.u / replan, Commuter.u < replan),
+    ((Commuter.u - replan) / (1 - replan), True),
+)
+# Horni, Nagel & Axhausen (2016), The Multi-Agent Transport Simulation MATSim
+choose = {
+    Commuter.route: coalesce(
+        pick(
+            Route,
+            sp.Eq(Route.od, Commuter.od)
+            & (Route.prob > 1e-9)
+            & (draw < Route.cum)
+            & ((Commuter.u < replan) | sp.Eq(Commuter.route.open, 0)),
+            Route.cum,
+        ),
+        Commuter.route,
+    )
+}
+route_load = {Route.load: sum_over(Commuter.route, Commuter.weight)}
+# Bureau of Public Roads (1964), Traffic Assignment Manual
+link_load = {
+    Link.flow: sum_over(
+        Route.via, sp.Piecewise((Route.load, sp.Eq(Route.mode, 0)), (0, True))
+    )
+    * peak_factor
+    * demand
+}
+link_time = {
+    Link.time: Link.t0 * (1 + bpr_alpha * (Link.flow / Link.capacity) ** bpr_beta)
+}
+mode = Commuter.route.mode
+commuter_state = {
+    Commuter.time: Commuter.route.extra
+    + sum_over(Commuter.route.via, _leg(Commuter.route)),
+    **{
+        getattr(Commuter, name): sp.Piecewise((1, sp.Eq(mode, code)), (0, True))
+        for name, code in MODES.items()
     },
-)
-link_load.metadata = {
-    "@id": "link_load",
-    "@type": "Behaviour",
-    "agentClass": "ex:Link",
-    "source": "Bureau of Public Roads (1964), Traffic Assignment Manual",
+    Commuter.u: Uniform("u", 0, 1),
 }
-
-# ---------------------------------------------------------------------------
-# commuter_state — the day as experienced, and tomorrow's draw (update)
-# ---------------------------------------------------------------------------
-# Travel time on today's loaded network, and one 0/1 indicator per mode so the
-# mode shares are plain means — observables the IR derives with nothing
-# declared.  The draw is materialised here, not drawn inside ``choose``: an
-# inline BIND would re-draw on every candidate route of the join.
-
-commuter_state = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?c def:time ?t0 . ?c def:car ?a0 . ?c def:bus ?b0 .
-         ?c def:bike ?k0 . ?c def:walk ?w0 . ?c def:u ?u0 }
-INSERT { ?c def:time ?t1 . ?c def:car ?a1 . ?c def:bus ?b1 .
-         ?c def:bike ?k1 . ?c def:walk ?w1 . ?c def:u ?u1 }
-WHERE {
-    ?c a ex:Commuter ; def:route ?r .
-    ?r def:mode ?m ; def:extra ?x .
-    OPTIONAL {
-        { SELECT ?c (SUM(?tau) AS ?sum)
-          WHERE {
-              ?c a ex:Commuter ; def:route ?r .
-              ?r def:mode ?m ; def:via ?l .
-              ?l def:time ?lt ; def:t0 ?free ; def:busway ?bw .
-              BIND(IF(?m = 0e0, ?lt, $bus_factor * IF(?bw > 0e0, ?free, ?lt)) AS ?tau)
-          } GROUP BY ?c }
-    }
-    OPTIONAL { ?c def:time ?t0 }
-    OPTIONAL { ?c def:car ?a0 }
-    OPTIONAL { ?c def:bus ?b0 }
-    OPTIONAL { ?c def:bike ?k0 }
-    OPTIONAL { ?c def:walk ?w0 }
-    OPTIONAL { ?c def:u ?u0 }
-    BIND(?x + COALESCE(?sum, 0e0) AS ?t1)
-    BIND(IF(?m = 0e0, 1e0, 0e0) AS ?a1)
-    BIND(IF(?m = 1e0, 1e0, 0e0) AS ?b1)
-    BIND(IF(?m = 2e0, 1e0, 0e0) AS ?k1)
-    BIND(IF(?m = 3e0, 1e0, 0e0) AS ?w1)
-    BIND(pr:uniform(0e0, 1e0) AS ?u1)
-}
-""",
-    {
-        "bus_factor": 1.6,  # bus in-vehicle time over car time: stops and dwell
-    },
-)
-commuter_state.metadata = {
-    "@id": "commuter_state",
-    "@type": "Behaviour",
-    "agentClass": "ex:Commuter",
-    "source": _SOURCE,
-}
-
-# ---------------------------------------------------------------------------
-# area_traffic — vehicle-km per peak hour inside each Area (update)
-# ---------------------------------------------------------------------------
-# The exposure an old town's foundations feel: every car on every link that
-# touches the area, weighted by the link's length.  Buses are not counted.
-
-area_traffic = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?a def:vkt ?v0 }
-INSERT { ?a def:vkt ?v1 }
-WHERE {
-    ?a a ex:Area .
-    OPTIONAL { ?a def:vkt ?v0 }
-    OPTIONAL {
-        { SELECT ?a (SUM(?f * ?len) AS ?metres)
-          WHERE { ?l def:area ?a ; def:flow ?f ; def:length ?len } GROUP BY ?a }
-    }
-    BIND(COALESCE(?metres, 0e0) / 1e3 AS ?v1)
-}
-"""
-)
-area_traffic.metadata = {
-    "@id": "area_traffic",
-    "@type": "Behaviour",
-    "agentClass": "ex:Area",
-    "source": "skabm",
-}
-
-
-# ---------------------------------------------------------------------------
-# Composition
-# ---------------------------------------------------------------------------
+# skabm: the exposure an old town's foundations feel
+area_traffic = {Area.vkt: sum_over(Link.area, Link.flow * Link.length) / 1000}
 
 TRAFFIC_INIT_RULES = (area_membership,)
 TRAFFIC_UPDATE_RULES = (
     route_time,  # today's network, yesterday's congestion
-    option_sum,  # nest logsums
-    option_share,  # pivot-point mode shares
-    route_prob,  # route probabilities and cumulative slices
-    choose,  # inertia, forced replanning, one draw
-    link_load,  # flows, BPR
+    option_sum,
+    option_base,
+    option_share,
+    route_prob,
+    route_cum,
+    choose,
+    route_load,
+    link_load,
+    link_time,
     commuter_state,  # the day as experienced
-    area_traffic,  # vehicle-km per area
+    area_traffic,
 )
 
 

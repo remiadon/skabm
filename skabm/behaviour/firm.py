@@ -1,28 +1,59 @@
-"""
-Firm behaviour templates.
+"""Firms, Poledna et al. (2023). Six rules, in this order.
 
-Anchored on ``ex:Firm`` and read/write ``def:output``, ``def:price``,
-``def:alpha``, ``def:size``, ``def:margin``, ``def:liquidity``, ``def:profit``.
+1. A firm's output becomes the smaller of alpha times its size and its output multiplied
+by (1 + the expected growth of the total over firms of their output + a normal shock
+with mean 0 and standard deviation the parameter growth_sigma).
 
-All templates are ``string.Template`` objects with ``$placeholder`` references.
-All SPARQL strings use triple-quoted formatting — no ``\n`` concatenation.
+2. A firm's price is multiplied by (1 + the expected growth of the mean over firms of
+their price + a normal shock with mean 0 and standard deviation the parameter
+inflation_sigma).
+
+3. A firm's profit becomes its margin times the smaller of two amounts: its price times
+its output; and total demand times its price times its output divided by the total over
+firms of their price times their output. Total demand is the sum of three totals: the
+total over households of their psi times their income, divided by (1 + the parameter
+vat_rate); the total over governments of their budget; and the total over foreign firms
+of their demand_size.
+
+4. Then a firm's liquidity becomes its liquidity plus its profit.
+
+5. A firm's size becomes its size plus the larger of 0 and 0.1 times (its output divided
+by alpha, minus its size): it hires towards the workforce its output needs and never
+fires.
+
+6. A firm's dividend and profit update together, in one rule. Its dividend becomes the
+parameter dividend_ratio times the larger of 0 and its profit. Its profit becomes its
+profit minus dividend_ratio times the larger of 0 and its profit.
 """
 
 from __future__ import annotations
 
-from skabm.behaviour import DefaultTemplate
+from string import Template
+
+import sympy as sp
+from sympy.stats import Normal
+
 from skabm.behaviour.learning import expect
+from skabm.dsl import Agents, total
 from skabm.sparql import _PREFIXES, EX_NS
 
-# ---------------------------------------------------------------------------
-# firm_ownership — assign firm owners to investor households (init CONSTRUCT)
-# ---------------------------------------------------------------------------
-# Poledna Section 3.2: a fraction ``$firm_ownership_ratio`` of households own
-# firms.  Firm j is owned by household floor(j / ratio).  Deterministic; the
-# ``pr:uniform`` UDF could randomise it.  Run once after mapping.
-# Placeholder: ``firm_ownership_ratio``.
+Firm, Household = Agents("Firm"), Agents("Household")
+Government, ForeignFirm = Agents("Government"), Agents("ForeignFirm")
+growth_sigma, inflation_sigma = sp.symbols("growth_sigma inflation_sigma")
+vat_rate, dividend_ratio = sp.symbols("vat_rate dividend_ratio")
+firm_ownership_ratio = sp.Symbol("firm_ownership_ratio")
 
-firm_ownership = DefaultTemplate(
+PARAMETERS = {  # entry_barrier and entry_sigma are unpublished: no default
+    growth_sigma: 0.0,  # scenario knob: AR(1) innovation std, 0 = deterministic
+    inflation_sigma: 0.0,  # scenario knob: AR(1) innovation std, 0 = deterministic
+    vat_rate: 0.1529,  # τ^VAT, Poledna et al. (2023) Table 2
+    dividend_ratio: 0.7768,  # θ^DIV, Poledna et al. (2023) Table 2
+    firm_ownership_ratio: 0.03,  # unsourced: investor share of households (§3.2)
+}
+
+# Poledna et al. (2023) Section 3.2: firm firm_<j> with no owner yet is owned by
+# household hh_<floor(j / firm_ownership_ratio)>.
+firm_ownership = Template(
     _PREFIXES
     + f"""
 CONSTRUCT {{ ?owner def:owns ?f }}
@@ -33,176 +64,41 @@ WHERE {{
     BIND(xsd:integer(FLOOR(?j / $firm_ownership_ratio)) AS ?i)
     BIND(IRI(CONCAT("{EX_NS}hh_", STR(?i))) AS ?owner)
 }}
-""",
-    {
-        "firm_ownership_ratio": 0.03,  # unsourced: investor share of households (§3.2)
-    },
-)
-firm_ownership.metadata = {
-    "@id": "firm_ownership",
-    "@type": "Behaviour",
-    "agentClass": "ex:Firm",
-    "source": "Poledna et al. (2023), European Economic Review 151, 104306, Section 3.2",
-}
-
-# ---------------------------------------------------------------------------
-# firm_produce — supply choice with capacity cap (update)
-# ---------------------------------------------------------------------------
-# Y_i(t+1) = min(Y_i(t) * (1 + g_e + eps), alpha * size)
-# Poledna eq. 5 + 12.  AR(1) innovation eps ~ N(0, growth_sigma) via UDF.
-#
-# Expected growth ?g_e is *learned*, not assumed: eq. 6 makes it a regression on
-# the model's own realized output series, which the ``expect(...)`` line below
-# reads off the graph.  ``RDFSimulator`` measures SUM(def:output) over ex:Firm
-# every tick into its history table and re-estimates the AR(1) by Sample-
-# Autocorrelation Learning.  Placeholder: ``growth_sigma``.
-
-firm_produce = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?f def:output ?y0 }
-INSERT { ?f def:output ?y1 }
-WHERE {
-    ?f a ex:Firm ;
-        def:output ?y0 ;
-        def:alpha ?alpha ;
-        def:size ?n ."""
-    + expect("SUM", "Firm", "output", out="g_e")
-    + """
-    BIND(?y0 * (1e0 + ?g_e + pr:normal(0e0, $growth_sigma)) AS ?y_desired)
-    BIND(?alpha * ?n AS ?y_capacity)
-    BIND(IF(?y_desired < ?y_capacity, ?y_desired, ?y_capacity) AS ?y1)
-}
-""",
-    {
-        "growth_sigma": 0.0,  # AR(1) innovation std; 0 = deterministic drift
-    },
-)
-firm_produce.metadata = {
-    "@id": "firm_produce",
-    "@type": "Behaviour",
-    "agentClass": "ex:Firm",
-    "source": "Poledna et al. (2023), European Economic Review 151, 104306, eq. 5 + 12",
-}
-
-# ---------------------------------------------------------------------------
-# firm_price — cost-push price setting (update)
-# ---------------------------------------------------------------------------
-# P_i(t+1) = P_i(t) * (1 + inflation_e + eps)
-# Poledna eq. 8.  AR(1) innovation eps ~ N(0, inflation_sigma) via UDF.
-#
-# Expected inflation ?inflation_e is SAC-learned from the realized AVG(def:price)
-# series exactly as ``firm_produce``'s growth expectation is.  Note the
-# aggregate is AVG, not SUM: the price *level* is what agents form a belief
-# about, and summing prices across firms would make it depend on how many firms
-# exist.
-# Placeholder: ``inflation_sigma``.
-
-firm_price = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?f def:price ?p0 }
-INSERT { ?f def:price ?p1 }
-WHERE {
-    ?f a ex:Firm ;
-        def:price ?p0 ."""
-    + expect("AVG", "Firm", "price", out="inflation_e")
-    + """
-    BIND(?p0 * (1e0 + ?inflation_e + pr:normal(0e0, $inflation_sigma)) AS ?p1)
-}
-""",
-    {
-        "inflation_sigma": 0.0,  # AR(1) innovation std; 0 = deterministic drift
-    },
-)
-firm_price.metadata = {
-    "@id": "firm_price",
-    "@type": "Behaviour",
-    "agentClass": "ex:Firm",
-    "source": "Poledna et al. (2023), European Economic Review 151, 104306, eq. 8",
-}
-
-# ---------------------------------------------------------------------------
-# firm_sales — goods-market allocation (update)
-# ---------------------------------------------------------------------------
-# Total nominal demand allocated to firms proportionally to supply share,
-# capped by supply.  profit = margin * revenue; liquidity accumulates profit.
-# Placeholder: ``vat_rate``.
-
-firm_sales = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?f def:profit ?pi0 . ?f def:liquidity ?d0 }
-INSERT { ?f def:profit ?pi1 . ?f def:liquidity ?d1 }
-WHERE {
-    { SELECT (SUM(?psi_h * ?i_h) AS ?c_hh)
-      WHERE { ?h a ex:Household ; def:psi ?psi_h ; def:income ?i_h } }
-    { SELECT (SUM(?b_j) AS ?c_gov) WHERE { ?j a ex:Government ; def:budget ?b_j } }
-    { SELECT (SUM(?d_l) AS ?c_row) WHERE { ?l a ex:ForeignFirm ; def:demand_size ?d_l } }
-    { SELECT (SUM(?p_g * ?y_g) AS ?supply)
-      WHERE { ?g a ex:Firm ; def:price ?p_g ; def:output ?y_g } }
-    ?f a ex:Firm ;
-        def:price ?p ;
-        def:output ?y ;
-        def:margin ?mrg ;
-        def:profit ?pi0 ;
-        def:liquidity ?d0 .
-    BIND(IF(BOUND(?c_hh), ?c_hh / (1e0 + $vat_rate), 0e0)
-         + IF(BOUND(?c_gov), ?c_gov, 0e0)
-         + IF(BOUND(?c_row), ?c_row, 0e0) AS ?demand_total)
-    BIND(?demand_total * (?p * ?y) / ?supply AS ?demand_f)
-    BIND(IF(?demand_f < ?p * ?y, ?demand_f, ?p * ?y) AS ?revenue)
-    BIND(?mrg * ?revenue AS ?pi1)
-    BIND(?d0 + ?pi1 AS ?d1)
-}
-""",
-    {
-        "vat_rate": 0.1529,  # τ^VAT, Poledna et al. (2023) Table 2
-    },
-)
-firm_sales.metadata = {
-    "@id": "firm_sales",
-    "@type": "Behaviour",
-    "agentClass": "ex:Firm",
-    "source": "Poledna et al. (2023), European Economic Review 151, 104306, eqs. 1 + 2 + 27 + 31",
-}
-
-# ---------------------------------------------------------------------------
-# firm_labor — hire workers when output exceeds current capacity (update)
-# ---------------------------------------------------------------------------
-# Poledna eq. 9 + 11.  Proportional hiring: dL / L = (desired_output - current)/
-# current, capped by available workers.  Placeholder: none (reads firm predicates).
-
-firm_labor = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?f def:size ?n0 }
-INSERT { ?f def:size ?n1 }
-WHERE {
-    ?f a ex:Firm ;
-        def:size ?n0 ;
-        def:alpha ?alpha ;
-        def:output ?y .
-    BIND(?y / ?alpha AS ?n_desired)
-    BIND(?n0 + IF(?n_desired > ?n0, (?n_desired - ?n0) * 0.1e0, 0e0) AS ?n1)
-}
 """
 )
-firm_labor.metadata = {
-    "@id": "firm_labor",
-    "@type": "Behaviour",
-    "agentClass": "ex:Firm",
-    "source": "Poledna et al. (2023), European Economic Review 151, 104306, eq. 9 + 11",
+# Poledna et al. (2023) eqs. 5, 12
+firm_produce = {
+    Firm.output: sp.Min(
+        Firm.output
+        * (1 + expect("SUM", "Firm", "output") + Normal("eps", 0, growth_sigma)),
+        Firm.alpha * Firm.size,
+    )
 }
-
-# ---------------------------------------------------------------------------
-# firm_entry — logit-based firm entry (update)
-# ---------------------------------------------------------------------------
-# Poledna eq. 13: new firms enter with probability proportional to log-profit.
-# Placeholder: ``entry_barrier``, ``entry_sigma``.  One new firm per tick max
-# (proxy for the paper's continuous-time entry rate).
-
-firm_entry = DefaultTemplate(
+# Poledna et al. (2023) eq. 8
+firm_price = {
+    Firm.price: Firm.price
+    * (1 + expect("AVG", "Firm", "price") + Normal("eps", 0, inflation_sigma))
+}
+# Poledna et al. (2023) eqs. 1, 2, 27
+demand = (
+    total(Household.psi * Household.income) / (1 + vat_rate)
+    + total(Government.budget)
+    + total(ForeignFirm.demand_size)
+)
+supplied = Firm.price * Firm.output
+firm_sales = {
+    Firm.profit: Firm.margin * sp.Min(demand * supplied / total(supplied), supplied)
+}
+# Poledna et al. (2023) eq. 31
+firm_liquidity = {Firm.liquidity: Firm.liquidity + Firm.profit}
+# Poledna et al. (2023) eqs. 9, 11
+firm_labor = {
+    Firm.size: Firm.size + sp.Max(0, (Firm.output / Firm.alpha - Firm.size) * 0.1)
+}
+# Poledna et al. (2023) eq. 13: at most one firm enters per step, with output 0 and
+# price 1, when total revenue exceeds entry_barrier plus a normal shock of standard
+# deviation entry_sigma.
+firm_entry = Template(
     _PREFIXES
     + """
 DELETE { ?f def:output ?y0 . ?f def:price ?p0 }
@@ -219,39 +115,6 @@ WHERE {
 LIMIT 1
 """
 )
-firm_entry.metadata = {
-    "@id": "firm_entry",
-    "@type": "Behaviour",
-    "agentClass": "ex:Firm",
-    "source": "Poledna et al. (2023), European Economic Review 151, 104306, eq. 13",
-}
-
-# ---------------------------------------------------------------------------
-# firm_dividends — shell out profits to owners (update)
-# ---------------------------------------------------------------------------
-# Poledna eq. 14: dividend = dividend_ratio * max(0, profit).
-# Placeholder: ``dividend_ratio``.
-
-firm_dividends = DefaultTemplate(
-    _PREFIXES
-    + """
-DELETE { ?f def:profit ?pi0 . ?f def:dividend ?div0 }
-INSERT { ?f def:profit ?pi1 . ?f def:dividend ?div1 }
-WHERE {
-    ?f a ex:Firm ;
-        def:profit ?pi0 .
-    OPTIONAL { ?f def:dividend ?div0 }
-    BIND($dividend_ratio * IF(?pi0 > 0e0, ?pi0, 0e0) AS ?div1)
-    BIND(?pi0 - ?div1 AS ?pi1)
-}
-""",
-    {
-        "dividend_ratio": 0.7768,  # θ^DIV, Poledna et al. (2023) Table 2
-    },
-)
-firm_dividends.metadata = {
-    "@id": "firm_dividends",
-    "@type": "Behaviour",
-    "agentClass": "ex:Firm",
-    "source": "Poledna et al. (2023), European Economic Review 151, 104306, eq. 14",
-}
+# Poledna et al. (2023) eq. 14
+dividend = dividend_ratio * sp.Max(Firm.profit, 0)
+firm_dividends = {Firm.dividend: dividend, Firm.profit: Firm.profit - dividend}

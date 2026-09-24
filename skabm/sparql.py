@@ -9,10 +9,6 @@ SPARQL rule *logic* lives in ``skabm.behaviour`` (firm.py, household.py,
 macro.py).  This module carries only the plumbing: namespaces, ``render()``,
 ``dbl()`` and the UDF registrars ``register_polars_random()``, ``register_math()``
 and ``register_geosparql()``.  Mapping is ``skabm.ottr``'s.
-
-There is no ``state_extract`` here any more: what a model's per-agent frame
-should contain is derivable from the rules themselves, and ``skabm.ir`` derives
-it (``ModelIR.extract``).
 """
 
 from __future__ import annotations
@@ -183,16 +179,27 @@ def dbl(x: float) -> str:
     return f"{x:.6e}"
 
 
-def render(rule: Template | str, params: dict) -> str:
-    """Substitute a rule Template's $-placeholders with xsd:double literals.
+def parameters(rule) -> set:
+    """The names of the parameters *rule* reads: a rule dict's, or a Template's."""
+    if isinstance(rule, dict):
+        from skabm.dsl import _Rule
 
-    *params* is laid over the rule's own ``default`` (``behaviour.DefaultTemplate``).
-    Numeric values go through ``dbl`` so decimal literals can never leak into
-    the SPARQL; plain-string rules pass through unchanged.  A placeholder with
-    neither a default nor a param raises ``KeyError`` naming it.
+        return _Rule(rule).parameters()
+    return set(rule.get_identifiers()) if isinstance(rule, Template) else set()
+
+
+def render(rule, params: dict) -> str:
+    """A rule as the SPARQL maplib runs, its parameters replaced by *params* (by name).
+
+    A rule dict compiles through ``dsl.sparql``; a ``Template``'s $-placeholders get
+    xsd:double literals (``dbl``), so a decimal can never leak into the SPARQL; a string
+    passes through.  A parameter missing from *params* raises ``KeyError`` naming it.
     """
+    if isinstance(rule, dict):
+        from skabm.dsl import sparql
+
+        return sparql(rule, params)
     if isinstance(rule, Template):
-        params = {**getattr(rule, "default", {}), **params}
         missing = sorted(set(rule.get_identifiers()) - set(params))
         if missing:
             raise KeyError(

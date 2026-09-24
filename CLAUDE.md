@@ -20,9 +20,11 @@ skABM is only as credible as its calibration, so tests split in two:
 
 ## Parameters
 
-A parameter's value lives on the rule that reads it, and nowhere else in `skabm/`.
+A parameter's value lives in the `PARAMETERS` of the module whose rules read it, and nowhere else in `skabm/`.
 
-- Every rule in `skabm.behaviour` is a `DefaultTemplate` (`skabm/behaviour/__init__.py`): SPARQL with `$placeholders`, plus a `default` dict with a citation comment per value (`# τ^VAT, Poledna et al. (2023) Table 2`, or `# unsourced: ...`, or `# scenario knob: ...`). A plain `string.Template` or a module-level `*_params` dict is a bug. `test_behaviour_rules_carry_consistent_defaults` enforces both, and that a name shared by several rules has one value.
-- No published value, no default. The placeholder stays required and `render` raises a `KeyError` naming it (e.g. `firm_entry`'s `entry_barrier`).
-- Callers override by name only: `RDFSimulator(params={"peak_factor": 1.5})`. Read a default as `rule.default["name"]`. Never copy the full set into a notebook, app or test.
-- Language namespaces: `skabm.sparql` is SPARQL (render, prefixes, UDFs), `skabm.ottr` is the OTTR templates that map DataFrames into the graph, `skabm.behaviour` is the rules.
+- A rule in `skabm.behaviour` is a dict of SymPy expressions (`skabm.dsl`), or, for a rule that builds structure or adds agents, a SPARQL `string.Template`. A module's `PARAMETERS = {symbol: value}` gives every published value its rules read, with a citation comment per value (`# τ^VAT, Poledna et al. (2023) Table 2`, or `# unsourced: ...`, or `# scenario knob: ...`). `skabm.behaviour.defaults()` merges them and refuses a name with two values; `test_every_cited_value_is_read_and_has_one_value` enforces both.
+- A behaviour module's docstring is the specification of its rules, in prose (the paper's terms, parameters named "the parameter x", no code): `translate.rules` must write the module's rules back from it, in order, checked by `SKABM_LLM=1 pytest -k regenerates` (`DESCRIBED` in `tests/test_translate.py`: every module but `learning`; `schelling` and `traffic` are xfail in `BEYOND_7B` until a model can write them). A value a rule computes and another field reuses is a rule of its own that runs first (`labour_target`, `job_finding`, `firm_sales`): the model reads a field inside a rule as its old value. Citations are comments above each rule. No other prose in `skabm/behaviour`.
+- No published value, no default. The parameter stays required and compiling raises a `KeyError` naming it (e.g. `firm_entry`'s `entry_barrier`).
+- Callers override by name only: `RDFSimulator(params={"peak_factor": 1.5})`. Read a default as `module.PARAMETERS[module.symbol]`, or `defaults()["name"]`. Never copy the full set into a notebook, app or test.
+- Language namespaces: `skabm.sparql` is SPARQL (render, prefixes, UDFs), `skabm.ottr` is the OTTR templates that map DataFrames into the graph (and `SCHEMA`, what each field means), `skabm.behaviour` is the rules, `skabm.dsl` is rules as SymPy compiled to SPARQL and JAX, `skabm.translate` generates DSL rules from a researcher's description and the OTTR templates.
+- A new per-tick rule is a rule dict, so it also runs in JAX. Only a rule that adds agents stays SPARQL text.

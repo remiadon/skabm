@@ -404,52 +404,43 @@ def test_get_params_and_clone(params):
         "track",
         "udfs",
         "random_seed",
-        "history_rules",
+        "learner",
         "duckdb_connection",
     }
     assert got["n_periods"] == 7
     assert got["params"]["total_deposits"] == 3000.0
 
-    # clone deep-copies params; Template lacks __eq__, so compare the text
+    # clone deep-copies params; a rule dict compares by its expressions
     fresh = clone(sim)
     fresh_params = fresh.get_params()
     assert fresh_params["params"] == params and fresh_params["n_periods"] == 7
-    assert [t.template for t in fresh_params["update_rules"]] == [
-        t.template for t in got["update_rules"]
-    ]
+    assert list(fresh_params["update_rules"]) == list(got["update_rules"])
     assert fresh.model_.query("SELECT ?s WHERE { ?s ?p ?o }").height == 0
 
 
 def test_inject_metadata_adds_triples():
     # _inject_metadata is the SPARQL-free provenance path; exercise it
     # directly so the insertion block is covered without a full cold fit.
+    from maplib import Model
+
     from skabm.behaviour.firm import firm_ownership
     from skabm.simulation import _inject_metadata
-
-    m = firm_ownership.metadata
-    assert m["@id"] == "firm_ownership"
-    assert m["agentClass"] == "ex:Firm"
-    assert m["source"].startswith("Poledna")
-    assert m["@type"] == "Behaviour"
-
-    from maplib import Model
 
     model = Model()
     _inject_metadata(model, [firm_ownership])
     triples = model.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
     assert triples.height >= 3  # class-behaviour, type, source
+    sources = [o for p, o in zip(triples["p"], triples["o"]) if "source" in p]
+    assert "Poledna" in sources[0]  # the module's docstring, citation included
     pvals = {str(p).replace("<", "").replace(">", "") for p in triples["p"]}
     assert "http://example.net/skabm#behaviour" in pvals
 
 
 def test_the_world_and_the_sidecar_stay_separate(params):
-    """``model_`` is agents; ``meta_`` is everything the simulator knows about them.
+    """``model_`` is the world; ``meta_`` is what the simulator knows about the rules.
 
-    The split is load-bearing rather than tidy: a virtualization registered on a
-    model silently nulls every graph-local aggregate on it, and the behaviour
-    rules are built out of those aggregates.  Keeping it also means a plain
-    ``?s ?p ?o`` over ``model_`` returns the world, so the simulation graph
-    stays portable.
+    Keeping provenance out means a plain ``?s ?p ?o`` over ``model_`` returns the
+    world, so the simulation graph stays portable.
     """
     sim = RDFSimulator(params=params, n_periods=1).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS)
@@ -462,7 +453,6 @@ def test_the_world_and_the_sidecar_stay_separate(params):
 
     side = sim.meta_.query(f"{_PREFIX} SELECT ?p WHERE {{ ?s ?p ?o }}")["p"]
     assert any("behaviour" in p for p in side)  # provenance
-    assert any("chrontext" in p for p in side)  # the virtualized signal nodes
     # ... and no agent leaked into the sidecar
     assert sim.meta_.query(f"{_PREFIX} SELECT ?f WHERE {{ ?f a ex:Firm }}").height == 0
 
