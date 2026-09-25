@@ -31,8 +31,8 @@ from skabm.dsl import (
     owner,
     total,
 )
-from skabm.ottr import SCHEMA, Link
 from skabm.sparql import _PREFIXES
+from skabm.template import SCHEMA, Link
 
 TABLE = "skabm_state"
 

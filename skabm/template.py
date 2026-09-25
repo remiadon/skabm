@@ -5,10 +5,10 @@ The point of this module is the templates, and the way to use one is maplib's
 own ``Model.map``::
 
     from maplib import Model
-    from skabm.ottr import firm_template   # also registers DataFrame.with_iri
+    from skabm.template import firm   # also registers DataFrame.with_iri
 
     world = Model()
-    world.map(firm_template, firms.with_iri())
+    world.map(firm, firms.with_iri())
 
 which raises now, naming the column, instead of running twelve ticks of
 nothing.  ``map_default`` could not: a template generated from the frame's own
@@ -20,7 +20,7 @@ Required parameters are what the rules read but never write: nothing in the
 model can produce them.  Quantities
 are ``xsd:double``, which maplib fills from any float width; an integer column
 is refused at map time rather than joining with nothing at run time.  Undeclared
-columns are refused too: drop them, or declare them with ``agent_template``.
+columns are refused too: drop them, or declare them with ``agent``.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ LINK = Link()
 # What each field *is*, per class: ``{class: {field: (dtype | Link, description)}}``.
 # The OTTR template knows names and types; this also knows where a link lands and
 # what a quantity means, which is what a reader, ``skabm.dsl`` and ``skabm.translate``
-# need.  Filled by ``agent_template``, so an ad-hoc class is described too.
+# need.  Filled by ``agent``, so an ad-hoc class is described too.
 SCHEMA: dict[str, dict[str, tuple]] = {}
 
 _XSD = {
@@ -91,7 +91,7 @@ def _rdf_type(dtype) -> RDFType:
     return RDFType.Literal(_XSD.get(base, xsd.string))
 
 
-def agent_template(
+def agent(
     klass: str,
     quantities: str = "",
     columns: dict | None = None,
@@ -125,7 +125,7 @@ def agent_template(
     return Template(EX.suf(klass), parameters, instances)
 
 
-firm_template = agent_template(
+firm = agent(
     "Firm",
     "alpha margin size w_bar output price liquidity profit dividend delta tech_share "
     "flees_amount",
@@ -149,7 +149,7 @@ firm_template = agent_template(
     },
 )
 
-household_template = agent_template(
+household = agent(
     "Household",
     "psi income wealth flees_amount",
     {"employer": Link("Firm"), "owns": Link("Firm"), "holds_at": Link("Bank")},
@@ -165,7 +165,7 @@ household_template = agent_template(
     },
 )
 
-government_template = agent_template(
+government = agent(
     "Government",
     "budget tax_rate",
     {"purchase_sector": pl.String},
@@ -176,7 +176,7 @@ government_template = agent_template(
     },
 )
 
-central_bank_template = agent_template(
+central_bank = agent(
     "CentralBank",
     "policy_rate inflation_target prev_output prev_price",
     doc={
@@ -187,7 +187,7 @@ central_bank_template = agent_template(
     },
 )
 
-foreign_firm_template = agent_template(
+foreign_firm = agent(
     "ForeignFirm",
     "demand_size",
     {"source_industry": pl.String},
@@ -198,7 +198,7 @@ foreign_firm_template = agent_template(
     },
 )
 
-bank_template = agent_template(
+bank = agent(
     "Bank",
     "deposit_share leverage capital_ratio distressed",
     required=("deposit_share", "leverage"),
@@ -210,7 +210,7 @@ bank_template = agent_template(
     },
 )
 
-cell_template = agent_template(
+cell = agent(
     "Cell",
     "x y draw occupied resident rank",
     {"geometry": pl.String, "neighbor": Link("Cell", many=True)},
@@ -218,7 +218,7 @@ cell_template = agent_template(
         "x": "column on the grid",
         "y": "row on the grid",
         "geometry": "WKT point, for irregular spaces",
-        "neighbor": "the cells next to this one (schelling.grid_neighbors, links_template)",
+        "neighbor": "the cells next to this one (schelling.grid_neighbors, links)",
         "draw": "uniform draw ranking the vacant cells this step",
         "occupied": "people living in the cell",
         "resident": "the group of the person living in the cell",
@@ -226,7 +226,7 @@ cell_template = agent_template(
     },
 )
 
-person_template = agent_template(
+person = agent(
     "Person",
     "group draw share_similar rank",
     {"location": Link("Cell")},
@@ -239,7 +239,7 @@ person_template = agent_template(
     },
 )
 
-occupation_template = agent_template(
+occupation = agent(
     "Occupation",
     "demand_init demand_final target_demand employment unemployment vacancies "
     "separations openings applications app_norm job_finding "
@@ -264,7 +264,7 @@ occupation_template = agent_template(
     },
 )
 
-edge_template = agent_template(
+edge = agent(
     "Edge",
     "weight flow",
     {"src": Link("Occupation"), "dst": Link("Occupation")},
@@ -277,12 +277,12 @@ edge_template = agent_template(
     },
 )
 
-clock_template = agent_template("Clock", "t", doc={"t": "time steps elapsed"})
+clock = agent("Clock", "t", doc={"t": "time steps elapsed"})
 
 # Traffic (skabm.behaviour.traffic).  A Route's links are many per route, so they
-# are not a column: `via_template` maps a long (id, via) frame onto routes that
-# `route_template` already typed.
-link_template = agent_template(
+# are not a column: `via` maps a long (id, via) frame onto routes that
+# `route` already typed.
+link = agent(
     "Link",
     "length t0 capacity car busway flow time",
     {
@@ -305,10 +305,10 @@ link_template = agent_template(
         "dst": "road-network node the link ends at",
         "name": "street name",
         "geometry": "WKT line",
-        "area": "the areas the link touches (traffic.area_membership, links_template)",
+        "area": "the areas the link touches (traffic.area_membership, template.links)",
     },
 )
-route_template = agent_template(
+route = agent(
     "Route",
     "mode rank extra time open prob cum load",
     {"od": pl.String, "option": Link("Option"), "via": Link("Link", many=True)},
@@ -323,11 +323,11 @@ route_template = agent_template(
         "cum": "probability summed over its OD's routes ranked up to this one",
         "od": "origin-destination pair",
         "option": "the OD x mode option this route belongs to",
-        "via": "the road links the route drives, in no order (via_template)",
+        "via": "the road links the route drives, in no order (template.via)",
         "load": "commuters taking the route today",
     },
 )
-option_template = agent_template(
+option = agent(
     "Option",
     "mode share0 s s0 share",
     {"od": pl.String},
@@ -341,7 +341,7 @@ option_template = agent_template(
         "od": "origin-destination pair",
     },
 )
-commuter_template = agent_template(
+commuter = agent(
     "Commuter",
     "weight u time car bus bike walk",
     # a commuter is somebody's household member going to somebody's firm: the link is
@@ -362,7 +362,7 @@ commuter_template = agent_template(
         "household": "the household this commuter belongs to",
     },
 )
-area_template = agent_template(
+area = agent(
     "Area",
     "vkt",
     {"name": pl.String, "geometry": pl.String},
@@ -375,7 +375,7 @@ area_template = agent_template(
 )
 
 
-def links_template(field: str) -> Template:
+def links(field: str) -> Template:
     """A link an agent holds several of, as a long frame: one ``(id, field)`` row each."""
     return Template(
         EX.suf(field),
@@ -387,27 +387,27 @@ def links_template(field: str) -> Template:
     )
 
 
-via_template = links_template("via")
+via = links("via")
 
 TEMPLATES = {
     template.iri.iri[len(EX_NS) :]: template
     for template in (
-        firm_template,
-        household_template,
-        government_template,
-        central_bank_template,
-        foreign_firm_template,
-        bank_template,
-        cell_template,
-        person_template,
-        occupation_template,
-        edge_template,
-        clock_template,
-        link_template,
-        route_template,
-        option_template,
-        commuter_template,
-        area_template,
+        firm,
+        household,
+        government,
+        central_bank,
+        foreign_firm,
+        bank,
+        cell,
+        person,
+        occupation,
+        edge,
+        clock,
+        link,
+        route,
+        option,
+        commuter,
+        area,
     )
 }
 

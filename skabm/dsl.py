@@ -27,7 +27,7 @@ The SPARQL printer brackets every operation (maplib groups ``a - b + c`` from th
 right), writes every number as a double, defaults every sum with ``COALESCE``
 (``IF(BOUND)`` turns into a struct column on an empty result), and binds each draw once
 (an inline draw re-draws on every row of a join).  JAX is ``sympy.lambdify``, handed the
-graph functions.  SPARQL text passed to the simulator has no JAX form.
+graph functions.
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ from sympy.stats import Normal, Uniform
 from sympy.stats.crv_types import NormalDistribution, UniformDistribution
 from sympy.stats.rv import RandomSymbol
 
-from skabm.ottr import SCHEMA, Link
 from skabm.sparql import _PREFIXES, EX_NS
+from skabm.template import SCHEMA, Link
 
 
 class DSLError(ValueError):
@@ -77,17 +77,6 @@ class lag(sp.Function):
 
 class coalesce(sp.Function):
     """``coalesce(Household.employer.w_bar, benefit)``: the first argument that exists."""
-
-    @classmethod
-    def eval(cls, *args):  # coalesce(a, coalesce(b, c)) is coalesce(a, b, c)
-        if any(isinstance(a, coalesce) for a in args):
-            return cls(
-                *(
-                    b
-                    for a in args
-                    for b in (a.args if isinstance(a, coalesce) else (a,))
-                )
-            )
 
 
 def node(subject: str, field: str) -> sp.Symbol:
@@ -169,7 +158,7 @@ class _Link:
 class Agents:
     """A class's fields: ``Occupation = Agents("Occupation")``, then ``Occupation.employment``.
 
-    The fields come from the class's OTTR template (``ottr.SCHEMA``); a link field
+    The fields come from the class's OTTR template (``template.SCHEMA``); a link field
     reads on through its target, ``Edge.src.unemployment``.  A class without a
     template names its own fields: ``Agents("Signal", "k s1 s2")``.
     """
@@ -257,8 +246,6 @@ class _Rule:
         if owner(links[0])[0] != self.klass:
             return inner  # another class's link: its agents are the ones read
         target = str(SCHEMA[owner(links[-1])[0]][owner(links[-1])[1]][0])
-        if target == self.klass:
-            return inner  # a link to its own class: a bare field is the agent's own
 
         def walk(e):
             if isinstance(e, gather):
@@ -335,14 +322,8 @@ class _Rule:
 
 
 def _classes(e) -> set:
-    """Classes whose fields *e* reads in its own scope, not through a nested operator."""
-    if isinstance(e, sp.Symbol):
-        return {owner(e)[0]} if owner(e) and owner(e)[0][0] != "@" else set()
-    if isinstance(e, gather):
-        return {owner(e.args[0])[0]}  # the link is read here; its target is elsewhere
-    if isinstance(e, (total, mean, RandomSymbol, Str, *RELATIONAL)):
-        return set()
-    return set().union(set(), *map(_classes, e.args))
+    """Classes whose fields *e* reads; a named node (``@...``) is none."""
+    return {owner(s)[0] for s in e.atoms(sp.Symbol) if owner(s) and s.name[0] != "@"}
 
 
 def _target(link, klass: str) -> tuple[str, str]:
@@ -759,12 +740,6 @@ def jax_tick(rules):
     import jax
     import jax.numpy as jnp
 
-    plain = [r for r in rules if not is_rule(r)]
-    if plain:
-        raise TypeError(
-            f"{len(plain)} rule(s) are SPARQL text, not a rule dict: JAX has nothing "
-            "to compile"
-        )
     graph = {  # a link arrives as (row indices, size of the class it points to)
         "gather": lambda link, value: jnp.where(link[0] >= 0, value[link[0]], jnp.nan),
         "sum_over": lambda link, value: jax.ops.segment_sum(
@@ -799,14 +774,15 @@ def jax_tick(rules):
         agent = (rule.subject or rule.klass) if klass == rule.klass else klass
         if agent not in state and klass != rule.klass:  # nobody to sum, as in SPARQL
             return jnp.zeros(0)
-        if field in state.get(agent, {}):
-            kind = SCHEMA.get(klass, {}).get(field, (None,))[0]
-            if isinstance(kind, Link) and kind:
-                return state[agent][field], _size(state, kind)
-            return state[agent][field]
-        if arg in rule.maybe:
-            return jnp.nan
-        raise KeyError(f"{arg}: the state has no such array")
+        kind = SCHEMA.get(klass, {}).get(field, (None,))[0]
+        if isinstance(kind, Link) and kind:
+            return state[agent][field], _size(state, kind)
+        # NaN where a coalesce may skip it; a required array missing is a KeyError
+        return (
+            state[agent].get(field, jnp.nan)
+            if arg in rule.maybe
+            else state[agent][field]
+        )
 
     def tick(state: dict, params: dict | None = None, key=None) -> dict:
         for i, (rule, args, draws, function) in enumerate(compiled):
@@ -841,7 +817,7 @@ def jax_tick(rules):
 def arrays(frames: dict, rules=()) -> dict:
     """``{class: polars frame}`` to the state ``jax_tick`` steps.
 
-    Float columns become arrays; a link column the template types (``ottr.Link``)
+    Float columns become arrays; a link column the template types (``template.Link``)
     becomes row indices into its target's frame, in that frame's order.  Anything
     else (strings, untyped links) is left behind, since no expression can read it.
     Every field *rules* write that the frames lack is added as NaN, so the first tick

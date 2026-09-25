@@ -3,8 +3,9 @@
 Engine tests: the grammar built from templates is the DSL over their fields and
 nothing else, and what a model writes under it becomes the same rule dicts
 ``behaviour/labour.py`` builds by hand.  No model is called, except by
-``test_a_description_regenerates_its_rule``: ``SKABM_LLM=1`` runs it on the tiny local
-model, ``SKABM_LLM=<hugging face name>`` on another; either is downloaded.
+``test_a_module_docstring_regenerates_its_rules``: ``SKABM_LLM=1`` runs it on
+``translate.MODEL``, ``SKABM_LLM=<hugging face name>`` on another; either is downloaded.
+Phi-3-mini-4k (2026-09-25) loops on ``sp.Abs(`` until the token cap, even on macro.
 """
 
 import importlib
@@ -15,12 +16,13 @@ import pytest
 import sympy as sp
 from sympy.stats.rv import RandomSymbol
 
+from skabm import template
 from skabm.behaviour.labour import applications, clock_tick, labour_flow
 from skabm.dsl import OPERATORS, DSLError, _Rule, coalesce, lag, sparql
-from skabm.ottr import TEMPLATES, clock_template, edge_template, occupation_template
+from skabm.template import TEMPLATES
 from skabm.translate import _accepts, grammar, local, rules
 
-LABOUR = [occupation_template, edge_template, clock_template]
+LABOUR = [template.occupation, template.edge, template.clock]
 
 # Three rules, one per class in the templates' order, as a model writing under the grammar would.
 WRITTEN = """\
@@ -106,7 +108,10 @@ def test_an_answer_outside_the_grammar_never_runs():
     assert list(written) == ["delta_u_rule", "y"]
     assert str(written["y"][next(iter(written["y"]))]) == "delta_u"
     answer = "x = Rule({Edge.flow: 1})\ny = Rule({Edge.flow: 2})\nRULES = [y]"
-    with pytest.raises(DSLError, match="never run"):
+    with pytest.raises(DSLError, match="must run every rule written"):
+        rules("anything", LABOUR, model=model)
+    answer = "x = Rule({Edge.flow: _y})\n_y = 1\nRULES = [x]"  # the grammar allows it
+    with pytest.raises(NameError, match="read before it is assigned"):
         rules("anything", LABOUR, model=model)
 
 

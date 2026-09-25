@@ -2,7 +2,7 @@
 
 from maplib import Model, RDFType
 
-from skabm.ottr import LINK, TEMPLATES, agent_template
+from skabm.template import LINK, TEMPLATES, agent
 
 
 def world(links: tuple = (), **populations) -> Model:
@@ -13,7 +13,7 @@ def world(links: tuple = (), **populations) -> Model:
     """
     model = Model()
     for klass, df in populations.items():
-        template = TEMPLATES.get(klass) or agent_template(
+        template = TEMPLATES.get(klass) or agent(
             klass,
             columns={
                 c: LINK if c in links else df.schema[c] for c in df.columns if c != "id"

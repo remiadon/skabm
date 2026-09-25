@@ -17,8 +17,8 @@ from skabm.behaviour import defaults
 from skabm.behaviour.household import TOTAL_DEPOSITS
 from skabm.calibration import make_dataset, weighted_enum
 from skabm.datasets import build_firm_io_df
+from skabm.dsl import _Rule
 from skabm.simulation import DEFAULT_RULES
-from skabm.sparql import parameters
 
 H_ACTIVE = 4_729_215  # H^act, census
 H_INACTIVE = 4_130_385  # H^inact, census
@@ -27,7 +27,7 @@ H_INACTIVE = 4_130_385  # H^inact, census
 def test_default_rules_carry_the_cited_values(poledna_params):
     """Every parameter the default rules read defaults to the paper's number, and no
     cited value goes unread: D^H seeds the starting wealth (``household.initial``)."""
-    read = set().union(*map(parameters, DEFAULT_RULES))
+    read = set().union(*(_Rule(r).parameters() for r in DEFAULT_RULES))
     assert read | {"total_deposits"} == set(poledna_params)
     assert {k: defaults()[k] for k in read} == {k: poledna_params[k] for k in read}
     assert poledna_params["total_deposits"] == TOTAL_DEPOSITS

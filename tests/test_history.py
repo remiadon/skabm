@@ -14,11 +14,11 @@ import pytest
 from maplib import Model
 
 from skabm import history as H
+from skabm import template
 from skabm.behaviour.learning import expect, sac
-from skabm.dsl import Agents, DSLError, jax_tick
-from skabm.ottr import firm_template
+from skabm.dsl import Agents, DSLError, jax_tick, sparql
 from skabm.simulation import RDFSimulator
-from skabm.sparql import _PREFIXES, DEF_NS, render
+from skabm.sparql import _PREFIXES, DEF_NS
 
 jax.config.update("jax_enable_x64", True)
 
@@ -46,7 +46,7 @@ OPENING = 900.0 + 3600.0  # SUM of output at t=0
 def firms() -> Model:
     """A fresh world per fit: a cold fit advances the graph it is given."""
     world = Model()
-    world.map(firm_template, FIRMS)
+    world.map(template.firm, FIRMS)
     return world
 
 
@@ -193,9 +193,9 @@ def test_sac_forecast_matches_the_textbook_formula_in_sparql_and_jax():
     """
     levels = [100.0, 103.0, 101.0, 106.0, 104.0, 110.0]
     learner = sac(*OUTPUT)
-    rule = render(learner, {})
+    rule = sparql(learner, {})
     world = Model()
-    world.map(firm_template, FIRMS.head(1))
+    world.map(template.firm, FIRMS.head(1))
     state = {
         "Firm": {"output": jax.numpy.zeros(1)}
     }  # the signal node grows from nothing

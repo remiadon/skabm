@@ -1,14 +1,6 @@
-"""
-Infrastructure for SPARQL-based ABM simulation.
-
-Provides the constants, rendering, mapping, and random-UDF registration that
-the behaviour templates (``skabm.behaviour.*``) and the simulator
-(``skabm.simulation.RDFSimulator``) depend on.
-
-SPARQL rule *logic* lives in ``skabm.behaviour`` (firm.py, household.py,
-macro.py).  This module carries only the plumbing: namespaces, ``render()``,
-``dbl()`` and the UDF registrars ``register_polars_random()``, ``register_math()``
-and ``register_geosparql()``.  Mapping is ``skabm.ottr``'s.
+"""SPARQL plumbing for the simulator: namespaces and the UDF registrars
+``register_polars_random()`` and ``register_math()``.  Rules are ``skabm.dsl`` dicts,
+compiled by ``dsl.sparql``; mapping is ``skabm.template``'s.
 """
 
 from __future__ import annotations
@@ -86,35 +78,5 @@ def register_math(model) -> None:
     model.add_udf(MATH_NS + "log", _log, xsd.double, [xsd.double])
 
 
-# maplib SPARQL gotcha, worth knowing before writing any rule: arithmetic
-# operators of equal precedence associate to the *right*, against the SPARQL
-# grammar.  ``?a - ?b + ?c`` evaluates as ``?a - (?b + ?c)`` and ``?a / ?b * ?c``
-# as ``?a / (?b * ?c)``; both are silently wrong, with no error and no warning.
-# Chains that start with ``+`` or ``*`` happen to survive (``a + (b - c)`` and
-# ``a * (b / c)`` are algebraically what you meant), which is why the Poledna
-# and Schelling rules are unaffected — but a chain led by ``-`` or ``/`` is a
-# live bug.  Bracket every mixed chain explicitly.
-
-
-def dbl(x: float) -> str:
-    """Format a Python float as a SPARQL xsd:double literal."""
-    return f"{x:.6e}"
-
-
-def parameters(rule) -> set:
-    """The names of the parameters *rule* reads: none for SPARQL text."""
-    if isinstance(rule, dict):
-        from skabm.dsl import _Rule
-
-        return _Rule(rule).parameters()
-    return set()
-
-
-def render(rule, params: dict) -> str:
-    """A rule as the SPARQL maplib runs: a rule dict compiled through ``dsl.sparql``,
-    its parameters replaced by *params* (by name); SPARQL text as it is."""
-    if isinstance(rule, dict):
-        from skabm.dsl import sparql
-
-        return sparql(rule, params)
-    return rule
+# maplib associates equal-precedence operators to the right (``?a - ?b + ?c`` is
+# ``?a - (?b + ?c)``), silently; ``dsl.sparql`` brackets every operation for it.

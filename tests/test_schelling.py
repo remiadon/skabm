@@ -17,17 +17,16 @@ import polars_random as pr
 from maplib import Model
 from worlds import world
 
+from skabm import template
 from skabm.behaviour.schelling import (
     PARAMETERS,
     RULES,
     geo_neighbors,
-    geo_state_extract,
     grid_neighbors,
     settle,
     state_extract,
     want_similar,
 )
-from skabm.ottr import links_template
 from skabm.simulation import RDFSimulator
 from skabm.sparql import _PREFIXES
 
@@ -48,15 +47,15 @@ def grid(size: int) -> pl.DataFrame:
 def town(cells: pl.DataFrame, neighbors: pl.DataFrame, seed: int = 0) -> Model:
     """The cells, their neighbour links and the people settled on them."""
     model = world(links=("location",), Cell=cells, Person=settle(cells, seed=seed))
-    model.map(links_template("neighbor"), neighbors.with_iri("neighbor"))
+    model.map(template.links("neighbor"), neighbors.with_iri("neighbor"))
     return model
 
 
-def simulator(n_periods: int, seed: int = 0, extract=state_extract) -> RDFSimulator:
+def simulator(n_periods: int, seed: int = 0) -> RDFSimulator:
     return RDFSimulator(
         rules=RULES,
         n_periods=n_periods,
-        state_extract=extract,
+        state_extract=state_extract,
         random_seed=seed,
     )
 
@@ -124,7 +123,7 @@ def test_geo_variant_plugs_in():
         )
         .drop("x", "y")
     )
-    sim = simulator(15, extract=geo_state_extract)
+    sim = simulator(15)
     seg = [
         row["sig__AVG__Person__share_similar"]
         for row in sim.fit_iter(town(cells, geo_neighbors(cells)))

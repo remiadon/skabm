@@ -3,9 +3,10 @@ rules, in this order.
 
 1. Each step, the clock's t advances by one.
 
-2. An occupation's target_demand becomes its demand_init while (the total over clocks of
-their t) times the parameter weeks_per_step / 52 - the parameter shock_start is below 0,
-and otherwise its demand_init plus (its demand_final minus its demand_init) divided by
+2. An occupation's target_demand has two cases. Before the shock, when (the total over
+clocks of their t) times the parameter weeks_per_step / 52 - the parameter shock_start is
+below 0, it becomes its demand_init. Otherwise it becomes its demand_init plus (its
+demand_final minus its demand_init) divided by
 (1 + exp(-the parameter shock_k times ((the total over clocks of their t) times the
 parameter weeks_per_step / 52 - the parameter shock_start - the parameter
 shock_halfway))).
@@ -163,7 +164,7 @@ def mobility_network(
 
     ``transitions`` needs ``src`` / ``dst`` / ``count`` columns of bare
     occupation ids; the result is ready for ``sim.fit(Edge=...)`` in any order,
-    since ``templates.edge_template`` declares both as links.  Self-transitions in
+    since ``template.edge`` declares both as links.  Self-transitions in
     the input are dropped — the diagonal is set by *stay*, not observed.
     """
     off = (

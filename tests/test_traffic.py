@@ -13,6 +13,7 @@ import polars as pl
 import pytest
 from maplib import Model
 
+from skabm import template
 from skabm.behaviour.traffic import (
     MODES,
     RULES,
@@ -20,15 +21,6 @@ from skabm.behaviour.traffic import (
     area_membership,
     pedestrianize,
     routes,
-)
-from skabm.ottr import (
-    area_template,
-    commuter_template,
-    link_template,
-    links_template,
-    option_template,
-    route_template,
-    via_template,
 )
 from skabm.simulation import RDFSimulator
 from skabm.sparql import _PREFIXES
@@ -150,14 +142,14 @@ def town(n: int = 60) -> tuple[Model, pl.DataFrame]:
         )
     )
     world = Model()
-    world.map(link_template, LINKS.with_iri("src", "dst"))
+    world.map(template.link, LINKS.with_iri("src", "dst"))
     areas = pl.DataFrame({"id": ["centre"], "name": ["Centre"], "geometry": [CENTRE]})
-    world.map(area_template, areas.with_iri())
-    world.map(links_template("area"), area_membership(LINKS, areas).with_iri("area"))
-    world.map(option_template, options.with_iri())
-    world.map(route_template, found.with_iri("option"))
-    world.map(via_template, via.with_iri("via"))
-    world.map(commuter_template, commuters.with_iri("route"))
+    world.map(template.area, areas.with_iri())
+    world.map(template.links("area"), area_membership(LINKS, areas).with_iri("area"))
+    world.map(template.option, options.with_iri())
+    world.map(template.route, found.with_iri("option"))
+    world.map(template.via, via.with_iri("via"))
+    world.map(template.commuter, commuters.with_iri("route"))
     return world, found
 
 
@@ -247,8 +239,8 @@ def test_closing_the_centre():
 
     # new routes against the graph as edited, on today's congested times
     found, via = choice_set(car_links(sim.model_), cost="time")
-    sim.model_.map(route_template, found.with_iri("option"))
-    sim.model_.map(via_template, via.with_iri("via"))
+    sim.model_.map(template.route, found.with_iri("option"))
+    sim.model_.map(template.via, via.with_iri("via"))
 
     sim.set_params(warm_start=True, n_periods=10, params={**PARAMS, "anchor": 0.0})
     after = pl.DataFrame(sim.fit_iter())

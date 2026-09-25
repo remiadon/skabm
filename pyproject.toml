@@ -34,6 +34,7 @@ jax = [
 # skabm.translate.rules: a small local model writing DSL under the templates' grammar.
 llm = [
     "llguidance>=1.8",
+    "mlx-lm>=0.28 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
     "torch>=2",
     "transformers>=5",
 ]

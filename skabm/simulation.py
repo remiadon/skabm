@@ -2,11 +2,11 @@
 RDFSimulator: advance a maplib knowledge-graph ABM, one step of its rules per tick.
 
 ``fit`` takes one argument, the world: a maplib ``Model``, simulated as given and
-advanced in place.  How the agents got into it — ``skabm.ottr`` and
+advanced in place.  How the agents got into it — ``skabm.template`` and
 ``Model.map``, a deserialized file, another system — is not the simulator's business.
 
     world = Model()
-    world.map(firm_template, firms.with_iri())
+    world.map(template.firm, firms.with_iri())
     RDFSimulator(params=params, n_periods=12).fit(world)   # Poledna rules by default
 
 The world is the opening state, starting values included: what happens before the first
@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import importlib
 import pkgutil
-import re
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from functools import cache
@@ -62,10 +61,10 @@ from skabm.behaviour.macro import (
     centralbank_rate,
     government_spend,
 )
-from skabm.dsl import is_rule
+from skabm.dsl import is_rule, sparql
 from skabm.history import TABLE as HISTORY_TABLE
 from skabm.history import connect, consumed, measure, observables, record, state_frame
-from skabm.sparql import _PREFIXES, DEF_NS, EX_NS, register_polars_random, render
+from skabm.sparql import _PREFIXES, DEF_NS, EX_NS, register_polars_random
 
 # Canonical Poledna (2023) rule composition, sourced from behaviour/.
 # Users override via __init__(rules=..., params=...).
@@ -104,16 +103,10 @@ def _shipped() -> dict:
 
 def _inject_metadata(model: Model, rules: Sequence) -> None:
     """Each rule as an ``ex:Behaviour`` of the class it updates, with its module's
-    source.  The class is a rule dict's own, else the first one its SPARQL names."""
+    source."""
     links, sources = [], []
     for i, rule in enumerate(rules):
-        if is_rule(rule):
-            klass = str(sp.sympify(next(iter(rule)))).split(".")[0]
-        else:
-            text = getattr(rule, "template", rule)
-            klass = next(iter(re.findall(r"\ba ex:(\w+)", text)), None)
-        if klass is None:
-            continue
+        klass = str(sp.sympify(next(iter(rule)))).split(".")[0]
         iri = EX_NS + rule_name(rule, i)
         links += [
             (EX_NS + klass, EX_NS + "behaviour", iri),
@@ -159,7 +152,7 @@ def _extract(model: Model) -> pl.DataFrame:
 
 def _rules(learned) -> tuple:
     """A learner may return one rule or several."""
-    return (learned,) if isinstance(learned, (dict, str)) else tuple(learned)
+    return (learned,) if isinstance(learned, dict) else tuple(learned)
 
 
 class RDFSimulator(BaseEstimator):
@@ -167,9 +160,8 @@ class RDFSimulator(BaseEstimator):
 
     Parameters
     ----------
-    rules : Sequence[dict | str]
-        Rule dicts (a module's ``RULES``), or SPARQL UPDATE text, applied in order at
-        every tick: the model's event sequence (Poledna Section 3.5).  Rules over
+    rules : Sequence[dict]
+        Rule dicts (a module's ``RULES``), applied in order at every tick: the model's event sequence (Poledna Section 3.5).  Rules over
         unmapped agent classes no-op harmlessly.
     params : dict | None
         Parameter values by name, laid over ``skabm.behaviour.defaults()``, every
@@ -329,12 +321,12 @@ class RDFSimulator(BaseEstimator):
         if X is not None and not isinstance(X, Model):
             raise TypeError(
                 f"X is a maplib Model, not {type(X).__name__}: map populations into "
-                "one with skabm.ottr and Model.map, then pass the model."
+                "one with skabm.template and Model.map, then pass the model."
             )
         if self.random_seed is not None:
             pr.set_random_seed(self.random_seed)
         merged = {**defaults(), **(self.params or {})}
-        rules = [render(rule, merged) for rule in self.rules]
+        rules = [sparql(rule, merged) for rule in self.rules]
         self._implied = observables(self.rules, merged)
         self._consumed = consumed(self.rules)
         if self.warm_start:
@@ -391,7 +383,7 @@ class RDFSimulator(BaseEstimator):
         present = self._classes()
         self.observables_ = self._recorded(present)
         self._learners = [
-            render(rule, {**defaults(), **(self.params or {})})
+            sparql(rule, {**defaults(), **(self.params or {})})
             for signal in sorted(self._consumed if self.learner else ())
             if signal[1] in present
             for rule in _rules(self.learner(*signal))

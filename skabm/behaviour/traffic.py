@@ -266,7 +266,7 @@ def routes(
     ``extra`` and ``time``, the last filled only for a path of no links (both
     ends on one node).  ``rank`` is a CRC of mode and path, so a path found again
     gets the same id and rank, and re-mapping it adds nothing.  ``via`` is the
-    long ``(id, via)`` frame ``templates.via_template`` maps.
+    long ``(id, via)`` frame ``template.via`` maps.
 
     ponytail: one Dijkstra per distinct origin, 256 origins' predecessors in
     memory at a time (256 x nodes x 4 bytes); a bidirectional or A* search per
@@ -337,7 +337,7 @@ def routes(
 
 def area_membership(links: pl.DataFrame, areas: pl.DataFrame) -> pl.DataFrame:
     """``(id, area)``: every area each link's geometry intersects (a vertex inside the
-    area's outer ring, or a segment crossing it), for ``links_template("area")``.
+    area's outer ring, or a segment crossing it), for ``template.links("area")``.
 
     Geometries are WKT, a link's a ``LINESTRING`` or ``POINT``, an area's a ``POLYGON``
     whose holes are ignored; coordinates are planar, lon/lat is fine at city scale.

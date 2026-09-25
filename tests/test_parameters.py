@@ -5,9 +5,9 @@ import polars as pl
 import pytest
 from maplib import Model
 
+from skabm import template
 from skabm.behaviour.household import initial
 from skabm.calibration import noise_floor, simulator_model
-from skabm.ottr import firm_template, household_template
 
 CAL_FIRMS = pl.DataFrame({"id": [f"firm_{i}" for i in range(6)]}).with_columns(
     output=pl.lit(100.0),
@@ -30,9 +30,9 @@ CAL_HH = pl.DataFrame(
 
 def cal_world() -> Model:
     world = Model()
-    world.map(firm_template, CAL_FIRMS.with_iri())
+    world.map(template.firm, CAL_FIRMS.with_iri())
     households = initial(CAL_HH, CAL_FIRMS, total_deposits=4.0e5)
-    world.map(household_template, households.with_iri("employer"))
+    world.map(template.household, households.with_iri("employer"))
     return world
 
 

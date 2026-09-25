@@ -122,11 +122,11 @@ def simulator_model(
     >>> Calibrator(model=model, ...).calibrate(n_batches=6)   # doctest: +SKIP
     """
 
+    from skabm.dsl import _Rule
     from skabm.simulation import (
         DEFAULT_RULES,
         RDFSimulator,
     )
-    from skabm.sparql import parameters
 
     owned = {"n_periods", "random_seed", "warm_start"} & set(simulator_kwargs)
     if owned:
@@ -137,7 +137,7 @@ def simulator_model(
 
     base = dict(params or {})
     rules = (*simulator_kwargs.get("rules", DEFAULT_RULES),)
-    known = set(base).union(*map(parameters, rules))
+    known = set(base).union(*(_Rule(r).parameters() for r in rules))
     unknown = [name for name in free if name not in known]
     if unknown:
         raise ValueError(

@@ -16,6 +16,7 @@ from maplib import Model
 from sympy.stats import Exponential, Normal, Uniform
 from test_labour import NEVER, clock, market, occupations, ring
 
+from skabm import template
 from skabm.behaviour import labour
 from skabm.behaviour.labour import PARAMETERS as LABOUR
 from skabm.behaviour.schelling import RELOCATE
@@ -33,8 +34,7 @@ from skabm.dsl import (
     sum_over,
     total,
 )
-from skabm.ottr import firm_template
-from skabm.sparql import _PREFIXES, register_math, register_polars_random, render
+from skabm.sparql import _PREFIXES, register_math, register_polars_random
 
 jax.config.update("jax_enable_x64", True)
 
@@ -143,8 +143,6 @@ def test_rules_are_checked_when_compiled():
 
 
 def test_jax_refuses_what_it_cannot_shape():
-    with pytest.raises(TypeError, match="SPARQL text"):
-        jax_tick(["DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }"])
     with pytest.raises(DSLError, match="no JAX form"):
         jax_tick([RELOCATE])  # pick has no fixed-shape form yet
     with pytest.raises(DSLError, match="no JAX form"):
@@ -162,12 +160,12 @@ def test_a_draw_is_bound_once_however_often_it_is_read():
     world = Model()
     register_polars_random(world)
     world.map(
-        firm_template,
+        template.firm,
         pl.DataFrame(
             {"id": ["f"], "alpha": [1.0], "margin": [0.1], "size": [1.0]}
         ).with_iri(),
     )
-    world.update(render(rule, {"sigma": 1.0}))
+    world.update(sparql(rule, {"sigma": 1.0}))
     row = world.query(
         _PREFIXES + "SELECT ?y ?p WHERE { ?f def:output ?y ; def:price ?p }"
     )
@@ -192,7 +190,10 @@ def test_every_node_prints_the_same_value_in_both_backends():
         Firm.liquidity: sp.sqrt(x) + y**3 - 1 / x + sp.pi,
         Firm.profit: sp.Abs(y - x) + sp.log(x) * sp.exp(-y),
         Firm.dividend: sp.Piecewise(
-            (x, sp.Or(x > 2, sp.Not(y < 1))), (y, sp.Eq(x, y)), (0, True)
+            # a Not of one comparison folds away; of a conjunction it stays a Not
+            (x, sp.Or(x > 2, sp.Not((y < 1) & (x < 3)))),
+            (y, sp.Eq(x, y)),
+            (0, True),
         ),
         Firm.delta: sp.Max(x, y, 1.5) - sp.Min(x, 2 * y),
         Firm.tech_share: x / mean(Firm.output) + lag(x),
@@ -210,10 +211,10 @@ def test_every_node_prints_the_same_value_in_both_backends():
     )
     world = Model()
     register_math(world)
-    world.map(firm_template, firms.with_iri())
-    world.update(render(rule, {}))
+    world.map(template.firm, firms.with_iri())
+    world.update(sparql(rule, {}))
     written = [str(field).split(".")[1] for field in rule]
-    sparql = world.query(
+    graph = world.query(
         _PREFIXES
         + f"SELECT ?f {' '.join(f'?{f}' for f in written)} WHERE {{ "
         + " ".join(f"?f def:{f} ?{f} ." for f in written)
@@ -222,7 +223,7 @@ def test_every_node_prints_the_same_value_in_both_backends():
     lowered = jax_tick([rule])(arrays({"Firm": firms}, [rule]))["Firm"]
     for field in written:
         assert np.asarray(lowered[field]) == pytest.approx(
-            sparql[field].to_numpy(), rel=1e-12
+            graph[field].to_numpy(), rel=1e-12
         ), field
 
 

@@ -36,15 +36,7 @@ from skabm.behaviour.traffic import (
     pedestrianize,
     routes,
 )
-from skabm.ottr import (
-    area_template,
-    commuter_template,
-    link_template,
-    option_template,
-    route_template,
-    links_template,
-    via_template,
-)
+from skabm import template
 from skabm.simulation import RDFSimulator
 from skabm.sparql import _PREFIXES
 
@@ -388,15 +380,15 @@ def frames(sample: float = 0.1, seed: int = 0) -> dict:
 def world(parts: dict) -> Model:
     """A fresh maplib Model of *parts* — a fit advances the one it is given."""
     model = Model()  # every frame in id order: the draws follow the rows, so a seed is a seed
-    model.map(link_template, parts["links"].drop("kind").with_columns(time=pl.col("t0")).sort("id").with_iri("src", "dst"))
+    model.map(template.link, parts["links"].drop("kind").with_columns(time=pl.col("t0")).sort("id").with_iri("src", "dst"))
     areas = pl.DataFrame({"id": ["grand", "petit"], "name": list(AREAS), "geometry": list(AREAS.values())})
-    model.map(area_template, areas.with_iri())
+    model.map(template.area, areas.with_iri())
     links = parts["links"].sort("id")
-    model.map(links_template("area"), area_membership(links, areas).sort("id", "area").with_iri("area"))
-    model.map(option_template, parts["options"].sort("id").with_iri())
-    model.map(route_template, parts["routes"].sort("id").with_iri("option"))
-    model.map(via_template, parts["via"].sort("id", "via").with_iri("via"))
-    model.map(commuter_template, parts["commuters"].select("id", "od", "route", "weight").sort("id").with_iri("route"))
+    model.map(template.links("area"), area_membership(links, areas).sort("id", "area").with_iri("area"))
+    model.map(template.option, parts["options"].sort("id").with_iri())
+    model.map(template.route, parts["routes"].sort("id").with_iri("option"))
+    model.map(template.via, parts["via"].sort("id", "via").with_iri("via"))
+    model.map(template.commuter, parts["commuters"].select("id", "od", "route", "weight").sort("id").with_iri("route"))
     return model
 
 
@@ -415,8 +407,8 @@ def reroute(model: Model, parts: dict) -> int:
     links = parts["links"].drop("car").join(state, on="id")
     cars = parts["census"].filter(pl.col("mode") == "car").select("od", "mode")
     found, via = choice_set(links, parts["nodes"], parts["zones"], parts["ods"], cars, cost="time")
-    model.map(route_template, found.sort("id").with_iri("option"))
-    model.map(via_template, via.sort("id", "via").with_iri("via"))
+    model.map(template.route, found.sort("id").with_iri("option"))
+    model.map(template.via, via.sort("id", "via").with_iri("via"))
     return model.query(_PREFIXES + "SELECT (COUNT(?r) AS ?n) WHERE { ?r a ex:Route }")["n"][0]
 
 

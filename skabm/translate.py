@@ -10,9 +10,9 @@ rules skABM compiles, so its answer runs as the Python it is, with nothing but t
 in scope, and the rules it assigns are the result: ``Rule({...})`` is a readable name
 for the dict itself.
 
-Any template will do: skABM's own (``ottr.TEMPLATES``), ``Model.get_templates()``, or
-one a researcher wrote.  A class ``ottr.agent_template`` built also tells the model
-what each field means and where its links go (``ottr.SCHEMA``).
+Any template will do: skABM's own (``template.TEMPLATES``), ``Model.get_templates()``, or
+one a researcher wrote.  A class ``template.agent`` built also tells the model
+what each field means and where its links go (``template.SCHEMA``).
 """
 
 from __future__ import annotations
@@ -27,10 +27,13 @@ from sympy.stats import Normal, Uniform
 from skabm import dsl
 from skabm.behaviour.learning import expect
 from skabm.dsl import Agents, DSLError, _Rule, is_rule, sparql
-from skabm.ottr import SCHEMA, Link
+from skabm.template import SCHEMA, Link
 
 # A tiny local model: any ``(prompt, lark grammar) -> text`` callable will do.
 MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"  # ~15 GB; the 1.5B fails macro.py
+MLX_MODEL = (
+    "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"  # the same, ~4 GB; Apple silicon
+)
 
 # The DSL as a Lark grammar: every function ends in "(", so no name can pass for one.
 # ``rule`` is appended per call: one alternative per class, keyed by its own fields.
@@ -44,8 +47,8 @@ expr: prod (("+" | "-") prod)*
 prod: unary (("*" | "/") unary)*
 unary: "-" unary | power
 power: atom ("**" unary)?
-atom: NUMBER | FIELD | "(" expr ")" | call
-    | PARAM | HELPER
+atom: NUMBER | FIELD | "(" expr ")" | call | HELPER
+    | PARAM  # dropped with PARAM when the description names no parameter
 call: FUNC expr ")" | MINMAX expr ("," expr)+ ")" | DRAW STRING "," expr "," expr ")"
     | "sp.Piecewise(" (branch ",")* "(" expr "," "True" ")" ")"
     | "expect(" AGG "," CLASSNAME "," STRING ")"
@@ -237,8 +240,61 @@ def _accepts(text: str, lark: str) -> bool:
 
 
 @cache
-def local(name: str = MODEL):  # pragma: no cover - downloads the model on first use
-    """A Hugging Face model, greedy, under a Lark grammar: transformers with an llguidance mask."""
+def local(
+    name: str | None = None,
+):  # pragma: no cover - downloads the model on first use
+    """A Hugging Face model, greedy, under a Lark grammar, with an llguidance mask: through
+    MLX where the ``llm`` extra installed mlx-lm (Apple silicon), else transformers."""
+    from importlib.util import find_spec
+
+    if find_spec("mlx_lm"):
+        return _mlx(name or MLX_MODEL)
+    return _transformers(name or MODEL)
+
+
+def _mlx(name: str):  # pragma: no cover - downloads the model on first use
+    import llguidance as llg
+    import llguidance.hf
+    import llguidance.mlx as mask_mx
+    from mlx_lm import load, stream_generate
+
+    lm, tokenizer = load(name)
+    vocab = llguidance.hf.from_tokenizer(
+        tokenizer._tokenizer, n_vocab=lm.args.vocab_size
+    )
+
+    def run(prompt: str, lark: str) -> str:
+        matcher = llg.LLMatcher(vocab, llg.grammar_from("lark", lark), log_level=0)
+        mask = mask_mx.allocate_token_bitmask(1, vocab.vocab_size)
+        chat = [{"role": "user", "content": prompt}]
+        text = tokenizer.apply_chat_template(
+            chat, add_generation_prompt=True, tokenize=False
+        )
+        seen = 0
+
+        def constrain(tokens, logits):
+            nonlocal seen
+            if seen:  # every call after the first follows the token just sampled
+                matcher.consume_token(int(tokens[-1]))
+            seen += 1
+            mask_mx.fill_next_token_bitmask(matcher, mask)
+            return mask_mx.apply_token_bitmask(logits, mask)
+
+        out = []  # stop on the grammar: mlx-lm's stop ids come from the model config,
+        for (
+            step
+        ) in stream_generate(  # which need not hold the end token the mask allows
+            lm, tokenizer, text, max_tokens=1024, logits_processors=[constrain]
+        ):
+            if step.token == vocab.eos_token:
+                break
+            out.append(step.token)
+        return tokenizer.decode(out)
+
+    return run
+
+
+def _transformers(name: str):  # pragma: no cover - downloads the model on first use
     import llguidance as llg
     import llguidance.hf
     import llguidance.numpy as mask_np
@@ -322,17 +378,15 @@ def rules(description: str, templates, model=None) -> dict:
         **{op.__name__: op for op in (*dsl.OPERATORS, dsl.lag, dsl.coalesce)},
         **{k: Agents(k, " ".join(fields)) for k, fields in classes.items()},
     )
-    try:
-        exec(text, {"__builtins__": {}}, scope)  # noqa: S102 - checked: DSL only
-    except Exception as error:
-        raise DSLError(f"the generated rules do not compile: {error}") from error
+    exec(text, {"__builtins__": {}}, scope)  # noqa: S102 - checked: DSL only
     named = {id(v): name for name, v in scope.items() if is_rule(v)}
-    if not all(id(r) in named for r in scope["RULES"]):
-        raise DSLError(f"RULES lists something that is not a rule: {scope['RULES']}")
-    found = {named[id(r)]: r for r in scope["RULES"]}
-    idle = set(named.values()) - set(found)
-    if idle:
-        raise DSLError(f"rules written but never run: {sorted(idle)}")
+    listed = [named.get(id(r), str(r)) for r in scope["RULES"]]
+    if set(listed) != set(named.values()):
+        raise DSLError(
+            f"RULES must run every rule written, and only rules: it runs {listed}, "
+            f"the rules written are {sorted(named.values())}"
+        )
+    found = {name: scope[name] for name in listed}
     for rule in found.values():  # a dict is checked when it compiles: compile it now
         sparql(rule, dict.fromkeys(_Rule(rule).parameters(), 1.0))
     return found

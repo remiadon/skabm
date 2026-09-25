@@ -17,9 +17,9 @@ from maplib import Model
 from sklearn.base import clone
 from worlds import world
 
+from skabm import template
 from skabm.behaviour.firm import Firm, firm_produce, ownership
 from skabm.behaviour.household import household_income, initial
-from skabm.ottr import firm_template, household_template
 from skabm.simulation import RDFSimulator
 from skabm.sparql import DEF_NS
 
@@ -162,8 +162,8 @@ def test_fit_takes_a_model_someone_else_built(params):
     tick.  It is advanced in place, so the caller keeps the handle.
     """
     world = Model()
-    world.map(firm_template, FIRMS.with_iri())
-    world.map(household_template, HOUSEHOLDS.with_iri("employer", "owns"))
+    world.map(template.firm, FIRMS.with_iri())
+    world.map(template.household, HOUSEHOLDS.with_iri("employer", "owns"))
     world.update(
         f"{_PREFIX} DELETE {{ ?f def:price ?p }} INSERT {{ ?f def:price 3e0 }} "
         "WHERE { ?f a ex:Firm ; def:price ?p }"

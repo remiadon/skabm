@@ -97,26 +97,6 @@ def state_extract(model) -> pl.DataFrame:
     )
 
 
-def geo_state_extract(model) -> pl.DataFrame:
-    """``state_extract`` with the coordinates parsed out of the cell's WKT point."""
-    return model.query(
-        _PREFIXES
-        + """
-    SELECT ?agent ?group ?x ?y ?share_similar
-    WHERE {
-        ?agent a ex:Person ;
-               def:group ?group ;
-               def:share_similar ?share_similar ;
-               def:location ?c .
-        ?c def:geometry ?w .
-        BIND(STRBEFORE(STRAFTER(?w, "("), ")") AS ?xy)
-        BIND(xsd:double(STRBEFORE(?xy, " ")) AS ?x)
-        BIND(xsd:double(STRAFTER(?xy, " ")) AS ?y)
-    }
-    """
-    )
-
-
 RULES = [OCCUPANCY, HAPPINESS, CELL_RANK, PERSON_RANK, RELOCATE]
 
 
@@ -142,7 +122,7 @@ def settle(
 
 def grid_neighbors(cells: pl.DataFrame) -> pl.DataFrame:
     """``(id, neighbor)``: the up to eight cells one step away in x, y or both, a bounded
-    Moore neighbourhood, for ``links_template("neighbor")``."""
+    Moore neighbourhood, for ``template.links("neighbor")``."""
     steps = (
         pl.DataFrame({"dx": [-1.0, 0.0, 1.0]})
         .join(pl.DataFrame({"dy": [-1.0, 0.0, 1.0]}), how="cross")

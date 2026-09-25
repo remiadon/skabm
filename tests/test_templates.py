@@ -1,4 +1,4 @@
-"""Agent templates (``skabm.ottr``) — the three failures ``map_default``
+"""Agent templates (``skabm.template``) — the three failures ``map_default``
 could not catch, the one thing it did that still has to work, and a drift tripwire:
 the templates are hand-written, so only a test keeps them in step with the rules.
 """
@@ -11,17 +11,10 @@ import pytest
 from maplib import Model
 
 import skabm.behaviour
-from skabm.dsl import is_rule
-from skabm.ottr import (
-    LINK,
-    SCHEMA,
-    TEMPLATES,
-    Link,
-    agent_template,
-    firm_template,
-    household_template,
-)
-from skabm.sparql import EX_NS, parameters
+from skabm import template
+from skabm.dsl import _Rule, is_rule
+from skabm.sparql import EX_NS
+from skabm.template import LINK, SCHEMA, TEMPLATES, Link
 
 FIRMS = pl.DataFrame(
     {
@@ -43,16 +36,16 @@ def predicates(model) -> set:
 def test_the_manual_path_is_maplib_and_it_names_the_missing_column():
     """The workflow the templates exist for: check a frame before simulating."""
     model = Model()
-    model.map(firm_template, FIRMS)
+    model.map(template.firm, FIRMS)
     assert model.query(f"PREFIX ex:<{EX_NS}> SELECT ?f WHERE {{ ?f a ex:Firm }}").height
     with pytest.raises(Exception, match="alpha"):
-        model.map(firm_template, FIRMS.drop("alpha"))
+        model.map(template.firm, FIRMS.drop("alpha"))
 
 
 def test_a_misspelt_column_is_rejected_rather_than_becoming_a_predicate():
     """``map_default`` would have made ``marign`` a predicate nothing reads."""
     with pytest.raises(Exception, match="margin"):
-        Model().map(firm_template, FIRMS.rename({"margin": "marign"}))
+        Model().map(template.firm, FIRMS.rename({"margin": "marign"}))
 
 
 def test_any_float_width_joins_and_an_integer_is_refused_by_name():
@@ -63,7 +56,7 @@ def test_any_float_width_joins_and_an_integer_is_refused_by_name():
     refuses it at map time, naming the column.
     """
     model = Model()
-    model.map(firm_template, FIRMS.with_columns(pl.col("size").cast(pl.Float32)))
+    model.map(template.firm, FIRMS.with_columns(pl.col("size").cast(pl.Float32)))
     joined = model.query(
         f"PREFIX def:<urn:maplib_default:> PREFIX ex:<{EX_NS}> "
         "SELECT ?f WHERE { ?f a ex:Firm ; def:size ?s . FILTER(?s = 3e0) }"
@@ -71,7 +64,7 @@ def test_any_float_width_joins_and_an_integer_is_refused_by_name():
     assert joined.height == 1
 
     with pytest.raises(Exception, match="size"):
-        Model().map(firm_template, FIRMS.with_columns(pl.col("size").cast(pl.Int64)))
+        Model().map(template.firm, FIRMS.with_columns(pl.col("size").cast(pl.Int64)))
 
 
 def test_with_iri_mints_ids_by_position_when_a_frame_has_none():
@@ -88,8 +81,8 @@ def test_a_declared_link_needs_no_mapping_order():
         {"id": ["hh_0", "hh_1"], "psi": [0.9, 0.9], "employer": ["firm_0", None]}
     ).with_iri("employer")
     model = Model()
-    model.map(household_template, households)
-    model.map(firm_template, FIRMS)
+    model.map(template.household, households)
+    model.map(template.firm, FIRMS)
     edge = model.query(
         f"PREFIX def:<urn:maplib_default:> PREFIX ex:<{EX_NS}> "
         "SELECT ?f WHERE { ?h def:employer ?f . ?f a ex:Firm }"
@@ -102,9 +95,9 @@ def test_an_undeclared_link_is_named_not_guessed():
     becomes an edge because the caller says so."""
     auditors = pl.DataFrame({"id": ["a_0"], "audits": ["firm_1"]})
     model = Model()
-    model.map(firm_template, FIRMS)
+    model.map(template.firm, FIRMS)
     model.map(
-        agent_template("Auditor", columns={"audits": LINK}),
+        template.agent("Auditor", columns={"audits": LINK}),
         auditors.with_iri("audits"),
     )
     edge = model.query(
@@ -142,5 +135,5 @@ def test_every_cited_value_is_read_and_has_one_value():
             if is_rule(rule)
         ]
         cited = {str(k) for k in getattr(module, "PARAMETERS", {})}
-        assert cited <= set().union(*map(parameters, rules)), info.name
+        assert cited <= set().union(*(_Rule(r).parameters() for r in rules)), info.name
     assert skabm.behaviour.defaults()  # raises on a name with two values

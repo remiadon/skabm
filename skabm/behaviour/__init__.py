@@ -18,13 +18,15 @@ from functools import cache
 @cache
 def defaults() -> dict:
     """Every module's ``PARAMETERS``, by name; a name has one value across modules."""
-    merged: dict = {}
-    for info in pkgutil.iter_modules(__path__):
-        module = importlib.import_module(f"{__name__}.{info.name}")
-        for symbol, value in getattr(module, "PARAMETERS", {}).items():
-            name = str(symbol)
-            if merged.setdefault(name, value) != value:
-                raise ValueError(
-                    f"{name} is {merged[name]} in one module, {value} in {module.__name__}"
-                )
-    return merged
+    cited = {
+        (str(symbol), value)
+        for info in pkgutil.iter_modules(__path__)
+        for symbol, value in getattr(
+            importlib.import_module(f"{__name__}.{info.name}"), "PARAMETERS", {}
+        ).items()
+    }
+    names = [name for name, _ in cited]
+    assert len(names) == len(set(names)), (
+        f"a name with two values: {sorted(c for c in cited if names.count(c[0]) > 1)}"
+    )
+    return dict(cited)
