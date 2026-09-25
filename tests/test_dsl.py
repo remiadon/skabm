@@ -16,8 +16,7 @@ from maplib import Model
 from sympy.stats import Exponential, Normal, Uniform
 from test_labour import NEVER, clock, market, occupations, ring
 
-from skabm.behaviour.firm import firm_entry
-from skabm.behaviour.labour import LABOUR_UPDATE_RULES
+from skabm.behaviour import labour
 from skabm.behaviour.labour import PARAMETERS as LABOUR
 from skabm.behaviour.schelling import RELOCATE
 from skabm.behaviour.traffic import area_traffic
@@ -49,7 +48,7 @@ def labour_state():
         pl.DataFrame({"id": [f"occ_{i}" for i in range(N)], "employment": [1e3] * N})
     )
     frames = {"Occupation": occ, "Edge": ring(N), "Clock": clock()}
-    return occ, arrays(frames, LABOUR_UPDATE_RULES)
+    return occ, arrays(frames, labour.RULES)
 
 
 def test_sparql_and_jax_agree_on_the_labour_market():
@@ -63,7 +62,7 @@ def test_sparql_and_jax_agree_on_the_labour_market():
     )
 
     occ, state = labour_state()
-    tick = jax.jit(jax_tick(LABOUR_UPDATE_RULES))
+    tick = jax.jit(jax_tick(labour.RULES))
     for _ in range(TICKS):
         state = tick(state, CALM)
 
@@ -77,7 +76,7 @@ def test_a_gradient_flows_through_the_whole_run():
     """d(unemployment after 25 ticks)/d(gamma), through ``lax.scan``, as a finite
     difference of the same run would have it."""
     _, start = labour_state()
-    tick = jax_tick(LABOUR_UPDATE_RULES)
+    tick = jax_tick(labour.RULES)
 
     def unemployed(gamma):
         params = {**CALM, "gamma": gamma}
@@ -144,8 +143,8 @@ def test_rules_are_checked_when_compiled():
 
 
 def test_jax_refuses_what_it_cannot_shape():
-    with pytest.raises(TypeError, match="firm_entry"):
-        jax_tick([firm_entry])  # adds agents: stays SPARQL
+    with pytest.raises(TypeError, match="SPARQL text"):
+        jax_tick(["DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }"])
     with pytest.raises(DSLError, match="no JAX form"):
         jax_tick([RELOCATE])  # pick has no fixed-shape form yet
     with pytest.raises(DSLError, match="no JAX form"):
@@ -228,27 +227,25 @@ def test_every_node_prints_the_same_value_in_both_backends():
 
 
 def test_the_poledna_quarter_runs_in_jax_too(poledna_params):
-    """The default rule set, init rules and SAC learners included, stepped in JAX
-    from the same frames, lands where the SPARQL simulator does."""
+    """The default rule set and SAC learners, stepped in JAX from the same frames,
+    lands where the SPARQL simulator does."""
     from test_simulation import CENTRAL_BANK, FIRMS, HOUSEHOLDS, OVERRIDES
     from worlds import world
 
-    from skabm.behaviour.household import household_income_init, household_wealth_init
     from skabm.behaviour.learning import sac
-    from skabm.simulation import DEFAULT_UPDATE_RULES, RDFSimulator
+    from skabm.simulation import DEFAULT_RULES, RDFSimulator
 
     params, ticks = {**poledna_params, **OVERRIDES}, 6
-    init = (household_income_init, household_wealth_init)
-    sim = RDFSimulator(init_rules=init, params=params, n_periods=ticks)
+    sim = RDFSimulator(params=params, n_periods=ticks)
     sim.fit(world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK))
     sparql = sim.extract().with_columns(id=pl.col("agent").str.extract(r"#(.*)>$"))
 
     frames = {"Firm": FIRMS, "Household": HOUSEHOLDS, "CentralBank": CENTRAL_BANK}
     learners = [sac(*signal) for signal in sorted(sim._consumed)]
-    state = arrays(frames, [*init, *DEFAULT_UPDATE_RULES, *learners])
+    state = arrays(frames, [*DEFAULT_RULES, *learners])
     key = jax.random.key(0)  # the draws are there, scaled by a zero sigma
-    learn, quarter = jax_tick(learners), jax_tick(DEFAULT_UPDATE_RULES)
-    state = learn(jax_tick(init)(state, params), params)
+    learn, quarter = jax_tick(learners), jax_tick(DEFAULT_RULES)
+    state = learn(state, params)  # the opening state is observed, as in SPARQL
     for _ in range(ticks):
         state = learn(quarter(state, params, key), params)
 

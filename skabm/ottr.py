@@ -144,8 +144,8 @@ firm_template = agent_template(
         "delta": "depreciation as a share of output (Eurostat IO table)",
         "tech_share": "intermediate inputs as a share of output (Eurostat IO table)",
         "industry": "NACE industry code",
-        "holds_at": "a bank the firm keeps deposits at (bank.bank_depositors)",
-        "flees_amount": "deposits pulled from a distressed bank (bank.interbank_contagion)",
+        "holds_at": "the bank the firm keeps deposits at (bank.depositors)",
+        "flees_amount": "deposits pulled from its bank this step, if distressed",
     },
 )
 
@@ -160,8 +160,8 @@ household_template = agent_template(
         "wealth": "deposits; saving adds to it, consumption draws on it",
         "employer": "the firm this household works for; empty if not employed",
         "owns": "the firm this household owns and receives dividends from",
-        "holds_at": "a bank the household keeps deposits at (bank.bank_depositors)",
-        "flees_amount": "deposits pulled from a distressed bank (bank.interbank_contagion)",
+        "holds_at": "the bank the household keeps deposits at (bank.depositors)",
+        "flees_amount": "deposits pulled from its bank this step, if distressed",
     },
 )
 
@@ -200,12 +200,13 @@ foreign_firm_template = agent_template(
 
 bank_template = agent_template(
     "Bank",
-    "deposit_share leverage capital_ratio",
+    "deposit_share leverage capital_ratio distressed",
     required=("deposit_share", "leverage"),
     doc={
         "deposit_share": "probability that a depositor banks here",
         "leverage": "assets over capital",
         "capital_ratio": "capital over assets; distressed below a threshold",
+        "distressed": "1 when the bank is distressed, else 0",
     },
 )
 
@@ -217,7 +218,7 @@ cell_template = agent_template(
         "x": "column on the grid",
         "y": "row on the grid",
         "geometry": "WKT point, for irregular spaces",
-        "neighbor": "the cells next to this one (schelling.GRID_NEIGHBORHOOD)",
+        "neighbor": "the cells next to this one (schelling.grid_neighbors, links_template)",
         "draw": "uniform draw ranking the vacant cells this step",
         "occupied": "people living in the cell",
         "resident": "the group of the person living in the cell",
@@ -304,7 +305,7 @@ link_template = agent_template(
         "dst": "road-network node the link ends at",
         "name": "street name",
         "geometry": "WKT line",
-        "area": "the areas the link touches (traffic.area_membership)",
+        "area": "the areas the link touches (traffic.area_membership, links_template)",
     },
 )
 route_template = agent_template(
@@ -372,14 +373,21 @@ area_template = agent_template(
         "geometry": "WKT polygon",
     },
 )
-via_template = Template(
-    EX.suf("via"),
-    [
-        Parameter(Variable("id"), rdf_type=RDFType.IRI),
-        Parameter(Variable("via"), rdf_type=RDFType.IRI),
-    ],
-    [Triple(Variable("id"), DEF.suf("via"), Variable("via"))],
-)
+
+
+def links_template(field: str) -> Template:
+    """A link an agent holds several of, as a long frame: one ``(id, field)`` row each."""
+    return Template(
+        EX.suf(field),
+        [
+            Parameter(Variable("id"), rdf_type=RDFType.IRI),
+            Parameter(Variable(field), rdf_type=RDFType.IRI),
+        ],
+        [Triple(Variable("id"), DEF.suf(field), Variable(field))],
+    )
+
+
+via_template = links_template("via")
 
 TEMPLATES = {
     template.iri.iri[len(EX_NS) :]: template

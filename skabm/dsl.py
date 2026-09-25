@@ -27,7 +27,7 @@ The SPARQL printer brackets every operation (maplib groups ``a - b + c`` from th
 right), writes every number as a double, defaults every sum with ``COALESCE``
 (``IF(BOUND)`` turns into a struct column on an empty result), and binds each draw once
 (an inline draw re-draws on every row of a join).  JAX is ``sympy.lambdify``, handed the
-graph functions.  A rule that adds agents (``firm.firm_entry``) stays SPARQL text.
+graph functions.  SPARQL text passed to the simulator has no JAX form.
 """
 
 from __future__ import annotations
@@ -763,7 +763,7 @@ def jax_tick(rules):
     if plain:
         raise TypeError(
             f"{len(plain)} rule(s) are SPARQL text, not a rule dict: JAX has nothing "
-            "to compile (a rule that adds agents, like firm_entry, stays SPARQL)"
+            "to compile"
         )
     graph = {  # a link arrives as (row indices, size of the class it points to)
         "gather": lambda link, value: jnp.where(link[0] >= 0, value[link[0]], jnp.nan),

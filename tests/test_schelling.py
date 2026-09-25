@@ -1,41 +1,39 @@
 """Schelling segregation on the RDFSimulator machinery — a tiny suite.
 
 The model lives in skabm/behaviour/schelling.py: the 2D grid is a `Cell` population,
-the Moore neighbourhood a CONSTRUCT, the people are *derived* by the SETTLE
-rule from `$density`, and SCHELLING_UPDATE_RULES advance the world.
-There is no Eurostat access and no calibration layer here — the `Cell` frame
-is purely spatial (x/y + id), no random column.
+the Moore neighbourhood and the Person population are data (`grid_neighbors`,
+`settle`), and `RULES` advances the world.  There is no Eurostat access and no
+calibration layer here.
 
-Randomness comes from the `pr:uniform` SPARQL UDF
-(`rules.register_polars_random`, maplib >= 0.20.26); `RDFSimulator(random_seed=)`
-pins it, so a whole run is reproducible to the last digit — see
-`test_reproducible_under_random_seed`.
+Randomness comes from `settle(seed=)` and the `pr:uniform` SPARQL UDF, which
+`RDFSimulator(random_seed=)` pins, so a whole run is reproducible to the last digit.
 
-Covered: population derivation + user override, one-person-per-cell (the
-rank-join matching), the core segregation result, reproducibility, and the
-GeoSPARQL spatial-structure swap.
+Covered: settlement, one-person-per-cell (the rank-matched move), the core
+segregation result, reproducibility, and the swap to points in continuous space.
 """
 
 import polars as pl
 import polars_random as pr
+from maplib import Model
 from worlds import world
 
 from skabm.behaviour.schelling import (
     PARAMETERS,
-    SCHELLING_GEO_INIT_RULES,
-    SCHELLING_INIT_RULES,
-    SCHELLING_UPDATE_RULES,
+    RULES,
+    geo_neighbors,
     geo_state_extract,
+    grid_neighbors,
+    settle,
     state_extract,
     want_similar,
 )
+from skabm.ottr import links_template
 from skabm.simulation import RDFSimulator
 from skabm.sparql import _PREFIXES
 
 
 def grid(size: int) -> pl.DataFrame:
-    """A size x size Cell population: just float coordinates and an id — the
-    randomness lives in the pr:uniform UDF, not in the data."""
+    """A size x size Cell population: float coordinates and an id."""
     return (
         pl.DataFrame({"x": range(size)})
         .join(pl.DataFrame({"y": range(size)}), how="cross")
@@ -47,63 +45,37 @@ def grid(size: int) -> pl.DataFrame:
     )
 
 
+def town(cells: pl.DataFrame, neighbors: pl.DataFrame, seed: int = 0) -> Model:
+    """The cells, their neighbour links and the people settled on them."""
+    model = world(links=("location",), Cell=cells, Person=settle(cells, seed=seed))
+    model.map(links_template("neighbor"), neighbors.with_iri("neighbor"))
+    return model
+
+
+def simulator(n_periods: int, seed: int = 0, extract=state_extract) -> RDFSimulator:
+    return RDFSimulator(
+        rules=RULES,
+        n_periods=n_periods,
+        state_extract=extract,
+        random_seed=seed,
+    )
+
+
 def test_settle_derives_population():
-    # Passing only Cell, SETTLE creates the people.  At density 1.0 every cell
-    # is occupied (the occupancy draw is always < 1), so the count is exactly
-    # the cell count — no statistics needed.  Each settler sits on a distinct
-    # cell, and both groups appear.
-    params = {"density": 1.0}
-    sim = RDFSimulator(
-        init_rules=SCHELLING_INIT_RULES,
-        update_rules=SCHELLING_UPDATE_RULES,
-        params=params,
-        n_periods=0,
-        state_extract=state_extract,
-        random_seed=0,
-    ).fit(world(Cell=grid(6)))
-    people = sim.model_.query(
-        _PREFIXES
-        + "SELECT ?p ?g ?c WHERE { ?p a ex:Person ; def:group ?g ; def:location ?c }"
-    )
-    assert people.height == 36  # 6 x 6, all cells settled
-    assert people["c"].n_unique() == 36  # one settler per cell
-    assert set(people["g"].to_list()) == {0.0, 1.0}  # both of n_groups=2
-
-
-def test_settle_yields_to_user_population():
-    # The SETTLE gate (FILTER NOT EXISTS a ex:Person) mirrors FIRM_OWNERSHIP:
-    # a caller-supplied Person population turns settlement off entirely.  Such
-    # persons need no rng column: the rules draw def:draw each tick.
-    persons = pl.DataFrame(
-        {
-            "id": ["alice", "bob"],
-            "group": [0.0, 1.0],
-            "location": ["cell_0_0", "cell_1_1"],
-        }
-    )
-    sim = RDFSimulator(
-        init_rules=SCHELLING_INIT_RULES,
-        update_rules=SCHELLING_UPDATE_RULES,
-        n_periods=1,
-        state_extract=state_extract,
-        random_seed=0,
-    ).fit(world(links=("location",), Cell=grid(6), Person=persons))
-    n = sim.model_.query(
-        _PREFIXES + "SELECT (COUNT(?p) AS ?n) WHERE { ?p a ex:Person }"
-    )["n"][0]
-    assert n == 2  # SETTLE produced nobody
+    # At density 1.0 every cell is occupied (the draw is always < 1), so the
+    # count is exactly the cell count, one settler per cell, and both groups appear.
+    people = settle(grid(6), density=1.0)
+    assert people.height == 36
+    assert people["location"].n_unique() == 36
+    assert set(people["group"]) == {0.0, 1.0}
+    # and the Moore neighbourhood of a bounded 6 x 6 grid has 4*3 + 16*5 + 16*8 links
+    assert grid_neighbors(grid(6)).height == 4 * 3 + 16 * 5 + 16 * 8
 
 
 def test_one_person_per_cell_invariant():
     # RELOCATE's rank-join must never place two movers on the same cell.  After
     # several ticks, occupied cells still equal people — matching is one-to-one.
-    sim = RDFSimulator(
-        init_rules=SCHELLING_INIT_RULES,
-        update_rules=SCHELLING_UPDATE_RULES,
-        n_periods=8,
-        state_extract=state_extract,
-        random_seed=0,
-    ).fit(world(Cell=grid(12)))
+    sim = simulator(8).fit(town(grid(12), grid_neighbors(grid(12))))
     occ = sim.model_.query(
         _PREFIXES + "SELECT ?p ?c WHERE { ?p a ex:Person ; def:location ?c }"
     )
@@ -114,15 +86,9 @@ def test_segregation_rises_and_converges():
     # The result Schelling is famous for: mild same-group preference drives the
     # share of similar neighbours up until nobody is unhappy.
     want = PARAMETERS[want_similar]  # 3 of 8 Moore neighbours, Schelling (1971)
-    sim = RDFSimulator(
-        init_rules=SCHELLING_INIT_RULES,
-        update_rules=SCHELLING_UPDATE_RULES,
-        n_periods=30,
-        state_extract=state_extract,
-        random_seed=0,
-    )
+    sim = simulator(30)
     seg, unhappy = [], []
-    for row in sim.fit_iter(world(Cell=grid(12))):
+    for row in sim.fit_iter(town(grid(12), grid_neighbors(grid(12)))):
         seg.append(row["sig__AVG__Person__share_similar"])
         unhappy.append((sim.extract()["share_similar"] < want).sum())
     assert seg[-1] > seg[0] + 0.2  # substantial rise from the mixed start
@@ -130,19 +96,12 @@ def test_segregation_rises_and_converges():
 
 
 def test_reproducible_under_random_seed():
-    # The pr:uniform UDF draws the reproducible size=N Series form, so a fixed
-    # random_seed pins the whole trajectory; a different seed changes it.
+    # settle(seed=) and random_seed pin the whole trajectory; another seed changes it.
     def seg_path(seed: int) -> list[float]:
-        sim = RDFSimulator(
-            init_rules=SCHELLING_INIT_RULES,
-            update_rules=SCHELLING_UPDATE_RULES,
-            n_periods=10,
-            state_extract=state_extract,
-            random_seed=seed,
-        )
+        world = town(grid(10), grid_neighbors(grid(10)), seed)
         return [
             round(row["sig__AVG__Person__share_similar"], 6)
-            for row in sim.fit_iter(world(Cell=grid(10)))
+            for row in simulator(10, seed).fit_iter(world)
         ]
 
     assert seg_path(0) == seg_path(0)
@@ -150,11 +109,9 @@ def test_reproducible_under_random_seed():
 
 
 def test_geo_variant_plugs_in():
-    # Swapping the lattice for continuous GeoSPARQL points changes only the
-    # neighbourhood rule (GEO_NEIGHBORHOOD) and the coordinate column: SETTLE,
-    # the update rules and RDFSimulator are reused verbatim, and segregation
-    # still rises.  (maplib has no geof: functions, so the distance test is
-    # hand-rolled from the WKT string — see skabm/behaviour/schelling.py.)
+    # Swapping the lattice for points in continuous space changes only the
+    # neighbour links (geo_neighbors) and the coordinate column: settle, the update
+    # rules and RDFSimulator are reused verbatim, and segregation still rises.
     pr.set_random_seed(0)  # reproducible point positions
     cells = (
         pl.select(
@@ -167,19 +124,13 @@ def test_geo_variant_plugs_in():
         )
         .drop("x", "y")
     )
-    sim = RDFSimulator(
-        init_rules=SCHELLING_GEO_INIT_RULES,
-        update_rules=SCHELLING_UPDATE_RULES,
-        n_periods=15,
-        state_extract=geo_state_extract,
-        random_seed=0,
-    )
+    sim = simulator(15, extract=geo_state_extract)
     seg = [
         row["sig__AVG__Person__share_similar"]
-        for row in sim.fit_iter(world(Cell=cells))
+        for row in sim.fit_iter(town(cells, geo_neighbors(cells)))
     ]
     neighbours = sim.model_.query(
         _PREFIXES + "SELECT (COUNT(*) AS ?n) WHERE { ?c def:neighbor ?c2 }"
     )["n"][0]
-    assert neighbours > 0  # GEO_NEIGHBORHOOD wired a topology from geometry
+    assert neighbours > 0  # geo_neighbors wired a topology from geometry
     assert seg[-1] > seg[0]  # and the same dynamics segregate on it

@@ -52,7 +52,7 @@ def firms() -> Model:
 
 @pytest.fixture
 def params(poledna_params):
-    return {**poledna_params, "total_deposits": 1000.0}
+    return poledna_params
 
 
 @pytest.fixture
@@ -92,7 +92,7 @@ def test_measuring_needs_no_database():
     assert H.consumed([learned]) == {OUTPUT}
     assert H.consumed([PLAIN]) == set()
 
-    bare = RDFSimulator(init_rules=(), update_rules=(PLAIN,), n_periods=2)
+    bare = RDFSimulator(rules=(PLAIN,), n_periods=2)
     run = pl.DataFrame(bare.fit_iter(firms()))
     assert bare.connection_ is None
     assert set(run.columns) == {
@@ -104,16 +104,13 @@ def test_measuring_needs_no_database():
         bare.history()
 
     kept = RDFSimulator(
-        init_rules=(),
-        update_rules=(PLAIN,),
+        rules=(PLAIN,),
         n_periods=2,
         duckdb_connection=H.connect(None),
     ).fit(firms())
     assert set(kept.history()["signal"]) == set(run.columns) - {"t"}
 
-    narrow = RDFSimulator(
-        init_rules=(), update_rules=(PLAIN,), n_periods=1, track=False
-    )
+    narrow = RDFSimulator(rules=(PLAIN,), n_periods=1, track=False)
     *_, row = narrow.fit_iter(firms())
     assert set(row) == {"t"}  # this rule set consumes nothing, so nothing is left
 

@@ -25,86 +25,21 @@ cell's rank equals the person's rank, and the person's share_similar is below th
 parameter want_similar; among such cells the order is the cell's rank.
 """
 
-from string import Template
-
+import numpy as np
 import polars as pl
 import sympy as sp
+from scipy.spatial import cKDTree
 from sympy.stats import Uniform
 
 from skabm.dsl import Agents, coalesce, pick, running_sum, sum_over
-from skabm.sparql import _PREFIXES, EX_NS
+from skabm.sparql import _PREFIXES
 
 # Schelling (1971), J. Math. Sociology 1(2); AMBER segregation demo
-density, n_groups, radius = sp.symbols("density n_groups radius")
-want_similar = sp.symbols("want_similar")
+want_similar = sp.Symbol("want_similar")
 PARAMETERS = {
-    density: 0.8,  # AMBER's p['density']: per-cell occupancy probability
-    n_groups: 2.0,  # AMBER's p['n_groups']
-    radius: 1.7,  # scenario knob: neighbour cutoff, in the points' units
     want_similar: 0.375,  # 3 of 8 Moore neighbours, Schelling (1971)
 }
 
-# coordinates are doubles: a join on ?x + ?dx matches terms, not values
-# The space is one relation, def:neighbor: GRID_NEIGHBORHOOD builds it on a lattice,
-# GEO_NEIGHBORHOOD from WKT points (no geof:distance in maplib yet, so the distance
-# is parsed out of the strings).
-# A cell's neighbours are the up to eight cells one step away in x, y or both: a
-# bounded Moore neighbourhood.
-GRID_NEIGHBORHOOD = Template(
-    _PREFIXES
-    + """
-    CONSTRUCT { ?c def:neighbor ?c2 }
-    WHERE {
-        VALUES (?dx ?dy) {
-            (-1e0 -1e0) (-1e0 0e0) (-1e0 1e0)
-            ( 0e0 -1e0)            ( 0e0 1e0)
-            ( 1e0 -1e0) ( 1e0 0e0) ( 1e0 1e0)
-        }
-        ?c a ex:Cell ; def:x ?x ; def:y ?y .
-        BIND(?x + ?dx AS ?nx)
-        BIND(?y + ?dy AS ?ny)
-        ?c2 a ex:Cell ; def:x ?nx ; def:y ?ny .
-    }
-    """
-)
-# Unless people already exist, each cell is settled with probability density by one
-# person, of a group drawn uniformly among n_groups.
-SETTLE = Template(
-    _PREFIXES
-    + """
-    CONSTRUCT {
-        ?p a ex:Person . ?p def:location ?c . ?p def:group ?g
-    }
-    WHERE {
-        FILTER NOT EXISTS { ?existing a ex:Person }
-        ?c a ex:Cell .
-        BIND(pr:uniform(0e0, 1e0) AS ?u_occ)
-        FILTER(?u_occ < $density)
-        BIND(pr:uniform(0e0, 1e0) AS ?u_grp)
-        BIND(xsd:double(FLOOR(?u_grp * $n_groups)) AS ?g)
-        BIND(IRI(CONCAT(\""""
-    + EX_NS
-    + """settler_", STRAFTER(STR(?c), "#"))) AS ?p)
-    }
-    """
-)
-# A cell's neighbours are the other cells whose point lies within radius of its own.
-GEO_NEIGHBORHOOD = Template(
-    _PREFIXES
-    + """
-    CONSTRUCT { ?c def:neighbor ?c2 }
-    WHERE {
-        ?c  a ex:Cell ; def:geometry ?w1 .
-        ?c2 a ex:Cell ; def:geometry ?w2 .
-        FILTER(?c != ?c2)
-        BIND(STRBEFORE(STRAFTER(?w1, "("), ")") AS ?xy1)
-        BIND(STRBEFORE(STRAFTER(?w2, "("), ")") AS ?xy2)
-        BIND(xsd:double(STRBEFORE(?xy1, " ")) - xsd:double(STRBEFORE(?xy2, " ")) AS ?dx)
-        BIND(xsd:double(STRAFTER(?xy1, " ")) - xsd:double(STRAFTER(?xy2, " ")) AS ?dy)
-        FILTER(?dx * ?dx + ?dy * ?dy <= $radius * $radius)
-    }
-    """
-)
 Cell, Person = Agents("Cell"), Agents("Person")
 
 OCCUPANCY = {
@@ -182,6 +117,56 @@ def geo_state_extract(model) -> pl.DataFrame:
     )
 
 
-SCHELLING_INIT_RULES = (GRID_NEIGHBORHOOD, SETTLE)
-SCHELLING_GEO_INIT_RULES = (GEO_NEIGHBORHOOD, SETTLE)
-SCHELLING_UPDATE_RULES = (OCCUPANCY, HAPPINESS, CELL_RANK, PERSON_RANK, RELOCATE)
+RULES = [OCCUPANCY, HAPPINESS, CELL_RANK, PERSON_RANK, RELOCATE]
+
+
+def settle(
+    cells: pl.DataFrame,
+    density: float = 0.8,  # AMBER's p['density']: per-cell occupancy probability
+    n_groups: int = 2,  # AMBER's p['n_groups']
+    seed: int = 0,
+) -> pl.DataFrame:
+    """The Person population: each cell settled with probability *density* by one person
+    (``settler_<cell>``), of a group drawn uniformly among *n_groups*."""
+    rng = np.random.default_rng(seed)
+    settled = rng.random(cells.height) < density
+    group = np.floor(rng.random(cells.height) * n_groups)
+    return pl.DataFrame(
+        {
+            "id": ("settler_" + cells["id"]).filter(pl.Series(settled)),
+            "group": group[settled],
+            "location": cells["id"].filter(pl.Series(settled)),
+        }
+    )
+
+
+def grid_neighbors(cells: pl.DataFrame) -> pl.DataFrame:
+    """``(id, neighbor)``: the up to eight cells one step away in x, y or both, a bounded
+    Moore neighbourhood, for ``links_template("neighbor")``."""
+    steps = (
+        pl.DataFrame({"dx": [-1.0, 0.0, 1.0]})
+        .join(pl.DataFrame({"dy": [-1.0, 0.0, 1.0]}), how="cross")
+        .filter((pl.col("dx") != 0) | (pl.col("dy") != 0))
+    )
+    return (
+        cells.select("id", "x", "y")
+        .join(steps, how="cross")
+        .select("id", x=pl.col("x") + pl.col("dx"), y=pl.col("y") + pl.col("dy"))
+        .join(cells.select(neighbor="id", x="x", y="y"), on=["x", "y"])
+        .select("id", "neighbor")
+    )
+
+
+def geo_neighbors(
+    cells: pl.DataFrame,
+    radius: float = 1.7,  # scenario knob: neighbour cutoff, in the points' units
+) -> pl.DataFrame:
+    """``(id, neighbor)``: the other cells whose ``geometry`` point lies within *radius*."""
+    xy = cells["geometry"].str.extract_groups(r"\(([-\d.e]+) ([-\d.e]+)\)")
+    points = np.column_stack([xy.struct[0].cast(float), xy.struct[1].cast(float)])
+    pairs = np.array(sorted(cKDTree(points).query_pairs(radius)), dtype=int).reshape(
+        -1, 2
+    )
+    ids = cells["id"].to_numpy()
+    both = np.vstack([pairs, pairs[:, ::-1]])
+    return pl.DataFrame({"id": ids[both[:, 0]], "neighbor": ids[both[:, 1]]})

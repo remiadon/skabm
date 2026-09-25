@@ -13,9 +13,6 @@ and ``register_geosparql()``.  Mapping is ``skabm.ottr``'s.
 
 from __future__ import annotations
 
-from string import Template
-
-import numpy as np
 import polars as pl
 import polars_random as pr
 from maplib import xsd
@@ -89,81 +86,6 @@ def register_math(model) -> None:
     model.add_udf(MATH_NS + "log", _log, xsd.double, [xsd.double])
 
 
-def register_geosparql(model) -> None:
-    """Expose GeoSPARQL's ``geof:sfIntersects`` and ``geof:sfWithin`` as UDFs.
-
-    maplib stores WKT but implements no ``geof:`` function (0.20.29 answers
-    "Custom function not found ... define a function using m.add_udf()"), so
-    they arrive on the same seam as ``pr:`` and ``math:`` — under their
-    *standard* IRIs, which keeps a rule portable to any GeoSPARQL store::
-
-        FILTER(geof:sfIntersects(?road, ?zone))
-
-    Scope: the first argument a ``POINT`` or ``LINESTRING``, the second a
-    ``POLYGON`` whose outer ring is used (holes are ignored), coordinates
-    planar — lon/lat is fine at city scale.  Intersects means a vertex inside
-    or a segment crossing the ring; within means every vertex inside and no
-    crossing.  A vertex exactly on the boundary is decided by floating point.
-
-    ponytail: one Python iteration per row, ~20k geometries a second — an
-    init-rule cost.  Vectorise across rows if a rule calls it every tick.
-    """
-
-    def _topology(df: pl.DataFrame) -> tuple[np.ndarray, ...]:
-        any_in, all_in, crosses = (np.zeros(len(df), dtype=bool) for _ in range(3))
-        numbers = r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
-        frame = df.with_row_index("row").with_columns(
-            pl.col("0").str.extract_all(numbers).cast(pl.List(pl.Float64))
-        )
-        for (polygon,), rows in frame.group_by("1"):
-            outer = polygon.split("((")[1].split(")")[0].replace(",", " ").split()
-            a = np.array(outer, dtype=float).reshape(-1, 2)
-            b = np.roll(a, -1, axis=0)  # the ring's edges run a -> b
-            for row, xy in zip(rows["row"], rows["0"]):
-                p = np.asarray(xy).reshape(-1, 2)
-                hit = _ray_parity(p, a, b)
-                any_in[row], all_in[row] = hit.any(), hit.all()
-                crosses[row] = _crossing(p[:-1], p[1:], a, b)
-        return any_in, all_in, crosses
-
-    def _intersects(df: pl.DataFrame) -> pl.Series:
-        any_in, _, crosses = _topology(df)
-        return pl.Series("out", any_in | crosses)
-
-    def _within(df: pl.DataFrame) -> pl.Series:
-        _, all_in, crosses = _topology(df)
-        return pl.Series("out", all_in & ~crosses)
-
-    for name, udf in (("sfIntersects", _intersects), ("sfWithin", _within)):
-        model.add_udf(GEOF_NS + name, udf, xsd.boolean, [xsd.string, xsd.string])
-
-
-def _ray_parity(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """Even-odd test: is each point of *p* inside the ring with edges a -> b?"""
-    y = p[:, 1:2]
-    straddles = (a[:, 1] > y) != (b[:, 1] > y)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        x_cut = a[:, 0] + (y - a[:, 1]) * (b[:, 0] - a[:, 0]) / (b[:, 1] - a[:, 1])
-    return (straddles & (p[:, 0:1] < x_cut)).sum(axis=1) % 2 == 1
-
-
-def _crossing(p: np.ndarray, q: np.ndarray, a: np.ndarray, b: np.ndarray) -> bool:
-    """Does any segment p -> q properly cross any edge a -> b?"""
-
-    def side(u, v, w):
-        return np.sign(
-            (v[..., 0] - u[..., 0]) * (w[..., 1] - u[..., 1])
-            - (v[..., 1] - u[..., 1]) * (w[..., 0] - u[..., 0])
-        )
-
-    p, q = p[:, None], q[:, None]
-    return bool(
-        (
-            (side(p, q, a) * side(p, q, b) < 0) & (side(a, b, p) * side(a, b, q) < 0)
-        ).any()
-    )
-
-
 # maplib SPARQL gotcha, worth knowing before writing any rule: arithmetic
 # operators of equal precedence associate to the *right*, against the SPARQL
 # grammar.  ``?a - ?b + ?c`` evaluates as ``?a - (?b + ?c)`` and ``?a / ?b * ?c``
@@ -180,33 +102,19 @@ def dbl(x: float) -> str:
 
 
 def parameters(rule) -> set:
-    """The names of the parameters *rule* reads: a rule dict's, or a Template's."""
+    """The names of the parameters *rule* reads: none for SPARQL text."""
     if isinstance(rule, dict):
         from skabm.dsl import _Rule
 
         return _Rule(rule).parameters()
-    return set(rule.get_identifiers()) if isinstance(rule, Template) else set()
+    return set()
 
 
 def render(rule, params: dict) -> str:
-    """A rule as the SPARQL maplib runs, its parameters replaced by *params* (by name).
-
-    A rule dict compiles through ``dsl.sparql``; a ``Template``'s $-placeholders get
-    xsd:double literals (``dbl``), so a decimal can never leak into the SPARQL; a string
-    passes through.  A parameter missing from *params* raises ``KeyError`` naming it.
-    """
+    """A rule as the SPARQL maplib runs: a rule dict compiled through ``dsl.sparql``,
+    its parameters replaced by *params* (by name); SPARQL text as it is."""
     if isinstance(rule, dict):
         from skabm.dsl import sparql
 
         return sparql(rule, params)
-    if isinstance(rule, Template):
-        missing = sorted(set(rule.get_identifiers()) - set(params))
-        if missing:
-            raise KeyError(
-                f"rule needs parameters {missing}: pass them in params= "
-                "(a Template lists its own with .get_identifiers())"
-            )
-        return rule.substitute(
-            {k: dbl(v) if isinstance(v, (int, float)) else v for k, v in params.items()}
-        )
     return rule

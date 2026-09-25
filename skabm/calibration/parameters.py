@@ -97,7 +97,7 @@ def simulator_model(
         Base parameters the search perturbs, laid over
         ``skabm.behaviour.defaults()``.
     **simulator_kwargs
-        Passed to ``RDFSimulator`` (``update_rules``, ``udfs``, ``infer``, ...).
+        Passed to ``RDFSimulator`` (``rules``, ``udfs``, ...).
         ``n_periods``, ``random_seed`` and ``warm_start`` are owned by the
         returned callable and rejected here: black-it supplies the first two per
         call, and a warm start would leak one candidate's state into the next.
@@ -117,14 +117,13 @@ def simulator_model(
     ...     world,                         # () -> maplib.Model
     ...     free=("dividend_ratio", "rho"),
     ...     summarise=lambda s: [s["wealth"].drop_nulls().sum()],
-    ...     params={"total_deposits": 2000.0},
+    ...     params={"vat_rate": 0.15},
     ... )
     >>> Calibrator(model=model, ...).calibrate(n_batches=6)   # doctest: +SKIP
     """
 
     from skabm.simulation import (
-        DEFAULT_INIT_RULES,
-        DEFAULT_UPDATE_RULES,
+        DEFAULT_RULES,
         RDFSimulator,
     )
     from skabm.sparql import parameters
@@ -137,10 +136,7 @@ def simulator_model(
         )
 
     base = dict(params or {})
-    rules = (
-        *simulator_kwargs.get("init_rules", DEFAULT_INIT_RULES),
-        *simulator_kwargs.get("update_rules", DEFAULT_UPDATE_RULES),
-    )
+    rules = (*simulator_kwargs.get("rules", DEFAULT_RULES),)
     known = set(base).union(*map(parameters, rules))
     unknown = [name for name in free if name not in known]
     if unknown:

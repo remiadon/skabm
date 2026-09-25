@@ -23,7 +23,6 @@ def poledna_params() -> dict:
         "pi_star":              0.005,        # π*
         "xi_pi":                0.3214,       # ξ^π
         "xi_gamma":             1.2994,       # ξ^γ
-        "firm_ownership_ratio": 0.03,         # unsourced: investor share of households (§3.2)
         "gov_growth":           0.005,        # unsourced: eq. 51 drift
         "growth_sigma":         0.0,          # unsourced: 0 = deterministic
         "inflation_sigma":      0.0,          # unsourced: 0 = deterministic

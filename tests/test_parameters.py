@@ -5,6 +5,7 @@ import polars as pl
 import pytest
 from maplib import Model
 
+from skabm.behaviour.household import initial
 from skabm.calibration import noise_floor, simulator_model
 from skabm.ottr import firm_template, household_template
 
@@ -30,13 +31,14 @@ CAL_HH = pl.DataFrame(
 def cal_world() -> Model:
     world = Model()
     world.map(firm_template, CAL_FIRMS.with_iri())
-    world.map(household_template, CAL_HH.with_iri("employer"))
+    households = initial(CAL_HH, CAL_FIRMS, total_deposits=4.0e5)
+    world.map(household_template, households.with_iri("employer"))
     return world
 
 
 @pytest.fixture
 def cal_params(poledna_params):
-    return {**poledna_params, "total_deposits": 4.0e5}
+    return poledna_params
 
 
 def _summarise(state: pl.DataFrame) -> list[float]:
@@ -160,8 +162,7 @@ def test_derived_summarise_needs_something_to_derive(cal_params):
         cal_world,
         free=["growth_sigma"],
         params=cal_params,
-        init_rules=(),
-        update_rules=(),
+        rules=(),
     )
     # no rules at all, so Firm is inert and warns before the failure we are after
     with (

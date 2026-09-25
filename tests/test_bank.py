@@ -1,102 +1,49 @@
-"""The simulator's ``infer=`` hook, driven by the interbank contagion rules.
-
-The bank rules are a skabm extension with no published calibration, so there is
-no literature value to pin them to: this is an engine test, not a model test.
-It needs the licensed (academic) maplib build and is skipped otherwise (see
-``_infer_licensed``).
+"""Banks (``skabm.behaviour.bank``): a skabm extension with no published calibration,
+so no model tests, only engine ones.  They pin the depositor draw and the timing the
+per-tick contagion rules give: one step of the cascade per tick.
 """
 
 import polars as pl
-import pytest
 from worlds import world
 
-from skabm.behaviour.bank import bank_capital, bank_depositors, interbank_contagion
+from skabm.behaviour.bank import RULES, depositors
 from skabm.simulation import RDFSimulator
+from skabm.sparql import _PREFIXES
 
-
-def _infer_licensed() -> bool:
-    """Probe whether this maplib build ships the ``infer`` reasoning add-on.
-
-    ``infer`` (Datalog / recursive CONSTRUCT) is a licensed maplib feature -
-    free for academic use, but absent from the stock PyPI wheels, where the
-    first call panics ``not implemented: Contact Data Treehouse``.  The panic
-    is a pyo3 ``PanicException`` (subclasses ``BaseException``, so a plain
-    ``except Exception`` would miss it).  Everything else in ``skabm`` - the
-    ``bank_depositors`` / ``bank_capital`` rules included - runs on the free
-    core; only ``interbank_contagion`` via ``infer=`` needs the add-on.
-    """
-    from maplib import Model
-
-    try:
-        Model().infer(
-            "PREFIX ex: <http://x#> CONSTRUCT { ?s ex:p ?o } WHERE { ?s ex:p ?o }"
-        )
-        return True
-    except BaseException:  # noqa: BLE001 — pyo3's PanicException is not an Exception
-        return False
-
-
-LICENSED = _infer_licensed()
-
-
-@pytest.mark.skipif(
-    not LICENSED, reason="Model.infer needs the licensed (academic) maplib build"
+BANKS = pl.DataFrame(
+    {
+        "id": ["weak", "sound"],
+        "capital_ratio": [0.01, 0.10],  # weak starts below the 0.03 threshold
+        "leverage": [10.0, 10.0],
+        "deposit_share": [0.5, 0.5],
+    }
 )
-def test_infer_called(poledna_params):
-    """The simulator should call infer when infer= is passed."""
-    banks = pl.DataFrame(
-        {
-            "id": ["bank_0"],
-            "capital_ratio": [0.02],  # below distress threshold
-            "leverage": [12.0],
-            "deposit_share": [1.0],
-        }
-    ).cast(
-        {
-            "capital_ratio": pl.Float64,
-            "leverage": pl.Float64,
-            "deposit_share": pl.Float64,
-        }
-    )
 
+
+def test_each_depositor_banks_at_one_bank_drawn_by_share():
+    agents = pl.DataFrame({"id": [f"hh_{i}" for i in range(200)]})
+    drawn = depositors(agents, BANKS, seed=1)
+    assert set(drawn["holds_at"]) == {"weak", "sound"}
+    assert drawn["holds_at"].equals(depositors(agents, BANKS, seed=1)["holds_at"])
+    only_sound = BANKS.with_columns(deposit_share=pl.Series([0.0, 1.0]))
+    assert set(depositors(agents, only_sound)["holds_at"]) == {"sound"}
+
+
+def test_contagion_spreads_one_step_per_tick():
     households = pl.DataFrame(
-        {
-            "id": ["hh_0"],
-            "wealth": [100.0],
-            "income": [10.0],
-            "psi": 0.9,
-        }
-    ).cast(
-        {
-            "wealth": pl.Float64,
-            "income": pl.Float64,
-            "psi": pl.Float64,
-        }
-    )
+        {"id": ["a", "b"], "wealth": [50.0, 1.0], "psi": [0.9, 0.9]}
+    ).with_columns(holds_at=pl.Series(["weak", "sound"]))
 
-    sim = RDFSimulator(
-        init_rules=(bank_depositors,),
-        update_rules=(bank_capital,),
-        infer=interbank_contagion,
-        params={
-            **poledna_params,
-            "bank_asset_scale": 1e3,
-            "distress_threshold": 0.03,
-            "flee_amount_threshold": 5.0,
-        },
-        n_periods=1,
-        random_seed=0,
-    )
-    sim.fit(world(Household=households, Bank=banks))
+    def distressed(n_periods: int) -> dict:
+        sim = RDFSimulator(rules=RULES, n_periods=n_periods, random_seed=0).fit(
+            world(links=("holds_at",), Bank=BANKS, Household=households)
+        )
+        rows = sim.model_.query(
+            _PREFIXES + "SELECT ?b ?d WHERE { ?b a ex:Bank ; def:distressed ?d }"
+        )
+        return {b.split("#")[1].rstrip(">"): d for b, d in rows.iter_rows()}
 
-    distressed = sim.model_.query(
-        """
-        PREFIX ex: <http://example.net/skabm#>
-        SELECT (COUNT(?b) AS ?n) WHERE {
-            ?b ex:is_distressed true .
-        }
-        """
-    )
-    n = int(distressed["n"][0])
-    assert n >= 1, f"Expected at least 1 distressed bank, got {n}"
-    print(f"  infer produced {n} distressed bank(s)")
+    # tick 1: the weak bank is distressed and its depositor flees 50, above the
+    # 10.0 flight threshold; tick 2: that flight distresses the sound bank too
+    assert distressed(1) == {"weak": 1.0, "sound": 0.0}
+    assert distressed(2) == {"weak": 1.0, "sound": 1.0}

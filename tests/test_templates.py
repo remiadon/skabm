@@ -5,7 +5,6 @@ the templates are hand-written, so only a test keeps them in step with the rules
 
 import importlib
 import pkgutil
-from string import Template
 
 import polars as pl
 import pytest
@@ -22,7 +21,7 @@ from skabm.ottr import (
     firm_template,
     household_template,
 )
-from skabm.sparql import EX_NS, parameters, render
+from skabm.sparql import EX_NS, parameters
 
 FIRMS = pl.DataFrame(
     {
@@ -140,17 +139,8 @@ def test_every_cited_value_is_read_and_has_one_value():
             rule
             for value in vars(module).values()
             for rule in (value if isinstance(value, list) else [value])
-            if is_rule(rule) or isinstance(rule, Template)
+            if is_rule(rule)
         ]
         cited = {str(k) for k in getattr(module, "PARAMETERS", {})}
         assert cited <= set().union(*map(parameters, rules)), info.name
     assert skabm.behaviour.defaults()  # raises on a name with two values
-
-
-def test_a_template_renders_its_parameters_as_doubles():
-    rule = Template("FILTER(?x < $a && ?y < $b)")
-    assert render(rule, {"a": 0.5, "b": 2}) == (
-        "FILTER(?x < 5.000000e-01 && ?y < 2.000000e+00)"
-    )
-    with pytest.raises(KeyError, match="b"):
-        render(rule, {"a": 0.5})

@@ -140,7 +140,7 @@ labour_market_clearing = {
 
 STAY_PROBABILITY = 0.55  # r of eq. 21, baked into the edge weights by mobility_network
 
-LABOUR_UPDATE_RULES = (
+RULES = [
     clock_tick,
     labour_target,
     labour_demand,
@@ -148,7 +148,7 @@ LABOUR_UPDATE_RULES = (
     labour_flow,
     job_finding,
     labour_market_clearing,
-)
+]
 
 
 def mobility_network(

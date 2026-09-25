@@ -3,10 +3,11 @@ The rule library, by model family: ``firm``, ``household``, ``macro``, ``bank``,
 ``labour``, ``learning``, ``schelling``, ``traffic``.
 
 A module's docstring specifies its rules; the code below it is the rules, as dicts
-(``skabm.dsl``) or, for rules that build structure or add agents, SPARQL ``Template``s.
-Each module's ``PARAMETERS`` gives every parameter it has a published value for, next
-to its citation.  ``defaults()`` merges them, which is what ``RDFSimulator`` lays its
-``params=`` over.
+(``skabm.dsl``), listed in ``RULES`` in the order each step runs them.  Everything
+before the first step (links, derived populations, starting values) is data, built by
+the module's polars functions before mapping.  Each module's ``PARAMETERS`` gives every parameter its rules read that
+has a published value, next to its citation.  ``defaults()`` merges them, which is what
+``RDFSimulator`` lays its ``params=`` over.
 """
 
 import importlib

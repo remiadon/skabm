@@ -3,7 +3,7 @@
 No Eurostat access — populations are tiny hand-written DataFrames mapped
 into a fresh maplib Model per fit (``worlds.world``: shipped templates,
 predicates = column names).  Rules are the default
-string.Template objects; test-specific numbers come in through the params
+rule dicts; test-specific numbers come in through the params
 dict, laid over the ``poledna_params`` fixture.  Covered: iteration yielding
 per-agent state, cold-fit rebuild semantics, warm_start continuation,
 upsert semantics, the paper's capacity cap, income by activity status,
@@ -12,12 +12,13 @@ unreferenced-population warning, and sklearn get_params/clone compatibility.
 
 import polars as pl
 import pytest
+import sympy as sp
 from maplib import Model
 from sklearn.base import clone
 from worlds import world
 
-from skabm.behaviour.firm import firm_entry, firm_ownership, firm_produce
-from skabm.behaviour.household import household_income_init
+from skabm.behaviour.firm import Firm, firm_produce, ownership
+from skabm.behaviour.household import household_income, initial
 from skabm.ottr import firm_template, household_template
 from skabm.simulation import RDFSimulator
 from skabm.sparql import DEF_NS
@@ -45,7 +46,7 @@ FIRMS = pl.DataFrame(
         "liquidity": [10.0, 10.0],
     }
 )
-HOUSEHOLDS = pl.DataFrame(
+RAW_HOUSEHOLDS = pl.DataFrame(
     {
         "id": [f"hh_{i}" for i in range(3)],  # all bare local names
         "employer": ["firm_0", None, None],  # worker; resolves to the firm
@@ -74,6 +75,9 @@ OVERRIDES = {
     "xi_pi": 0.5,
     "xi_gamma": 0.5,
 }
+HOUSEHOLDS = initial(
+    RAW_HOUSEHOLDS, FIRMS, **OVERRIDES
+)  # the opening income and wealth
 
 
 # Expectations are learned, not parameterised, so nothing makes output move on
@@ -193,12 +197,11 @@ def test_warm_start_takes_the_model_to_continue(params):
 
 
 def test_a_placeholder_without_a_published_value_is_named():
-    # firm_entry's barrier has no published calibration, so no default: the
-    # caller is told rather than handed a number nobody chose
+    # a parameter with no published value has no default: the caller is told
+    # rather than handed a number nobody chose
+    entry = {Firm.output: Firm.output + sp.Symbol("entry_barrier")}
     with pytest.raises(KeyError, match="entry_barrier"):
-        RDFSimulator(init_rules=(), update_rules=(firm_entry,), n_periods=1).fit(
-            world(Firm=FIRMS)
-        )
+        RDFSimulator(rules=(entry,), n_periods=1).fit(world(Firm=FIRMS))
 
 
 def test_default_rules_scoped_to_passed_kinds(shocked):
@@ -242,8 +245,7 @@ def test_upserts_do_not_duplicate_state(params):
 
 def test_production_respects_labor_capacity():
     sim = RDFSimulator(
-        init_rules=[],
-        update_rules=[firm_produce],
+        rules=[firm_produce],
         params={"growth_sigma": 0.0},
         n_periods=10,
     ).fit(world(Firm=FIRMS))
@@ -273,67 +275,27 @@ def test_income_by_activity_status(poledna_params):
     assert income["hh_2"] == pytest.approx(poledna_params["benefit_replacement"] * 35.0)
 
 
-# FIRM_OWNERSHIP references households via the CONCAT'd full IRI, not an
-# ex:Household anchor, so the inert-population heuristic can't see it; the
-# household population is not actually inert (it receives the owns triples).
-@pytest.mark.filterwarnings("ignore:population 'Household'")
-def test_firm_ownership_assigned_in_graph():
-    # households carry NO owns column — firm_ownership assigns it in-graph.
-    # ratio = n_firms / n_households puts one distinct owner on each firm.
-    households = pl.DataFrame({"id": [f"hh_{i}" for i in range(6)], "psi": [0.9] * 6})
-    sim = RDFSimulator(
-        init_rules=[firm_ownership],
-        update_rules=[],
-        params={"firm_ownership_ratio": 2 / 6},
-        n_periods=0,
-    ).fit(world(Firm=FIRMS, Household=households))
-
-    owns = {
-        (local(r["h"]), local(r["f"]))
-        for r in sim.model_.query(
-            f"{_PREFIX} SELECT ?h ?f WHERE {{ ?h def:owns ?f }}"
-        ).to_dicts()
-    }
+def test_ownership_gives_each_firm_an_owner_unless_the_data_does():
     # firm j -> household floor(j / ratio): firm_0 -> hh_0, firm_1 -> hh_3
-    assert owns == {("hh_0", "firm_0"), ("hh_3", "firm_1")}
-
-
-@pytest.mark.filterwarnings("ignore:population 'Household'")
-def test_firm_ownership_preserves_data_defined_owner():
-    # a data-defined owner (firm_1 owned by hh_5) must survive FILTER NOT EXISTS
-    households = pl.DataFrame(
-        {
-            "id": [f"hh_{i}" for i in range(6)],
-            "owns": [None, None, None, None, None, "firm_1"],  # bare reference
-            "psi": [0.9] * 6,
-        }
-    )
-    sim = RDFSimulator(
-        init_rules=[firm_ownership],
-        update_rules=[],
-        params={"firm_ownership_ratio": 2 / 6},
-        n_periods=0,
-    ).fit(world(Firm=FIRMS, Household=households))
-
-    owners = {
-        (local(r["h"]), local(r["f"]))
-        for r in sim.model_.query(
-            f"{_PREFIX} SELECT ?h ?f WHERE {{ ?h def:owns ?f }}"
-        ).to_dicts()
-    }
-    assert ("hh_5", "firm_1") in owners  # data-defined owner survived
-    assert sum(f == "firm_1" for _, f in owners) == 1  # not overwritten
-
-
-def test_class_free_rule_survives_kind_filter(params):
-    # household_wealth_init names no ex:Class (it reads derived def:income); the
-    # fit-time filter must keep it, else household wealth never materializes
-    sim = RDFSimulator(params=params, n_periods=1).fit(
-        world(Firm=FIRMS, Household=HOUSEHOLDS)
-    )
-    wealth = sim.model_.query(f"{_PREFIX} SELECT ?h ?w WHERE {{ ?h def:wealth ?w }}")
-    assert wealth.height == 3
-    assert (wealth["w"] > 0).any()
+    households = pl.DataFrame({"id": [f"hh_{i}" for i in range(6)]})
+    assert ownership(households, FIRMS, 2 / 6)["owns"].to_list() == [
+        "firm_0",
+        None,
+        None,
+        "firm_1",
+        None,
+        None,
+    ]
+    # a data-defined owner survives, and the firm is not handed out twice
+    owned = households.with_columns(owns=pl.Series([None] * 5 + ["firm_1"]))
+    assert ownership(owned, FIRMS, 2 / 6)["owns"].to_list() == [
+        "firm_0",
+        None,
+        None,
+        None,
+        None,
+        "firm_1",
+    ]
 
 
 @pytest.mark.filterwarnings("ignore:population 'Firm'")
@@ -351,9 +313,9 @@ def test_bare_link_resolves_from_model(params):
         }
     )
     households = pl.DataFrame({"id": ["hh_0"], "employer": ["firm_0"], "psi": [0.9]})
-    sim = RDFSimulator(
-        init_rules=[household_income_init], update_rules=[], params=params, n_periods=0
-    ).fit(world(Firm=firms, Household=households))
+    sim = RDFSimulator(rules=[household_income], params=params, n_periods=1).fit(
+        world(Firm=firms, Household=households)
+    )
     income = sim.model_.query(f"{_PREFIX} SELECT ?i WHERE {{ ?h def:income ?i }}")
     assert income["i"].to_list() == [30.0]
 
@@ -394,9 +356,7 @@ def test_get_params_and_clone(params):
     sim = RDFSimulator(params=params, n_periods=7)
     got = sim.get_params()
     assert set(got) == {
-        "init_rules",
-        "update_rules",
-        "infer",
+        "rules",
         "params",
         "n_periods",
         "warm_start",
@@ -414,7 +374,7 @@ def test_get_params_and_clone(params):
     fresh = clone(sim)
     fresh_params = fresh.get_params()
     assert fresh_params["params"] == params and fresh_params["n_periods"] == 7
-    assert list(fresh_params["update_rules"]) == list(got["update_rules"])
+    assert list(fresh_params["rules"]) == list(got["rules"])
     assert fresh.model_.query("SELECT ?s WHERE { ?s ?p ?o }").height == 0
 
 
@@ -423,11 +383,10 @@ def test_inject_metadata_adds_triples():
     # directly so the insertion block is covered without a full cold fit.
     from maplib import Model
 
-    from skabm.behaviour.firm import firm_ownership
     from skabm.simulation import _inject_metadata
 
     model = Model()
-    _inject_metadata(model, [firm_ownership])
+    _inject_metadata(model, [firm_produce])
     triples = model.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
     assert triples.height >= 3  # class-behaviour, type, source
     sources = [o for p, o in zip(triples["p"], triples["o"]) if "source" in p]
@@ -478,34 +437,16 @@ def test_the_ir_decides_what_the_frontend_shows(params):
     assert not any("__alpha" in s for s in signals)  # structure never moves
 
 
-def test_init_rules_fill_in_rather_than_pile_on(params):
-    """A CONSTRUCT applied through ``insert`` adds; initial conditions must not.
-
-    Passing a column an init rule also computes used to leave *two* values on
-    every household — no error, and every later aggregate and extract silently
-    double-counted.  The ``FILTER NOT EXISTS`` guards make the data win.
-    """
-    carried = HOUSEHOLDS.with_columns(income=pl.lit(3.0), wealth=pl.lit(7.0))
-    sim = RDFSimulator(params=params, n_periods=0).fit(
-        world(Firm=FIRMS, Household=carried)
+def test_starting_values_fill_in_rather_than_pile_on():
+    """``household.initial`` keeps what the data carries and fills in the rest: eq. 49
+    for income, the deposits shared in proportion to it for wealth (Section 5.2)."""
+    carried = RAW_HOUSEHOLDS.with_columns(income=pl.lit(3.0), wealth=pl.lit(7.0))
+    kept = initial(carried, FIRMS, **OVERRIDES)
+    assert (
+        kept["income"].to_list() == [3.0] * 3 and kept["wealth"].to_list() == [7.0] * 3
     )
-
-    for predicate in ("income", "wealth"):
-        rows = sim.model_.query(
-            f"{_PREFIX} SELECT ?h ?v WHERE {{ ?h a ex:Household ; def:{predicate} ?v }}"
-        )
-        assert rows.height == carried.height, f"{predicate} duplicated"
-    # the data won, so the derived values were not written over it
-    wealth = sim.model_.query(f"{_PREFIX} SELECT ?v WHERE {{ ?h def:wealth ?v }}")["v"]
-    assert wealth.to_list() == [7.0] * carried.height
-
-    # and with nothing carried, the init rules still populate both
-    bare = HOUSEHOLDS.drop("income", "wealth", strict=False)
-    fresh = RDFSimulator(params=params, n_periods=0).fit(
-        world(Firm=FIRMS, Household=bare)
-    )
-    filled = fresh.model_.query(f"{_PREFIX} SELECT ?v WHERE {{ ?h def:wealth ?v }}")
-    # one value per household, summing to the deposits they were meant to share
-    # (a household whose only income would be a loss-making dividend gets zero)
-    assert filled.height == bare.height
-    assert filled["v"].sum() == pytest.approx(params["total_deposits"])
+    filled = initial(RAW_HOUSEHOLDS, FIRMS, **OVERRIDES)
+    # worker: the wage; investor in a loss-maker: nothing; unemployed: the benefit
+    assert filled["income"].to_list() == pytest.approx([30.0, 0.0, 0.4 * 35.0])
+    assert filled["wealth"].sum() == pytest.approx(OVERRIDES["total_deposits"])
+    assert filled.columns == [*RAW_HOUSEHOLDS.columns, "income", "wealth"]

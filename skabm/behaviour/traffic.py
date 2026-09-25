@@ -59,7 +59,6 @@ from __future__ import annotations
 
 import zlib
 from collections.abc import Sequence
-from string import Template
 
 import numpy as np
 import polars as pl
@@ -79,31 +78,16 @@ from skabm.dsl import (
 )
 from skabm.sparql import (
     _PREFIXES,
-    register_geosparql,
     register_math,
     register_polars_random,
 )
 
 # Routes come from routes() (scipy shortest paths), not from a rule: the graph only
 # chooses within the set it is given, and pedestrianize() edits it.
-TRAFFIC_UDFS = (register_polars_random, register_math, register_geosparql)
+TRAFFIC_UDFS = (register_polars_random, register_math)
 
 # def:mode codes; bike and walk routes have no links, their time is their extra
 MODES = {"car": 0.0, "bus": 1.0, "bike": 2.0, "walk": 3.0}
-
-# A road link belongs to every area its geometry intersects, a link crossing the
-# boundary included (OGC GeoSPARQL 1.1, geof:sfIntersects).
-area_membership = Template(
-    _PREFIXES
-    + """
-    CONSTRUCT { ?l def:area ?a }
-    WHERE {
-        ?a a ex:Area ; def:geometry ?zone .
-        ?l a ex:Link ; def:geometry ?g .
-        FILTER(geof:sfIntersects(?g, ?zone))
-    }
-    """
-)
 
 Route, Option, Commuter = Agents("Route"), Agents("Option"), Agents("Commuter")
 Link, Area = Agents("Link"), Agents("Area")
@@ -215,8 +199,7 @@ commuter_state = {
 # skabm: the exposure an old town's foundations feel
 area_traffic = {Area.vkt: sum_over(Link.area, Link.flow * Link.length) / 1000}
 
-TRAFFIC_INIT_RULES = (area_membership,)
-TRAFFIC_UPDATE_RULES = (
+RULES = [
     route_time,  # today's network, yesterday's congestion
     option_sum,
     option_base,
@@ -229,7 +212,7 @@ TRAFFIC_UPDATE_RULES = (
     link_time,
     commuter_state,  # the day as experienced
     area_traffic,
-)
+]
 
 
 def pedestrianize(areas: Sequence[str] = (), streets: Sequence[str] = ()) -> str:
@@ -349,4 +332,54 @@ def routes(
             orient="row",
         ).with_columns(mode=pl.lit(mode)),
         pl.DataFrame(via, schema={"id": pl.String, "via": pl.String}, orient="row"),
+    )
+
+
+def area_membership(links: pl.DataFrame, areas: pl.DataFrame) -> pl.DataFrame:
+    """``(id, area)``: every area each link's geometry intersects (a vertex inside the
+    area's outer ring, or a segment crossing it), for ``links_template("area")``.
+
+    Geometries are WKT, a link's a ``LINESTRING`` or ``POINT``, an area's a ``POLYGON``
+    whose holes are ignored; coordinates are planar, lon/lat is fine at city scale.
+
+    ponytail: one Python iteration per link and area, ~20k a second: fine once, at
+    load; vectorise if it ever runs per tick.
+    """
+    numbers = r"-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
+    paths = links["geometry"].str.extract_all(numbers).cast(pl.List(pl.Float64))
+    found = []
+    for area, polygon in areas.select("id", "geometry").iter_rows():
+        ring = polygon.split("((")[1].split(")")[0].replace(",", " ").split()
+        a = np.array(ring, dtype=float).reshape(-1, 2)
+        b = np.roll(a, -1, axis=0)  # the ring's edges run a -> b
+        for link, xy in zip(links["id"], paths):
+            p = np.asarray(xy).reshape(-1, 2)
+            if _ray_parity(p, a, b).any() or _crossing(p[:-1], p[1:], a, b):
+                found.append((link, area))
+    return pl.DataFrame(found, schema=["id", "area"], orient="row")
+
+
+def _ray_parity(p: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Even-odd test: is each point of *p* inside the ring with edges a -> b?"""
+    y = p[:, 1:2]
+    straddles = (a[:, 1] > y) != (b[:, 1] > y)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        x_cut = a[:, 0] + (y - a[:, 1]) * (b[:, 0] - a[:, 0]) / (b[:, 1] - a[:, 1])
+    return (straddles & (p[:, 0:1] < x_cut)).sum(axis=1) % 2 == 1
+
+
+def _crossing(p: np.ndarray, q: np.ndarray, a: np.ndarray, b: np.ndarray) -> bool:
+    """Does any segment p -> q properly cross any edge a -> b?"""
+
+    def side(u, v, w):
+        return np.sign(
+            (v[..., 0] - u[..., 0]) * (w[..., 1] - u[..., 1])
+            - (v[..., 1] - u[..., 1]) * (w[..., 0] - u[..., 0])
+        )
+
+    p, q = p[:, None], q[:, None]
+    return bool(
+        (
+            (side(p, q, a) * side(p, q, b) < 0) & (side(a, b, p) * side(a, b, q) < 0)
+        ).any()
     )

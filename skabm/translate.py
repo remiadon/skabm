@@ -37,8 +37,9 @@ MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"  # ~15 GB; the 1.5B fails macro.py
 # FIELD, LINK, PATH, KEY and the class names come from the templates, per call; an
 # alternative naming one the templates leave empty is dropped.
 GRAMMAR = r"""
-start: stmt+  # a line may break inside brackets, as Python's may
-stmt: HELPER "=" expr | RULENAME "=" rule
+start: stmt+ "RULES" "=" "[" names "]"
+stmt: HELPER "=" expr | RULENAME "=" rule  # a line may break inside brackets
+names: RULENAME ("," RULENAME)*
 expr: prod (("+" | "-") prod)*
 prod: unary (("*" | "/") unary)*
 unary: "-" unary | power
@@ -72,11 +73,12 @@ STRING: /"[a-z][a-z0-9_]*"/
 """
 
 PROMPT = """\
-Translate the behaviour described at the end into the rules an agent-based model runs
-each step: Python, one statement per line, nothing else.  A rule is
+Translate the behaviour described at the end into the rules of an agent-based model:
+Python, one statement per line, nothing else, ending with `RULES = [...]`, the rules
+run each step, in order.  A rule is
 `name = Rule({{Class.field: expression, ...}})`; it updates every agent of one class,
 reading the values from before it ran, so the fields an agent updates together go in
-one rule.  Rules run in the order written.  A quantity the description names ("where
+one rule.  A quantity the description names ("where
 growth is ...") or several fields share is `_growth = expression`, written before it is
 used; it is not a rule.  A field read inside a rule is always its value from before the
 rule ran, so a value the same rule computes ("that new profit") is a `_name` quantity.  In an
@@ -107,6 +109,7 @@ For example:
 clock_tick = Rule({{Clock.t: Clock.t + 1}})
 _seekers = Edge.weight * Edge.src.unemployment
 applications = Rule({{Occupation.applications: Occupation.vacancies * sum_over(Edge.dst, _seekers)}})
+RULES = [clock_tick, applications]
 
 The agents:
 {agents}
@@ -227,7 +230,10 @@ def _accepts(text: str, lark: str) -> bool:
 
     tokenizer = llg.LLTokenizer(llg.TokenizerWrapper(Bytes()))
     matcher = llg.LLMatcher(tokenizer, llg.grammar_from("lark", lark), log_level=0)
-    return all(map(matcher.consume_token, text.encode())) and matcher.is_accepting()
+    return (
+        all(map(matcher.consume_token, text.strip().encode()))
+        and matcher.is_accepting()
+    )
 
 
 @cache
@@ -279,8 +285,8 @@ class _Scope(dict):
 
 
 def rules(description: str, templates, model=None) -> dict:
-    """``{name: rule}``: the rules a description asks for, in order, over the classes
-    *templates* declare.
+    """``{name: rule}``: the rules a description asks for, in the order each step runs
+    them, over the classes *templates* declare.
 
     *model* is ``(prompt, lark grammar) -> text``, the tiny local ``MODEL`` by
     default.  It generates under ``grammar(templates, description)``, and the answer is checked
@@ -288,9 +294,20 @@ def rules(description: str, templates, model=None) -> dict:
     must not run anything.
     """
     lark = grammar(templates, description)
-    text = (model or local())(prompt(description, templates), lark).strip() + "\n"
+    text = (model or local())(prompt(description, templates), lark).strip()
     if not _accepts(text, lark):
         raise DSLError(f"the model's answer is not in the rule language:\n{text}")
+    # the grammar lets a line break anywhere, Python only inside brackets: one line per
+    # statement, and a rule named like a parameter renamed, or it would hide the value
+    statements = re.split(r"\n(?=\s*\w+\s*=(?!=))", text)
+    text = "\n".join(" ".join(statement.split()) for statement in statements)
+    for name in set(re.findall(r"^(\w+) = Rule\(", text, re.MULTILINE)) & set(
+        _parameters(description)
+    ):
+        text = re.sub(
+            rf"^{name} = Rule\(", f"{name}_rule = Rule(", text, flags=re.MULTILINE
+        )
+        text = re.sub(rf"(RULES = \[.*)\b{name}\b", rf"\1{name}_rule", text)
     for line in text.splitlines():  # a dict keeps the last of two equal keys, silently
         keys = re.findall(r"([A-Z]\w*\.\w+)\s*:", line)
         if len(keys) != len(set(keys)):
@@ -309,10 +326,15 @@ def rules(description: str, templates, model=None) -> dict:
         exec(text, {"__builtins__": {}}, scope)  # noqa: S102 - checked: DSL only
     except Exception as error:
         raise DSLError(f"the generated rules do not compile: {error}") from error
-    found = {name: v for name, v in scope.items() if is_rule(v)}
+    named = {id(v): name for name, v in scope.items() if is_rule(v)}
+    if not all(id(r) in named for r in scope["RULES"]):
+        raise DSLError(f"RULES lists something that is not a rule: {scope['RULES']}")
+    found = {named[id(r)]: r for r in scope["RULES"]}
+    idle = set(named.values()) - set(found)
+    if idle:
+        raise DSLError(f"rules written but never run: {sorted(idle)}")
     for rule in found.values():  # a dict is checked when it compiles: compile it now
-        compiled = _Rule(rule)
-        sparql(rule, dict.fromkeys(compiled.parameters(), 1.0))
+        sparql(rule, dict.fromkeys(_Rule(rule).parameters(), 1.0))
     return found
 
 

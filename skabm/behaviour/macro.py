@@ -54,3 +54,5 @@ centralbank_rate = {
     CentralBank.prev_output: output,
     CentralBank.prev_price: price,
 }
+
+RULES = [government_spend, centralbank_rate]

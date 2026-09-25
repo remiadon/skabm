@@ -1,5 +1,5 @@
 """
-RDFSimulator: advance a maplib knowledge-graph ABM with SPARQL update rules.
+RDFSimulator: advance a maplib knowledge-graph ABM, one step of its rules per tick.
 
 ``fit`` takes one argument, the world: a maplib ``Model``, simulated as given and
 advanced in place.  How the agents got into it — ``skabm.ottr`` and
@@ -8,6 +8,9 @@ advanced in place.  How the agents got into it — ``skabm.ottr`` and
     world = Model()
     world.map(firm_template, firms.with_iri())
     RDFSimulator(params=params, n_periods=12).fit(world)   # Poledna rules by default
+
+The world is the opening state, starting values included: what happens before the first
+step is data (``household.initial``, ``firm.ownership``), not a rule.
 
 ``fit_iter`` yields one ``{signal: level}`` row per tick — the observables
 ``history.observables`` derives from the rules, so nothing declares a reporter.  ``model_`` is
@@ -36,7 +39,6 @@ import re
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from functools import cache
-from string import Template
 
 import polars as pl
 import polars_random as pr
@@ -47,15 +49,12 @@ from sklearn.base import BaseEstimator
 from skabm.behaviour import defaults
 from skabm.behaviour.firm import (
     firm_liquidity,
-    firm_ownership,
     firm_price,
     firm_produce,
     firm_sales,
 )
 from skabm.behaviour.household import (
     household_income,
-    household_income_init,
-    household_wealth_init,
     satisificing_consume,
 )
 from skabm.behaviour.learning import sac
@@ -69,9 +68,8 @@ from skabm.history import connect, consumed, measure, observables, record, state
 from skabm.sparql import _PREFIXES, DEF_NS, EX_NS, register_polars_random, render
 
 # Canonical Poledna (2023) rule composition, sourced from behaviour/.
-# Users override via __init__(init_rules=..., update_rules=..., params=...).
-DEFAULT_INIT_RULES = (firm_ownership, household_income_init, household_wealth_init)
-DEFAULT_UPDATE_RULES = (
+# Users override via __init__(rules=..., params=...).
+DEFAULT_RULES = (
     firm_produce,  # supply choice, eq. 5 + 12
     firm_price,  # price setting, eq. 8
     household_income,  # income refresh, eq. 49
@@ -99,11 +97,7 @@ def _shipped() -> dict:
         found = importlib.import_module(f"skabm.behaviour.{module.name}")
         source = (found.__doc__ or "").strip().split("\n")[0]
         shipped.update(
-            {
-                id(v): (k, source)
-                for k, v in vars(found).items()
-                if isinstance(v, Template) or is_rule(v)
-            }
+            {id(v): (k, source) for k, v in vars(found).items() if is_rule(v)}
         )
     return shipped
 
@@ -165,7 +159,7 @@ def _extract(model: Model) -> pl.DataFrame:
 
 def _rules(learned) -> tuple:
     """A learner may return one rule or several."""
-    return (learned,) if isinstance(learned, (dict, Template, str)) else tuple(learned)
+    return (learned,) if isinstance(learned, (dict, str)) else tuple(learned)
 
 
 class RDFSimulator(BaseEstimator):
@@ -173,32 +167,10 @@ class RDFSimulator(BaseEstimator):
 
     Parameters
     ----------
-    init_rules : Sequence[dict | Template | str]
-        Rules applied once, right after the populations are mapped: a SPARQL
-        CONSTRUCT through ``Model.insert`` (``firm.firm_ownership``), or a
-        rule dict (``skabm.dsl``) through ``Model.update`` (``household_income_init``).
-        ``string.Template`` rules get their ``$placeholders`` substituted
-        from ``params``; plain strings pass through.  Rules anchored on
+    rules : Sequence[dict | str]
+        Rule dicts (a module's ``RULES``), or SPARQL UPDATE text, applied in order at
+        every tick: the model's event sequence (Poledna Section 3.5).  Rules over
         unmapped agent classes no-op harmlessly.
-    update_rules : Sequence[dict | Template | str]
-        Rule dicts, or SPARQL UPDATE text, applied in order within
-        each tick — the model's event sequence (Poledna Section 3.5).
-    infer : str | Sequence[Template | str] | None
-        Optional Datalog or recursive SPARQL CONSTRUCT rules evaluated by
-        ``Model.infer`` (licensed feature: maplib commercial add-on, free for
-        academic / personal use) once per tick, **after** the update rules have
-        advanced state and **before** the next tick begins.  The inference runs
-        to a fixed point — derived triples feed back into the rule bodies until
-        nothing new is produced — so a single ``infer`` call propagates relational
-        effects (contagion, transitive closure, reachability) across the whole
-        graph without hand-tuned sub-tick passes.  ``infer=None`` (default) keeps
-        the simulator in its original Poledna (2023) configuration where banks
-        are passive and no multi-hop propagation exists.  Because the feature is
-        licensed, users must ensure their maplib installation carries the add-on;
-        calling ``infer`` on a build without it raises at the ``Model.infer`` call.
-        Pass a single rule string or a sequence of ``Template``/string rules;
-        templates get their ``$placeholders`` substituted from ``params`` exactly
-        like ``update_rules``, and plain strings pass through unrendered.
     params : dict | None
         Parameter values by name, laid over ``skabm.behaviour.defaults()``, every
         module's cited ``PARAMETERS``.  A parameter with no published value has no
@@ -238,7 +210,7 @@ class RDFSimulator(BaseEstimator):
         ``fit``/``fit_iter`` so the ``pr:uniform`` / ``pr:normal`` SPARQL UDFs
         (registered on ``model_`` via ``rules.register_polars_random``) draw a
         reproducible sequence.  Leave None for entropy-seeded stochastic runs.
-    learner : Callable[[str, str, str], Template] | None
+    learner : Callable[[str, str, str], dict] | None
         ``(agg, class, predicate) -> rule``, called once per signal the rules read
         (``ex:sig__<agg>__<Class>__<pred>``, ``history.consumed``).
         The rules it returns run after every tick, the opening state included,
@@ -271,9 +243,7 @@ class RDFSimulator(BaseEstimator):
 
     def __init__(
         self,
-        init_rules: Sequence[dict | Template | str] = DEFAULT_INIT_RULES,
-        update_rules: Sequence[dict | Template | str] = DEFAULT_UPDATE_RULES,
-        infer: Sequence[Template | str] | None = None,
+        rules: Sequence[dict | str] = DEFAULT_RULES,
         params: dict | None = None,
         n_periods: int = 12,
         warm_start: bool = False,
@@ -281,12 +251,10 @@ class RDFSimulator(BaseEstimator):
         track: bool = True,
         udfs: Sequence[Callable[[Model], None]] = (register_polars_random,),
         random_seed: int | None = None,
-        learner: Callable[[str, str, str], Template] | None = sac,
+        learner: Callable[[str, str, str], dict] | None = sac,
         duckdb_connection: str | object | None = None,
     ):
-        self.init_rules = init_rules
-        self.update_rules = update_rules
-        self.infer = infer
+        self.rules = rules
         self.params = params
         self.n_periods = n_periods
         self.warm_start = warm_start
@@ -307,11 +275,9 @@ class RDFSimulator(BaseEstimator):
     def _cold_start(
         self,
         world: Model | None,
-        init_rules: list[str],
-        update_rules: list[str],
-        infer_rules: list[str] | None,
+        rules: list[str],
     ) -> None:
-        """Adopt the world, inject provenance, apply init rules.
+        """Adopt the world and inject provenance.
 
         Runs only on a cold ``fit``/``fit_iter`` (warm_start=False); the tick
         loop in ``fit_iter`` is shared by both paths.  *world* is a maplib
@@ -324,21 +290,17 @@ class RDFSimulator(BaseEstimator):
         self.model_ = Model() if world is None else world
         self.meta_ = Model()
         self._register_udfs()
-        rules_text = "\n".join((*init_rules, *update_rules, *(infer_rules or ())))
+        rules_text = "\n".join(rules)
         for klass in sorted(self._classes()):
             if f"ex:{klass}" not in rules_text:
                 warnings.warn(
-                    f"population {klass!r} is not referenced by any init/update/"
-                    "infer rule (no 'ex:' + kind pattern): it is in the model but "
+                    f"population {klass!r} is not referenced by any rule "
+                    "(no 'ex:' + kind pattern): it is in the model but "
                     "stays inert during simulation.",
                     UserWarning,
                     stacklevel=4,
                 )
-        all_rules = (*self.init_rules, *self.update_rules, *(self.infer or ()))
-        _inject_metadata(self.meta_, all_rules)
-        for rule in init_rules:  # a CONSTRUCT adds triples; a rule dict upserts them
-            (self.model_.update if "INSERT {" in rule else self.model_.insert)(rule)
-        # only now are the classes all there: init rules may create agents (SETTLE)
+        _inject_metadata(self.meta_, self.rules)
         self._bind_graph()
         self._tick = 0
         self.connection_ = None
@@ -351,7 +313,7 @@ class RDFSimulator(BaseEstimator):
             self._observe(t=0)
 
     def fit_iter(self, X=None) -> Iterator[dict]:
-        """Take the world, apply init rules, then yield one ``{signal: level}``
+        """Take the world, then yield one ``{signal: level}``
         row after each of the ``n_periods`` ticks, ``t`` included.
 
         *X* is a maplib ``Model`` — advanced in place, so whatever it already
@@ -372,13 +334,9 @@ class RDFSimulator(BaseEstimator):
         if self.random_seed is not None:
             pr.set_random_seed(self.random_seed)
         merged = {**defaults(), **(self.params or {})}
-        init_rules = [render(rule, merged) for rule in self.init_rules]
-        update_rules = [render(rule, merged) for rule in self.update_rules]
-        infer_rules: list[str] | None = None
-        if self.infer is not None:
-            infer_rules = [render(rule, merged) for rule in self.infer]
-        rules = (*self.init_rules, *self.update_rules, *(self.infer or ()))
-        self._implied, self._consumed = observables(rules, merged), consumed(rules)
+        rules = [render(rule, merged) for rule in self.rules]
+        self._implied = observables(self.rules, merged)
+        self._consumed = consumed(self.rules)
         if self.warm_start:
             if X is not None:
                 self.model_ = X
@@ -393,12 +351,10 @@ class RDFSimulator(BaseEstimator):
                 ).fetchone()[0]
                 self._tick = 0 if last is None else int(last)
         else:
-            self._cold_start(X, init_rules, update_rules, infer_rules)
+            self._cold_start(X, rules)
         for _ in range(self.n_periods):
-            for rule in update_rules:
+            for rule in rules:
                 self.model_.update(rule)
-            if self.infer is not None:
-                self.model_.infer(infer_rules)  # type: ignore[arg-type]
             self._tick += 1
             yield self._observe(t=self._tick)
 

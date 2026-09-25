@@ -30,9 +30,9 @@ from sklearn.cluster import KMeans
 
 from skabm.behaviour.traffic import (
     MODES,
-    TRAFFIC_INIT_RULES,
     TRAFFIC_UDFS,
-    TRAFFIC_UPDATE_RULES,
+    RULES,
+    area_membership,
     pedestrianize,
     routes,
 )
@@ -42,6 +42,7 @@ from skabm.ottr import (
     link_template,
     option_template,
     route_template,
+    links_template,
     via_template,
 )
 from skabm.simulation import RDFSimulator
@@ -388,8 +389,10 @@ def world(parts: dict) -> Model:
     """A fresh maplib Model of *parts* — a fit advances the one it is given."""
     model = Model()  # every frame in id order: the draws follow the rows, so a seed is a seed
     model.map(link_template, parts["links"].drop("kind").with_columns(time=pl.col("t0")).sort("id").with_iri("src", "dst"))
-    model.map(area_template, pl.DataFrame({"id": ["grand", "petit"], "name": list(AREAS),
-                                           "geometry": list(AREAS.values())}).with_iri())
+    areas = pl.DataFrame({"id": ["grand", "petit"], "name": list(AREAS), "geometry": list(AREAS.values())})
+    model.map(area_template, areas.with_iri())
+    links = parts["links"].sort("id")
+    model.map(links_template("area"), area_membership(links, areas).sort("id", "area").with_iri("area"))
     model.map(option_template, parts["options"].sort("id").with_iri())
     model.map(route_template, parts["routes"].sort("id").with_iri("option"))
     model.map(via_template, parts["via"].sort("id", "via").with_iri("via"))
@@ -464,7 +467,7 @@ def simulate(parts: dict, scenario: str, period: str, params: dict | None = None
     params = {**PARAMS, **(params or {})}
     areas, streets = SCENARIOS[scenario]
     model = world(parts)
-    sim = RDFSimulator(init_rules=TRAFFIC_INIT_RULES, update_rules=TRAFFIC_UPDATE_RULES,
+    sim = RDFSimulator(rules=RULES,
                        params={**params, "anchor": 1.0, "demand": 1.0}, udfs=TRAFFIC_UDFS,
                        n_periods=every, random_seed=seed)
     for segment in range(warmup // every):

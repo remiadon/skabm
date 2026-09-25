@@ -15,23 +15,23 @@ from maplib import Model
 
 from skabm.behaviour.traffic import (
     MODES,
-    TRAFFIC_INIT_RULES,
+    RULES,
     TRAFFIC_UDFS,
-    TRAFFIC_UPDATE_RULES,
+    area_membership,
     pedestrianize,
     routes,
 )
 from skabm.ottr import (
-    agent_template,
     area_template,
     commuter_template,
     link_template,
+    links_template,
     option_template,
     route_template,
     via_template,
 )
 from skabm.simulation import RDFSimulator
-from skabm.sparql import _PREFIXES, register_geosparql
+from skabm.sparql import _PREFIXES
 
 #        W ---- A ====== C ====== B ---- E        centre street, 50 km/h
 #                \     [Area]    /
@@ -151,12 +151,9 @@ def town(n: int = 60) -> tuple[Model, pl.DataFrame]:
     )
     world = Model()
     world.map(link_template, LINKS.with_iri("src", "dst"))
-    world.map(
-        area_template,
-        pl.DataFrame(
-            {"id": ["centre"], "name": ["Centre"], "geometry": [CENTRE]}
-        ).with_iri(),
-    )
+    areas = pl.DataFrame({"id": ["centre"], "name": ["Centre"], "geometry": [CENTRE]})
+    world.map(area_template, areas.with_iri())
+    world.map(links_template("area"), area_membership(LINKS, areas).with_iri("area"))
     world.map(option_template, options.with_iri())
     world.map(route_template, found.with_iri("option"))
     world.map(via_template, via.with_iri("via"))
@@ -166,8 +163,7 @@ def town(n: int = 60) -> tuple[Model, pl.DataFrame]:
 
 def simulator(n_periods: int, anchor: float = 1.0) -> RDFSimulator:
     return RDFSimulator(
-        init_rules=TRAFFIC_INIT_RULES,
-        update_rules=TRAFFIC_UPDATE_RULES,
+        rules=RULES,
         params={**PARAMS, "anchor": anchor},
         udfs=TRAFFIC_UDFS,
         n_periods=n_periods,
@@ -179,26 +175,19 @@ def query(model: Model, body: str) -> pl.DataFrame:
     return model.query(_PREFIXES + body)
 
 
-def test_geosparql_predicates():
+def test_a_link_belongs_to_the_areas_it_touches():
     square = "POLYGON((0 0, 10 0, 10 10, 0 10, 0 0))"
-    cases = {  # geometry: (intersects, within)
-        "POINT(5 5)": (True, True),
-        "POINT(15 5)": (False, False),
-        "LINESTRING(1 1, 2 2, 3 1)": (True, True),
-        "LINESTRING(5 5, 15 5)": (True, False),  # leaves the square
-        "LINESTRING(-5 5, 15 5)": (True, False),  # both ends out, crosses through
-        "LINESTRING(11 11, 20 20)": (False, False),
+    cases = {
+        "POINT(5 5)": True,
+        "POINT(15 5)": False,
+        "LINESTRING(1 1, 2 2, 3 1)": True,
+        "LINESTRING(5 5, 15 5)": True,  # leaves the square
+        "LINESTRING(-5 5, 15 5)": True,  # both ends out, crosses through
+        "LINESTRING(11 11, 20 20)": False,
     }
-    model = Model()
-    register_geosparql(model)
-    shape = agent_template("Shape", columns={"geometry": pl.String})
-    model.map(shape, pl.DataFrame({"geometry": list(cases)}).with_iri(prefix="s"))
-    got = query(
-        model,
-        f'SELECT ?g (geof:sfIntersects(?g, "{square}") AS ?i) (geof:sfWithin(?g, "{square}") AS ?w) '
-        "WHERE { ?s a ex:Shape ; def:geometry ?g }",
-    )
-    assert {g: (i, w) for g, i, w in got.iter_rows()} == cases
+    links = pl.DataFrame({"id": list(cases), "geometry": list(cases)})
+    inside = area_membership(links, pl.DataFrame({"id": ["sq"], "geometry": [square]}))
+    assert set(inside["id"]) == {g for g, hit in cases.items() if hit}
 
 
 def test_a_closed_area_is_reached_on_foot():
@@ -244,8 +233,7 @@ def test_closing_the_centre():
     assert set(closed) == {"AC", "CA", "CB", "BC"}
     by_street, _ = town()
     RDFSimulator(
-        init_rules=TRAFFIC_INIT_RULES,
-        update_rules=TRAFFIC_UPDATE_RULES,
+        rules=RULES,
         params=PARAMS,
         udfs=TRAFFIC_UDFS,
         n_periods=0,
