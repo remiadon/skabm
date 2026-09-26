@@ -4,39 +4,42 @@
 
 **Agent-based models written as equations, or in plain English, and run on a knowledge graph.**
 
-Say what an agent does and skabm turns it into a rule. Run the rules over a population
-calibrated from public data, and get back every agent after every tick, as polars: any
-macro quantity is one expression. Agents are nodes of an RDF graph ([maplib](https://github.com/DataTreehouse/maplib)),
-relations are its edges, populations are [polars](https://pola.rs) DataFrames, and the API is
-scikit-learn's. The reference model is Poledna, Miess, Hommes & Rabitsch (2023), *Economic
-forecasting with an agent-based model* (EER 151): a six-sector economy calibrated 1:1 from
-Eurostat.
+Say what an agent does, in a paper's equations or your own, and it becomes a rule. Run
+the rules over a population calibrated from public data, and get back every agent after
+every tick, as polars: any macro quantity is one expression. Agents are nodes of an RDF
+graph ([maplib](https://github.com/DataTreehouse/maplib)), relations are its edges,
+populations are [polars](https://pola.rs) DataFrames, and the API is scikit-learn's.
+Behaviour comes from published models, each cited to its tables: Poledna et al. (2023)'s
+Austrian economy calibrated 1:1 from Eurostat, CANVAS (Hommes et al. 2025), del
+Rio-Chanona et al. (2021)'s occupational mobility, Schelling (1971).
 
 ## What skabm gives researchers
 
 | | |
 |---|---|
 | **Behaviour as equations** | a rule is a dict of SymPy expressions, `{Firm.price: Firm.price * (1 + inflation)}`. The same rule runs on the knowledge graph and, differentiably, in JAX |
-| **Rules from a description** | `translate.rules` writes those rules from plain English, with a local model that can only produce valid ones |
+| **Rules from a paper** | the `skabm` skill takes a coding agent from a model section to cited, tested rules ([.claude/skills/skabm](.claude/skills/skabm/SKILL.md)) |
 | **Observables in polars** | a run is every agent after every tick, one DataFrame, so any macro quantity, a Gini included, is a polars expression you write. Nothing is declared to the simulator |
 | **Populations from public data** | Eurostat loaders, and calibrators that fit agent rows to known joint facts while every marginal survives exactly |
 | **Citations built in** | each model module carries its published parameter values next to their table and equation |
 | **Interventions as graph edits** | after a fit, the world is a graph: rewire an ownership edge, delete a bank, close a street, then keep simulating |
 | **Learned expectations** | agents forecast with learning rules (SAC, Hommes & Zhu 2014) that are just more rules |
 
-### A module knows its rules and its parameters
+### A module is how one kind of agent behaves, per source
 
 ```python
 from skabm.behaviour import defaults, firm, household, macro
 
-household.RULES                        # income, then consumption, each step
+firm.poledna_rules                     # firms as Poledna et al. (2023) has them
+firm.canvas_rules                      # firms as CANVAS (Hommes et al. 2025) has them
 firm.PARAMETERS[firm.vat_rate]         # 0.1529: τ^VAT, Poledna et al. (2023) Table 2
 macro.PARAMETERS[macro.rho]            # 0.9263, the Taylor-rule smoothing
-assert defaults()["vat_rate"] == 0.1529 and len(household.RULES) == 2
+assert defaults()["vat_rate"] == 0.1529 and len(household.poledna_rules) == 2
 ```
 
-`RDFSimulator(params={"vat_rate": 0.2})` overrides a default by name. More in
-[skabm/behaviour](skabm/behaviour/README.md).
+A rule is named after its source (`firm.poledna_produce`), so a model takes one source's
+list or mixes rules from several. `RDFSimulator(params={"vat_rate": 0.2})` overrides a
+default by name. More in [skabm/behaviour](skabm/behaviour/README.md).
 
 ### What a run yields
 
@@ -120,19 +123,13 @@ def price_level(inflation):
 jax.grad(price_level)(0.02)                    # 4 × 1.05 × 1.02³, the exact derivative
 ```
 
-### Towards a compiler for agent-based modeling
+### From a paper to rules
 
-Given skabm's templates and a description, a local model writes the rules for you, and
-they run on SPARQL or JAX like any other:
-
-```python notest
-from skabm import template, translate
-
-translate.rules("a firm's price becomes its price times 1 plus its margin", [template.firm])
-```
-
-Maintain your own system? Define OTTR templates for your agents and their relations, then
-describe what they do. How it works: [skabm](skabm/README.md#rules-from-a-description).
+A rule is short enough that a coding agent writes it from a paper's model section. The
+`skabm` skill ([.claude/skills/skabm](.claude/skills/skabm/SKILL.md)) is the method: read the
+source, fix the scope, map the equations to the templates' fields, cite every parameter,
+then check the rules on the graph, in JAX and over a long run. CANVAS's rules
+(`firm.canvas_rules`, `macro.canvas_rules`) came out of it, from Hommes et al. (2025).
 
 ## Quickstart
 
@@ -233,7 +230,7 @@ Step 3 is what a marginal sampler cannot do, and both marginals survive it exact
 | Package | What it is |
 |---|---|
 | [skabm](skabm/README.md) | the engine: templates, the rule DSL and its SPARQL and JAX compilers, the simulator, what gets measured, rules from a description |
-| [skabm.behaviour](skabm/behaviour/README.md) | the rule library: Poledna's economy, banks, the labour market, learning, Schelling, traffic |
+| [skabm.behaviour](skabm/behaviour/README.md) | the rule library, by agent type: firms, households, government and central bank, banks, occupations, residence, traffic, each after the sources it cites |
 | [skabm.calibration](skabm/calibration/README.md) | populations fitted to public data, and parameters fitted to macro series with black-it |
 
 ## Limitations
@@ -253,16 +250,17 @@ engine carries an economic ABM. Its walls, in short:
 | | |
 |---|---|
 | **The rest in JAX** | the relational operators (`total_by`, `running_sum`, `pick`) have no JAX form yet, so traffic and Schelling run on the graph only |
-| **Every module from its docstring** | three modules regenerate from their prose today; `household`, `firm`, `schelling` and `traffic` wait for a stronger model ([status](skabm/behaviour/README.md#the-docstring-is-the-specification)) |
 | **Rule-scoped validation** | a rule already names the fields it reads and writes; check them against the graph at fit time and emit SHACL shapes |
 | **Sensitivity-ranked observables** | rank the series by paired-seed shocks, to order the panels and detect divergence during calibration |
-| **An MCP server from description to rules** | describe your agents' logic in one text, get skabm rules back, ready to run |
+| **An MCP server** | run a simulation on remote compute, or serve an environment (a grid, a street map), for a client that cannot run skabm itself |
 
 ## References
 
 - Poledna, Miess, Hommes & Rabitsch (2023). Economic forecasting with an agent-based model.
   *European Economic Review* 151, 104306 · del Rio-Chanona, Mealy, Beguerisse-Díaz, Lafond &
-  Farmer (2021). Occupational mobility and automation. *J. R. Soc. Interface* 18(174), 20200898.
+  Farmer (2021). Occupational mobility and automation. *J. R. Soc. Interface* 18(174), 20200898 ·
+  Hommes, He, Poledna, Siqueira & Zhang (2025). CANVAS: a Canadian behavioral agent-based model
+  for monetary policy. *J. Econ. Dyn. Control* 172, 104986.
 - Hommes & Zhu (2014). Behavioral learning equilibria. *JET* 150 · Huberman & Glance (1993).
   Evolutionary games and computer simulations. *PNAS* 90(16) · Deville & Särndal (1992).
   Calibration estimators in survey sampling. *JASA* 87(418) · Fagiolo, Guerini, Lamperti,

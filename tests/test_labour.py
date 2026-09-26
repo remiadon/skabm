@@ -27,7 +27,7 @@ from worlds import world
 from skabm.behaviour import labour
 from skabm.behaviour.labour import (
     LABOUR_UDFS,
-    labour_flow,
+    delrio_flow,
     mobility_network,
     occupations,
     reallocate_demand,
@@ -68,7 +68,7 @@ def market(n: int = 8, employment: float = 1000.0, **overrides):
         )
     )
     sim = RDFSimulator(
-        rules=labour.RULES,
+        rules=labour.delrio_rules,
         params={"shock_start": NEVER, **overrides.pop("params", {})},
         udfs=LABOUR_UDFS,
         **overrides,
@@ -131,9 +131,9 @@ def test_hires_match_the_urn_ball_count():
     # Eq. 16 summed over origin occupations collapses to v_j (1 - exp(-s_j/v_j)):
     # the number of j's vacancies that drew at least one applicant.  This pins
     # the whole matching function, the v_j^2 in the numerator included.
-    stop = labour.RULES.index(labour_flow) + 1  # halt before clearing,
+    stop = labour.delrio_rules.index(delrio_flow) + 1  # halt before clearing,
     sim, graph = market(n=6, n_periods=1)  # so v and s still hold what f used
-    sim.set_params(rules=labour.RULES[:stop])
+    sim.set_params(rules=labour.delrio_rules[:stop])
     sim.fit(graph)
     got = sim.model_.query(
         _PREFIXES
@@ -232,7 +232,7 @@ def shock_outcome(edges: pl.DataFrame, n: int) -> tuple[dict, dict]:
         pl.DataFrame({"id": [f"occ_{i}" for i in range(n)], "employment": [1000.0] * n})
     )
     sim = RDFSimulator(
-        rules=labour.RULES,
+        rules=labour.delrio_rules,
         params={"shock_start": NEVER},
         udfs=LABOUR_UDFS,
         n_periods=60,

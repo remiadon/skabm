@@ -19,8 +19,8 @@ from test_labour import NEVER, clock, market, occupations, ring
 from skabm import template
 from skabm.behaviour import labour
 from skabm.behaviour.labour import PARAMETERS as LABOUR
-from skabm.behaviour.schelling import RELOCATE
-from skabm.behaviour.traffic import area_traffic
+from skabm.behaviour.residence import schelling_relocate
+from skabm.behaviour.traffic import bayonne_area_traffic
 from skabm.dsl import (
     Agents,
     DSLError,
@@ -48,7 +48,7 @@ def labour_state():
         pl.DataFrame({"id": [f"occ_{i}" for i in range(N)], "employment": [1e3] * N})
     )
     frames = {"Occupation": occ, "Edge": ring(N), "Clock": clock()}
-    return occ, arrays(frames, labour.RULES)
+    return occ, arrays(frames, labour.delrio_rules)
 
 
 def test_sparql_and_jax_agree_on_the_labour_market():
@@ -61,7 +61,7 @@ def test_sparql_and_jax_agree_on_the_labour_market():
     )
 
     occ, state = labour_state()
-    tick = jax.jit(jax_tick(labour.RULES))
+    tick = jax.jit(jax_tick(labour.delrio_rules))
     for _ in range(TICKS):
         state = tick(state, CALM)
 
@@ -75,7 +75,7 @@ def test_a_gradient_flows_through_the_whole_run():
     """d(unemployment after 25 ticks)/d(gamma), through ``lax.scan``, as a finite
     difference of the same run would have it."""
     _, start = labour_state()
-    tick = jax_tick(labour.RULES)
+    tick = jax_tick(labour.delrio_rules)
 
     def unemployed(gamma):
         params = {**CALM, "gamma": gamma}
@@ -143,9 +143,9 @@ def test_rules_are_checked_when_compiled():
 
 def test_jax_refuses_what_it_cannot_shape():
     with pytest.raises(DSLError, match="no JAX form"):
-        jax_tick([RELOCATE])  # pick has no fixed-shape form yet
+        jax_tick([schelling_relocate])  # pick has no fixed-shape form yet
     with pytest.raises(DSLError, match="no JAX form"):
-        jax_tick([area_traffic])  # a scatter over a many-valued link
+        jax_tick([bayonne_area_traffic])  # a scatter over a many-valued link
 
 
 def test_a_draw_is_bound_once_however_often_it_is_read():

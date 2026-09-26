@@ -1,8 +1,8 @@
 """Schelling segregation on the RDFSimulator machinery — a tiny suite.
 
-The model lives in skabm/behaviour/schelling.py: the 2D grid is a `Cell` population,
+The model lives in skabm/behaviour/residence.py: the 2D grid is a `Cell` population,
 the Moore neighbourhood and the Person population are data (`grid_neighbors`,
-`settle`), and `RULES` advances the world.  There is no Eurostat access and no
+`settle`), and `schelling_rules` advances the world.  There is no Eurostat access and no
 calibration layer here.
 
 Randomness comes from `settle(seed=)` and the `pr:uniform` SPARQL UDF, which
@@ -18,11 +18,11 @@ from maplib import Model
 from worlds import world
 
 from skabm import template
-from skabm.behaviour.schelling import (
+from skabm.behaviour.residence import (
     PARAMETERS,
-    RULES,
     geo_neighbors,
     grid_neighbors,
+    schelling_rules,
     settle,
     state_extract,
     want_similar,
@@ -53,7 +53,7 @@ def town(cells: pl.DataFrame, neighbors: pl.DataFrame, seed: int = 0) -> Model:
 
 def simulator(n_periods: int, seed: int = 0) -> RDFSimulator:
     return RDFSimulator(
-        rules=RULES,
+        rules=schelling_rules,
         n_periods=n_periods,
         state_extract=state_extract,
         random_seed=seed,
@@ -64,7 +64,7 @@ def test_a_tick_is_one_row_per_agent_with_many_valued_links_as_lists():
     """The default frame: a cell's neighbours are one list, not one row each, so an
     aggregate over cells counts each cell once."""
     cells = grid(4)
-    sim = RDFSimulator(rules=RULES, n_periods=1)
+    sim = RDFSimulator(rules=schelling_rules, n_periods=1)
     (frame,) = sim.fit_iter(town(cells, grid_neighbors(cells)))
     mine = frame.filter(pl.col("class") == "Cell")
     assert mine.height == mine["agent"].n_unique() == 16
@@ -84,7 +84,7 @@ def test_settle_derives_population():
 
 
 def test_one_person_per_cell_invariant():
-    # RELOCATE's rank-join must never place two movers on the same cell.  After
+    # schelling_relocate's rank-join must never place two movers on the same cell.  After
     # several ticks, occupied cells still equal people — matching is one-to-one.
     sim = simulator(8).fit(town(grid(12), grid_neighbors(grid(12))))
     occ = sim.model_.query(

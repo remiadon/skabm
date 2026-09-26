@@ -47,19 +47,19 @@ from sklearn.base import BaseEstimator
 
 from skabm.behaviour import defaults
 from skabm.behaviour.firm import (
-    firm_liquidity,
-    firm_price,
-    firm_produce,
-    firm_sales,
+    poledna_liquidity,
+    poledna_price,
+    poledna_produce,
+    poledna_sales,
 )
 from skabm.behaviour.household import (
-    household_income,
-    satisificing_consume,
+    poledna_consume,
+    poledna_income,
 )
 from skabm.behaviour.learning import consumed, sac
 from skabm.behaviour.macro import (
-    centralbank_rate,
-    government_spend,
+    poledna_rate,
+    poledna_spend,
 )
 from skabm.dsl import is_rule, sparql
 from skabm.sparql import _PREFIXES, DEF_NS, EX_NS, register_polars_random
@@ -67,14 +67,14 @@ from skabm.sparql import _PREFIXES, DEF_NS, EX_NS, register_polars_random
 # Canonical Poledna (2023) rule composition, sourced from behaviour/.
 # Users override via __init__(rules=..., params=...).
 DEFAULT_RULES = (
-    firm_produce,  # supply choice, eq. 5 + 12
-    firm_price,  # price setting, eq. 8
-    household_income,  # income refresh, eq. 49
-    satisificing_consume,  # consumption + savings, eqs. 40 + 50
-    firm_sales,  # goods market, eqs. 1-2 + 27
-    firm_liquidity,  # eq. 31
-    government_spend,  # AR(1), eq. 51
-    centralbank_rate,  # Taylor rule, eq. 69
+    poledna_produce,  # supply choice, eq. 5 + 12
+    poledna_price,  # price setting, eq. 8
+    poledna_income,  # income refresh, eq. 49
+    poledna_consume,  # consumption + savings, eqs. 40 + 50
+    poledna_sales,  # goods market, eqs. 1-2 + 27
+    poledna_liquidity,  # eq. 31
+    poledna_spend,  # AR(1), eq. 51
+    poledna_rate,  # Taylor rule, eq. 69
 )
 
 
@@ -167,7 +167,7 @@ class RDFSimulator(BaseEstimator):
     Parameters
     ----------
     rules : Sequence[dict]
-        Rule dicts (a module's ``RULES``), applied in order at every tick: the model's event sequence (Poledna Section 3.5).  Rules over
+        Rule dicts (a module's ``<source>_rules``), applied in order at every tick: the model's event sequence (Poledna Section 3.5).  Rules over
         unmapped agent classes no-op harmlessly.
     params : dict | None
         Parameter values by name, laid over ``skabm.behaviour.defaults()``, every
@@ -184,7 +184,7 @@ class RDFSimulator(BaseEstimator):
         yield raw per-agent state.  ``None`` (the default) projects every field
         the graph holds, one UNION branch per agent class.  Pass
         one only when that is not enough — a model whose state hangs off untyped
-        link targets, like ``schelling.state_extract`` reaching ``def:x``
+        link targets, like ``residence.state_extract`` reaching ``def:x``
         through ``def:location``.
     udfs : Sequence[Callable[[Model], None]]
         Registrars called on ``model_`` before mapping, each installing SPARQL

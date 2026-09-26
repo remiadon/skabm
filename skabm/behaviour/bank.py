@@ -1,5 +1,5 @@
-"""Banks, a skabm extension of Poledna et al. (2023). Four rules, run each step, in this
-order.
+"""Banks, a skabm extension of Poledna et al. (2023), ``contagion_rules``: four rules, run
+each step, in this order.
 
 1. A bank's distressed becomes 1 when its capital_ratio is below the parameter
 distress_threshold, or when (the total over households of their flees_amount) plus (the
@@ -39,18 +39,18 @@ PARAMETERS = {
 
 # Contagion, one step at a time: last step's flight distresses the banks this step.
 fled = total(Household.flees_amount) + total(Firm.flees_amount)  # last step's flight
-bank_distress = {
+contagion_distress = {
     Bank.distressed: sp.Piecewise(
         (1, (Bank.capital_ratio < distress_threshold) | (fled > flee_amount_threshold)),
         (0, True),
     )
 }
-household_flight = {
+contagion_household_flight = {
     Household.flees_amount: sp.Piecewise(
         (Household.wealth, Household.holds_at.distressed > 0), (0, True)
     )
 }
-firm_flight = {
+contagion_firm_flight = {
     Firm.flees_amount: sp.Piecewise(
         (Firm.liquidity, Firm.holds_at.distressed > 0), (0, True)
     )
@@ -58,12 +58,17 @@ firm_flight = {
 outflow = sum_over(Household.holds_at, Household.flees_amount) + sum_over(
     Firm.holds_at, Firm.flees_amount
 )
-bank_capital = {
+contagion_capital = {
     Bank.capital_ratio: Bank.capital_ratio
     - outflow / (Bank.leverage * bank_asset_scale)
 }
 
-RULES = [bank_distress, household_flight, firm_flight, bank_capital]
+contagion_rules = [
+    contagion_distress,
+    contagion_household_flight,
+    contagion_firm_flight,
+    contagion_capital,
+]
 
 
 def depositors(

@@ -1,5 +1,5 @@
 """Commuters choosing a mode and a route each morning on a congestible road network,
-Horowitz (1984) and Cascetta (1989). Twelve rules, in this order.
+Horowitz (1984) and Cascetta (1989), ``bayonne_rules``: twelve rules, in this order.
 
 1. A route's time and open update together, in one rule. Its time becomes its extra plus
 the sum, over the road links it goes via, of the link's leg time: for a car route (mode
@@ -118,7 +118,7 @@ def _leg(route):
 
 
 # Horowitz (1984) TR-B 18(1); Cascetta (1989) TR-B 23(1)
-route_time = {
+bayonne_route_time = {
     Route.time: Route.extra + sum_over(Route.via, _leg(Route)),
     Route.open: sp.Piecewise(
         (0, sp.Eq(Route.mode, 0) & (sum_over(Route.via, 1 - Route.via.car) > 0)),
@@ -126,11 +126,11 @@ route_time = {
     ),
 }
 # Ben-Akiva & Lerman (1985), Discrete Choice Analysis, ch. 10
-option_sum = {
+bayonne_option_sum = {
     Option.s: sum_over(Route.option, Route.open * sp.exp(-theta * Route.time))
 }
 # Koppelman (1983) J. Transp. Eng. 109(4)
-option_base = {
+bayonne_option_base = {
     Option.s0: sp.Piecewise(
         (Option.s, anchor > 0), (coalesce(Option.s0, Option.s), True)
     )
@@ -140,7 +140,7 @@ weight = sp.Piecewise(
     (0, True),
 )
 # Koppelman (1983) J. Transp. Eng. 109(4); Daly, Fox & Tsang (2005)
-option_share = {
+bayonne_option_share = {
     Option.share: sp.Piecewise(
         (weight / total_by(Option.od, weight), total_by(Option.od, weight) > 0),
         (Option.share0, True),
@@ -154,14 +154,14 @@ prob = sp.Piecewise(
     (0, True),
 )
 # Daganzo & Sheffi (1977) Transp. Sci. 11(3)
-route_prob = {Route.prob: prob}
-route_cum = {Route.cum: running_sum(Route.rank, Route.prob, Route.od)}
+bayonne_route_prob = {Route.prob: prob}
+bayonne_route_cum = {Route.cum: running_sum(Route.rank, Route.prob, Route.od)}
 draw = sp.Piecewise(
     (Commuter.u / replan, Commuter.u < replan),
     ((Commuter.u - replan) / (1 - replan), True),
 )
 # Horni, Nagel & Axhausen (2016), The Multi-Agent Transport Simulation MATSim
-choose = {
+bayonne_choose = {
     Commuter.route: coalesce(
         pick(
             Route,
@@ -174,20 +174,20 @@ choose = {
         Commuter.route,
     )
 }
-route_load = {Route.load: sum_over(Commuter.route, Commuter.weight)}
+bayonne_route_load = {Route.load: sum_over(Commuter.route, Commuter.weight)}
 # Bureau of Public Roads (1964), Traffic Assignment Manual
-link_load = {
+bayonne_link_load = {
     Link.flow: sum_over(
         Route.via, sp.Piecewise((Route.load, sp.Eq(Route.mode, 0)), (0, True))
     )
     * peak_factor
     * demand
 }
-link_time = {
+bayonne_link_time = {
     Link.time: Link.t0 * (1 + bpr_alpha * (Link.flow / Link.capacity) ** bpr_beta)
 }
 mode = Commuter.route.mode
-commuter_state = {
+bayonne_commuter_state = {
     Commuter.time: Commuter.route.extra
     + sum_over(Commuter.route.via, _leg(Commuter.route)),
     **{
@@ -197,21 +197,21 @@ commuter_state = {
     Commuter.u: Uniform("u", 0, 1),
 }
 # skabm: the exposure an old town's foundations feel
-area_traffic = {Area.vkt: sum_over(Link.area, Link.flow * Link.length) / 1000}
+bayonne_area_traffic = {Area.vkt: sum_over(Link.area, Link.flow * Link.length) / 1000}
 
-RULES = [
-    route_time,  # today's network, yesterday's congestion
-    option_sum,
-    option_base,
-    option_share,
-    route_prob,
-    route_cum,
-    choose,
-    route_load,
-    link_load,
-    link_time,
-    commuter_state,  # the day as experienced
-    area_traffic,
+bayonne_rules = [
+    bayonne_route_time,  # today's network, yesterday's congestion
+    bayonne_option_sum,
+    bayonne_option_base,
+    bayonne_option_share,
+    bayonne_route_prob,
+    bayonne_route_cum,
+    bayonne_choose,
+    bayonne_route_load,
+    bayonne_link_load,
+    bayonne_link_time,
+    bayonne_commuter_state,  # the day as experienced
+    bayonne_area_traffic,
 ]
 
 

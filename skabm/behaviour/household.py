@@ -1,4 +1,5 @@
-"""Households, Poledna et al. (2023). Two rules, run each step, in this order.
+"""Households, Poledna et al. (2023), ``poledna_rules``: two rules, run each step, in
+this order.
 
 1. A household's income becomes the first that exists of its employer's w_bar; the
 parameter dividend_ratio times the larger of 0 and the profit of the firm it owns; the
@@ -33,7 +34,7 @@ income = coalesce(
     dividend_ratio * sp.Max(Household.owns.profit, 0),
     benefit_replacement * mean(Firm.w_bar),
 )
-household_income = {Household.income: income}
+poledna_income = {Household.income: income}
 # Poledna et al. (2023) eqs. 40, 50
 spent = (
     Household.psi
@@ -41,9 +42,9 @@ spent = (
     * (1 + expect("SUM", "Household", "income"))
     / (1 + vat_rate)
 )
-satisificing_consume = {Household.wealth: Household.wealth + Household.income - spent}
+poledna_consume = {Household.wealth: Household.wealth + Household.income - spent}
 
-RULES = [household_income, satisificing_consume]
+poledna_rules = [poledna_income, poledna_consume]
 
 TOTAL_DEPOSITS = (
     222_933.2e6  # D^H, Poledna et al. (2023) Table 2; rescale to the population
@@ -53,7 +54,7 @@ TOTAL_DEPOSITS = (
 def initial(households: pl.DataFrame, firms: pl.DataFrame, **params) -> pl.DataFrame:
     """*households* with a starting income and wealth wherever the data has none.
 
-    Income is eq. 49 on the opening firms, the rule ``household_income`` computes each
+    Income is eq. 49 on the opening firms, the rule ``poledna_income`` computes each
     step: the employer's wage, else the dividend on the owned firm's profit, else the
     benefit.  Wealth is ``total_deposits`` shared in proportion to income (Section 5.2).
     *params* are the simulator's, by name; the rest come from ``PARAMETERS``.

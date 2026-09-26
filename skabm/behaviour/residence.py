@@ -1,5 +1,5 @@
-"""Schelling's segregation model: people living on the cells of a grid. Five rules, in this
-order.
+"""Where people live. Schelling (1971), ``schelling_rules``: people living on the cells of
+a grid, five rules, in this order.
 
 1. A cell's occupied, resident and draw update together, in one rule. Its occupied
 becomes the number of people whose location is this cell, whatever their group: the sum,
@@ -42,13 +42,13 @@ PARAMETERS = {
 
 Cell, Person = Agents("Cell"), Agents("Person")
 
-OCCUPANCY = {
+schelling_occupancy = {
     Cell.occupied: sum_over(Person.location, 1),
     Cell.resident: sum_over(Person.location, Person.group),
     Cell.draw: Uniform("u", 0, 1),
 }
 around = Person.location.neighbor
-HAPPINESS = {
+schelling_happiness = {
     Person.share_similar: sum_over(
         around,
         sp.Piecewise(
@@ -59,16 +59,16 @@ HAPPINESS = {
     / sp.Max(sum_over(around, around.occupied), 1),
     Person.draw: Uniform("u", 0, 1),
 }
-CELL_RANK = {
+schelling_cell_rank = {
     Cell.rank: running_sum(
         Cell.draw, sp.Piecewise((1, sp.Eq(Cell.occupied, 0)), (0, True))
     )
 }
 unhappy = Person.share_similar < want_similar
-PERSON_RANK = {
+schelling_person_rank = {
     Person.rank: running_sum(Person.draw, sp.Piecewise((1, unhappy), (0, True)))
 }
-RELOCATE = {
+schelling_relocate = {
     Person.location: coalesce(
         pick(
             Cell,
@@ -98,7 +98,13 @@ def state_extract(model) -> pl.DataFrame:
     )
 
 
-RULES = [OCCUPANCY, HAPPINESS, CELL_RANK, PERSON_RANK, RELOCATE]
+schelling_rules = [
+    schelling_occupancy,
+    schelling_happiness,
+    schelling_cell_rank,
+    schelling_person_rank,
+    schelling_relocate,
+]
 
 
 def settle(

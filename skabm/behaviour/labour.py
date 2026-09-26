@@ -1,5 +1,5 @@
-"""Occupational mobility and automation, del Rio-Chanona et al. (2021), mean-field. Seven
-rules, in this order.
+"""Occupational mobility and automation, del Rio-Chanona et al. (2021), mean-field,
+``delrio_rules``: seven rules, in this order.
 
 1. Each step, the clock's t advances by one.
 
@@ -74,12 +74,12 @@ PARAMETERS = {
 }
 
 # del Rio-Chanona et al. (2021), J. R. Soc. Interface 18:20200898
-clock_tick = {Clock.t: Clock.t + 1}
+delrio_clock_tick = {Clock.t: Clock.t + 1}
 # eq. 19 (the exponent's sign as the text implies)
 years = total(Clock.t) * weeks_per_step / 52
 since = years - shock_start
 initial, final = Occupation.demand_init, Occupation.demand_final
-labour_target = {
+delrio_target = {
     Occupation.target_demand: sp.Piecewise(
         (initial, since < 0),
         (
@@ -94,7 +94,7 @@ employed, target = Occupation.employment, Occupation.target_demand
 realised = employed + Occupation.vacancies
 excess = sp.Min(employed, gamma * sp.Max(0, realised - target))
 shortfall = sp.Min(employed, gamma * sp.Max(0, target - realised))
-labour_demand = {
+delrio_demand = {
     Occupation.separations: delta_u * employed + (1 - delta_u) * excess,
     Occupation.openings: delta_v * employed + (1 - delta_v) * shortfall,
     Occupation.app_norm: sum_over(Edge.src, Edge.weight * Edge.dst.vacancies),
@@ -104,14 +104,14 @@ origin = Edge.src
 share = sp.Piecewise(
     (origin.unemployment / origin.app_norm, origin.app_norm > 0), (0, True)
 )
-applications = {
+delrio_applications = {
     Occupation.applications: Occupation.vacancies
     * sum_over(Edge.dst, Edge.weight * share)
 }
 # eq. 16
 u_i, z_i = Edge.src.unemployment, Edge.src.app_norm
 v_j, s_j = Edge.dst.vacancies, Edge.dst.applications
-labour_flow = {
+delrio_flow = {
     Edge.flow: sp.Piecewise(
         (
             u_i * v_j**2 * Edge.weight * (1 - sp.exp(-s_j / v_j)) / (s_j * z_i),
@@ -123,13 +123,13 @@ labour_flow = {
 # eqs. 13-15, Methods (long-term unemployment)
 hired, matched = sum_over(Edge.dst, Edge.flow), sum_over(Edge.src, Edge.flow)
 unemployed, separated = Occupation.unemployment, Occupation.separations
-job_finding = {
+delrio_job_finding = {
     Occupation.job_finding: sp.Piecewise(
         (matched / unemployed, unemployed > 0), (0, True)
     )
 }
 stay = 1 - Occupation.job_finding
-labour_market_clearing = {
+delrio_market_clearing = {
     Occupation.employment: employed - separated + hired,
     Occupation.unemployment: unemployed + separated - matched,
     Occupation.vacancies: Occupation.vacancies + Occupation.openings - hired,
@@ -141,14 +141,14 @@ labour_market_clearing = {
 
 STAY_PROBABILITY = 0.55  # r of eq. 21, baked into the edge weights by mobility_network
 
-RULES = [
-    clock_tick,
-    labour_target,
-    labour_demand,
-    applications,
-    labour_flow,
-    job_finding,
-    labour_market_clearing,
+delrio_rules = [
+    delrio_clock_tick,
+    delrio_target,
+    delrio_demand,
+    delrio_applications,
+    delrio_flow,
+    delrio_job_finding,
+    delrio_market_clearing,
 ]
 
 

@@ -16,9 +16,9 @@ from maplib import Model
 from skabm import template
 from skabm.behaviour.traffic import (
     MODES,
-    RULES,
     TRAFFIC_UDFS,
     area_membership,
+    bayonne_rules,
     pedestrianize,
     routes,
 )
@@ -155,7 +155,7 @@ def town(n: int = 60) -> tuple[Model, pl.DataFrame]:
 
 def simulator(n_periods: int, anchor: float = 1.0) -> RDFSimulator:
     return RDFSimulator(
-        rules=RULES,
+        rules=bayonne_rules,
         params={**PARAMS, "anchor": anchor},
         udfs=TRAFFIC_UDFS,
         n_periods=n_periods,
@@ -240,7 +240,7 @@ def test_closing_the_centre():
     assert set(closed) == {"AC", "CA", "CB", "BC"}
     by_street, _ = town()
     RDFSimulator(
-        rules=RULES,
+        rules=bayonne_rules,
         params=PARAMS,
         udfs=TRAFFIC_UDFS,
         n_periods=0,

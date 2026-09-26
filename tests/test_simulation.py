@@ -18,8 +18,8 @@ from sklearn.base import clone
 from worlds import world
 
 from skabm import template
-from skabm.behaviour.firm import Firm, firm_produce, ownership
-from skabm.behaviour.household import household_income, initial
+from skabm.behaviour.firm import Firm, ownership, poledna_produce
+from skabm.behaviour.household import initial, poledna_income
 from skabm.simulation import RDFSimulator
 from skabm.sparql import DEF_NS
 
@@ -248,7 +248,7 @@ def test_upserts_do_not_duplicate_state(params):
 
 def test_production_respects_labor_capacity():
     sim = RDFSimulator(
-        rules=[firm_produce],
+        rules=[poledna_produce],
         params={"growth_sigma": 0.0},
         n_periods=10,
     ).fit(world(Firm=FIRMS))
@@ -316,7 +316,7 @@ def test_bare_link_resolves_from_model(params):
         }
     )
     households = pl.DataFrame({"id": ["hh_0"], "employer": ["firm_0"], "psi": [0.9]})
-    sim = RDFSimulator(rules=[household_income], params=params, n_periods=1).fit(
+    sim = RDFSimulator(rules=[poledna_income], params=params, n_periods=1).fit(
         world(Firm=firms, Household=households)
     )
     income = sim.model_.query(f"{_PREFIX} SELECT ?i WHERE {{ ?h def:income ?i }}")
@@ -387,7 +387,7 @@ def test_inject_metadata_adds_triples():
     from skabm.simulation import _inject_metadata
 
     model = Model()
-    _inject_metadata(model, [firm_produce])
+    _inject_metadata(model, [poledna_produce])
     triples = model.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
     assert triples.height >= 3  # class-behaviour, type, source
     sources = [o for p, o in zip(triples["p"], triples["o"]) if "source" in p]

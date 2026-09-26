@@ -31,7 +31,7 @@ from sklearn.cluster import KMeans
 from skabm.behaviour.traffic import (
     MODES,
     TRAFFIC_UDFS,
-    RULES,
+    bayonne_rules,
     area_membership,
     pedestrianize,
     routes,
@@ -459,7 +459,7 @@ def simulate(parts: dict, scenario: str, period: str, params: dict | None = None
     params = {**PARAMS, **(params or {})}
     areas, streets = SCENARIOS[scenario]
     model = world(parts)
-    sim = RDFSimulator(rules=RULES,
+    sim = RDFSimulator(rules=bayonne_rules,
                        params={**params, "anchor": 1.0, "demand": 1.0}, udfs=TRAFFIC_UDFS,
                        n_periods=every, random_seed=seed)
     for segment in range(warmup // every):
@@ -524,7 +524,7 @@ def at_hour(flows: pl.DataFrame, links: pl.DataFrame, share: float, params: dict
     that loading scaled by ``MORNING`` — so the flows fall linearly and the delay does
     not, which is the jam forming.  No queue carries over from one half hour to the next.
 
-    ponytail: the BPR of ``traffic.link_time`` written once more, in polars, because a
+    ponytail: the BPR of ``traffic.bayonne_link_time`` written once more, in polars, because a
     replay does not re-run the rules.  Keep the two in step.
     """
     knobs = {**PARAMS, **(params or {})}
@@ -553,5 +553,5 @@ elif __name__ == "__main__":  # python world.py — the replay must agree with t
     gap = graph.join(replay.select("id", replayed="time"), on="id").select(
         (pl.col("time") - pl.col("replayed")).abs().max()
     ).item()
-    assert gap < 1e-6, f"at_hour drifted from traffic.link_time by {gap} s"
+    assert gap < 1e-6, f"at_hour drifted from traffic.bayonne_link_time by {gap} s"
     print(f"at_hour matches the rule's BPR on {graph.height:,} links (worst gap {gap:.2e} s)")
