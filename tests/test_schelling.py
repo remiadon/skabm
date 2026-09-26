@@ -24,7 +24,6 @@ from skabm.behaviour.residence import (
     grid_neighbors,
     schelling_rules,
     settle,
-    state_extract,
     want_similar,
 )
 from skabm.simulation import RDFSimulator
@@ -55,17 +54,15 @@ def simulator(n_periods: int, seed: int = 0) -> RDFSimulator:
     return RDFSimulator(
         rules=schelling_rules,
         n_periods=n_periods,
-        state_extract=state_extract,
         random_seed=seed,
     )
 
 
 def test_a_tick_is_one_row_per_agent_with_many_valued_links_as_lists():
-    """The default frame: a cell's neighbours are one list, not one row each, so an
+    """A cell's neighbours are one list, not one row each, so an
     aggregate over cells counts each cell once."""
     cells = grid(4)
-    sim = RDFSimulator(rules=schelling_rules, n_periods=1)
-    (frame,) = sim.fit_iter(town(cells, grid_neighbors(cells)))
+    (frame,) = simulator(1).fit_iter(town(cells, grid_neighbors(cells)))
     mine = frame.filter(pl.col("class") == "Cell")
     assert mine.height == mine["agent"].n_unique() == 16
     assert set(mine["neighbor"].list.len()) == {3, 5, 8}  # corners, edges, inside

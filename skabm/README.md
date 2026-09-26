@@ -65,9 +65,10 @@ polars frame, which `polars.DataFrame.to_jax` turns into arrays.
 ## What gets measured
 
 `fit_iter` yields every agent after each tick, one row each (every field it holds, with
-`class` and `t`; a many-valued link, like a cell's neighbours, is a list; `state_extract=`
-replaces the default frame), so a run is `pl.concat(sim.fit_iter(world))` and a macro quantity is
-polars over it: `run.group_by("t").agg(...)`. There is nothing to declare to the simulator.
+`class` and `t`; a link is the target's `agent`, and a many-valued link, like a cell's
+neighbours, is a list), so a run is `pl.concat(sim.fit_iter(world))` and a macro quantity is
+polars over it: `run.group_by("t").agg(...)`, and a person's cell coordinates a join of
+`location` on the cells' `agent`. There is nothing to declare to the simulator.
 
 Mesa makes you declare `model_reporters`, Agents.jl `adata`, NetLogo a metric list. Here the
 run is the data: `class` tells apart the agents that share a field, and a binding constraint

@@ -32,7 +32,6 @@ from scipy.spatial import cKDTree
 from sympy.stats import Uniform
 
 from skabm.dsl import Agents, coalesce, pick, running_sum, sum_over
-from skabm.sparql import _PREFIXES
 
 # Schelling (1971), J. Math. Sociology 1(2); AMBER segregation demo
 want_similar = sp.Symbol("want_similar")
@@ -78,24 +77,6 @@ schelling_relocate = {
         Person.location,
     )
 }
-
-
-def state_extract(model) -> pl.DataFrame:
-    """One row per person: group, cell coordinates (a lattice's), share of similar
-    neighbours."""
-    return model.query(
-        _PREFIXES
-        + """
-    SELECT ?agent ?group ?x ?y ?share_similar
-    WHERE {
-        ?agent a ex:Person ;
-               def:group ?group ;
-               def:share_similar ?share_similar ;
-               def:location ?c .
-        OPTIONAL { ?c def:x ?x ; def:y ?y }
-    }
-    """
-    )
 
 
 schelling_rules = [

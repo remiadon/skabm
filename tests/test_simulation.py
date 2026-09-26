@@ -363,7 +363,6 @@ def test_get_params_and_clone(params):
         "params",
         "n_periods",
         "warm_start",
-        "state_extract",
         "udfs",
         "random_seed",
         "learner",

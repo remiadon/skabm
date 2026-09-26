@@ -179,13 +179,6 @@ class RDFSimulator(BaseEstimator):
         When True, ``fit``/``fit_iter`` continue ticking a model that already
         exists — ``model_``, or the one passed as ``X`` — instead of rebuilding
         and re-initialising it.
-    state_extract : callable | None
-        ``Model -> pl.DataFrame``, called by ``fit_iter`` after each tick to
-        yield raw per-agent state.  ``None`` (the default) projects every field
-        the graph holds, one UNION branch per agent class.  Pass
-        one only when that is not enough — a model whose state hangs off untyped
-        link targets, like ``residence.state_extract`` reaching ``def:x``
-        through ``def:location``.
     udfs : Sequence[Callable[[Model], None]]
         Registrars called on ``model_`` before mapping, each installing SPARQL
         UDFs via ``Model.add_udf``.  SPARQL's built-in function set is fixed and
@@ -226,7 +219,6 @@ class RDFSimulator(BaseEstimator):
         params: dict | None = None,
         n_periods: int = 12,
         warm_start: bool = False,
-        state_extract: Callable[[Model], pl.DataFrame] | None = None,
         udfs: Sequence[Callable[[Model], None]] = (register_polars_random,),
         random_seed: int | None = None,
         learner: Callable[[str, str, str], dict] | None = sac,
@@ -235,7 +227,6 @@ class RDFSimulator(BaseEstimator):
         self.params = params
         self.n_periods = n_periods
         self.warm_start = warm_start
-        self.state_extract = state_extract
         self.udfs = udfs
         self.random_seed = random_seed
         self.learner = learner
@@ -305,8 +296,7 @@ class RDFSimulator(BaseEstimator):
                 self.model_.update(rule)
             self._tick += 1
             self._learn()
-            state = (self.state_extract or _extract)(self.model_)
-            yield state.with_columns(t=pl.lit(self._tick))
+            yield _extract(self.model_).with_columns(t=pl.lit(self._tick))
 
     def _register_udfs(self) -> None:
         """Install every UDF registrar in ``self.udfs`` on ``model_``.
