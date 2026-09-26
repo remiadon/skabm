@@ -60,8 +60,8 @@ LINK = Link()
 
 # What each field *is*, per class: ``{class: {field: (dtype | Link, description)}}``.
 # The OTTR template knows names and types; this also knows where a link lands and
-# what a quantity means, which is what a reader, ``skabm.dsl`` and ``skabm.translate``
-# need.  Filled by ``agent``, so an ad-hoc class is described too.
+# what a quantity means, which is what a reader, and ``skabm.dsl``, need.  Filled by
+# ``agent``, so an ad-hoc class is described too.
 SCHEMA: dict[str, dict[str, tuple]] = {}
 
 _XSD = {
@@ -128,8 +128,8 @@ def agent(
 firm = agent(
     "Firm",
     "alpha margin size w_bar output price liquidity profit dividend delta tech_share "
-    "flees_amount",
-    {"industry": pl.String, "holds_at": Link("Bank")},
+    "flees_amount supply demand sales inventory gamma_d pi_d pi_c",
+    {"industry": pl.String, "holds_at": Link("Bank"), "sector": Link("Sector")},
     required=("alpha", "margin", "size"),
     doc={
         "alpha": "labour productivity: output per employee (Eurostat IO table)",
@@ -146,6 +146,51 @@ firm = agent(
         "industry": "NACE industry code",
         "holds_at": "the bank the firm keeps deposits at (bank.depositors)",
         "flees_amount": "deposits pulled from its bank this step, if distressed",
+        "supply": "goods on offer this step: its output plus the inventory carried in, Q^o",
+        "demand": "real demand for the firm's good this step, Q^d",
+        "sales": "goods sold this step, Q",
+        "inventory": "unsold goods carried into the next step, S",
+        "gamma_d": "growth of its quantity chosen from last step's market, gamma^d",
+        "pi_d": "growth of its price chosen from last step's market (demand-pull), pi^d",
+        "pi_c": "growth of its unit costs from last step's prices (cost-push), pi^c",
+        "sector": "the sector (industry) whose good the firm produces",
+    },
+)
+
+# CANVAS's production network (skabm.behaviour.canvas): a sector is its good.
+sector = agent(
+    "Sector",
+    "price_index b_hh b_cf final_demand purchases demand price_weight output "
+    "labour_cost material_cost capital_cost",
+    required=("b_hh", "b_cf", "final_demand"),
+    doc={
+        "price_index": "producer price index of its good: its firms' prices weighted by "
+        "their sales, P_g",
+        "b_hh": "weight of its good in the households' basket (the CPI), b^HH_g",
+        "b_cf": "weight of its good in capital formation (the capital price index), b^CF_g",
+        "final_demand": "nominal final demand for its good this step: households, "
+        "government, exports and investment",
+        "purchases": "intermediate inputs its firms buy this step, real",
+        "demand": "nominal demand for its good this step, final and intermediate",
+        "price_weight": "sum over its firms of exp(-2 x price), which a firm's chance of "
+        "being picked for its price is divided by",
+        "output": "total output of its firms this step",
+        "labour_cost": "the consumer price index over its good's price_index, minus 1: "
+        "what wages indexed to consumer prices add to its unit costs",
+        "material_cost": "the price of its intermediate inputs (each supplier's "
+        "price_index weighted by its input share) over its good's price_index, minus 1",
+        "capital_cost": "the capital price index over its good's price_index, minus 1",
+    },
+)
+sector_input = agent(
+    "Input",
+    "share",
+    {"buyer": Link("Sector"), "supplier": Link("Sector")},
+    required=("share", "buyer", "supplier"),
+    doc={
+        "share": "share of the supplier's good in the buyer's intermediate inputs, a_sg",
+        "buyer": "the sector using the good as an input, s",
+        "supplier": "the sector producing the good, g",
     },
 )
 
@@ -393,6 +438,8 @@ TEMPLATES = {
     template.iri.iri[len(EX_NS) :]: template
     for template in (
         firm,
+        sector,
+        sector_input,
         household,
         government,
         central_bank,

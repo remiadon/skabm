@@ -17,7 +17,7 @@ Eurostat.
 | | |
 |---|---|
 | **Behaviour as equations** | a rule is a dict of SymPy expressions, `{Firm.price: Firm.price * (1 + inflation)}`. The same rule runs on the knowledge graph and, differentiably, in JAX |
-| **Rules from a description** | `translate.rules` writes those rules from plain English, with a local model that can only produce valid ones |
+| **Rules from a paper** | the `skabm` skill takes a coding agent from a model section to cited, tested rules ([.claude/skills/skabm](.claude/skills/skabm/SKILL.md)) |
 | **Observables in polars** | a run is every agent after every tick, one DataFrame, so any macro quantity, a Gini included, is a polars expression you write. Nothing is declared to the simulator |
 | **Populations from public data** | Eurostat loaders, and calibrators that fit agent rows to known joint facts while every marginal survives exactly |
 | **Citations built in** | each model module carries its published parameter values next to their table and equation |
@@ -120,19 +120,13 @@ def price_level(inflation):
 jax.grad(price_level)(0.02)                    # 4 × 1.05 × 1.02³, the exact derivative
 ```
 
-### Towards a compiler for agent-based modeling
+### From a paper to rules
 
-Given skabm's templates and a description, a local model writes the rules for you, and
-they run on SPARQL or JAX like any other:
-
-```python notest
-from skabm import template, translate
-
-translate.rules("a firm's price becomes its price times 1 plus its margin", [template.firm])
-```
-
-Maintain your own system? Define OTTR templates for your agents and their relations, then
-describe what they do. How it works: [skabm](skabm/README.md#rules-from-a-description).
+A rule is short enough that a coding agent writes it from a paper's model section. The
+`skabm` skill ([.claude/skills/skabm](.claude/skills/skabm/SKILL.md)) is the method: read the
+source, fix the scope, map the equations to the templates' fields, cite every parameter,
+then check the rules on the graph, in JAX and over a long run. `behaviour.canvas` came out
+of it, from Hommes et al. (2025).
 
 ## Quickstart
 
@@ -233,7 +227,7 @@ Step 3 is what a marginal sampler cannot do, and both marginals survive it exact
 | Package | What it is |
 |---|---|
 | [skabm](skabm/README.md) | the engine: templates, the rule DSL and its SPARQL and JAX compilers, the simulator, what gets measured, rules from a description |
-| [skabm.behaviour](skabm/behaviour/README.md) | the rule library: Poledna's economy, banks, the labour market, learning, Schelling, traffic |
+| [skabm.behaviour](skabm/behaviour/README.md) | the rule library: Poledna's economy and CANVAS's firms, banks, the labour market, learning, Schelling, traffic |
 | [skabm.calibration](skabm/calibration/README.md) | populations fitted to public data, and parameters fitted to macro series with black-it |
 
 ## Limitations
@@ -253,10 +247,9 @@ engine carries an economic ABM. Its walls, in short:
 | | |
 |---|---|
 | **The rest in JAX** | the relational operators (`total_by`, `running_sum`, `pick`) have no JAX form yet, so traffic and Schelling run on the graph only |
-| **Every module from its docstring** | three modules regenerate from their prose today; `household`, `firm`, `schelling` and `traffic` wait for a stronger model ([status](skabm/behaviour/README.md#the-docstring-is-the-specification)) |
 | **Rule-scoped validation** | a rule already names the fields it reads and writes; check them against the graph at fit time and emit SHACL shapes |
 | **Sensitivity-ranked observables** | rank the series by paired-seed shocks, to order the panels and detect divergence during calibration |
-| **An MCP server from description to rules** | describe your agents' logic in one text, get skabm rules back, ready to run |
+| **An MCP server** | run a simulation on remote compute, or serve an environment (a grid, a street map), for a client that cannot run skabm itself |
 
 ## References
 

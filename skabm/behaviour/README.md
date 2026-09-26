@@ -12,6 +12,7 @@ One module per model, or per part of one:
 | `learning` | SAC expectations (Hommes & Zhu 2014), as running sums on a signal node | |
 | `schelling` | Schelling segregation, on a lattice or continuous geometry | `settle`, `grid_neighbors`, `geo_neighbors` |
 | `traffic` | day-to-day route choice and pivot-point mode choice (the Bayonne model) | `routes`, `area_membership`; `pedestrianize` is the closure, as an intervention |
+| `canvas` | Hommes et al. (2025), CANVAS: firms' price and quantity heuristics (eqs. 39-42), cost-push through a production network (eqs. 43, 48, 49, 54), demand at each buyer's first pick (A.2.3), the Taylor rule on forecasts (eq. 7; its coefficients are re-estimated each quarter and never reported, so they stay required). Final demand is an input. Taken literally it diverges within 15 quarters ([why](../README.md#limitations)) | `initial`: the opening quarter, §3.1 |
 
 ## What a module holds
 
@@ -32,19 +33,9 @@ Callers override a value by name only: `RDFSimulator(params={"vat_rate": 0.2})`.
 
 ## The docstring is the specification
 
-A module's docstring states its rules in prose: the paper's terms, parameters named "the
-parameter x", no code. `translate.rules` must write the module's `RULES` back from it, in an
-order that computes the same thing. `SKABM_LLM=1 pytest -k regenerates` checks this with
-Qwen2.5-Coder-7B (4-bit MLX and bf16 give the same verdicts):
-
-| Regenerates | Module |
-|---|---|
-| yes | `macro`, `bank`, `labour` |
-| not since the rules became one `RULES` list | `household` (reads a household's dividend as the owned firm's `dividend` field), `firm` (garbles sales) |
-| not yet (xfail) | `schelling`, `traffic` |
-| n/a | `learning`, which has no rule of its own |
-
-Two lessons shape how a docstring is written. The model reads a field inside a rule as
-its old value, so a value one rule computes and another reuses becomes a rule of its own
-that runs first (`labour_target`, `job_finding`, `firm_sales`). And numbered rules under
-a "N rules, run each step, in this order" header keep the order.
+A module's docstring states its rules in prose: the paper's terms, the fields' names,
+parameters named "the parameter x", numbered in the order each step runs them. Every read
+in a rule sees the state before the rule ran, so a value one rule computes and another
+reuses is a rule of its own that runs first (`labour_target`, `job_finding`,
+`firm_sales`). Writing a module from a paper is the `skabm` skill
+([.claude/skills/skabm](../../.claude/skills/skabm/SKILL.md)).

@@ -159,13 +159,12 @@ class Agents:
     """A class's fields: ``Occupation = Agents("Occupation")``, then ``Occupation.employment``.
 
     The fields come from the class's OTTR template (``template.SCHEMA``); a link field
-    reads on through its target, ``Edge.src.unemployment``.  A class without a
-    template names its own fields: ``Agents("Signal", "k s1 s2")``.
+    reads on through its target, ``Edge.src.unemployment``.
     """
 
-    def __init__(self, klass: str, fields: str | None = None):
+    def __init__(self, klass: str):
         self._klass = klass
-        self._fields = fields.split() if fields is not None else list(SCHEMA[klass])
+        self._fields = list(SCHEMA[klass])
 
     def __getattr__(self, name: str):
         return _field(self._klass, name, self._fields)

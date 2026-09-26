@@ -108,7 +108,7 @@ def test_an_undeclared_link_is_named_not_guessed():
 
 
 def test_every_template_field_says_what_it_is():
-    """What a reader, and a model translating English into rules, is told about a class.
+    """What a reader, and an agent writing rules, is told about a class.
 
     A description per field, and a link's target a class that exists.
     """

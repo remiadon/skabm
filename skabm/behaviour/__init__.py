@@ -1,6 +1,6 @@
 """
 The rule library, by model family: ``firm``, ``household``, ``macro``, ``bank``,
-``labour``, ``learning``, ``schelling``, ``traffic``.
+``canvas``, ``labour``, ``learning``, ``schelling``, ``traffic``.
 
 A module's docstring specifies its rules; the code below it is the rules, as dicts
 (``skabm.dsl``), listed in ``RULES`` in the order each step runs them.  Everything

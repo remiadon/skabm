@@ -1,153 +1,205 @@
-"""CANVAS behavioral expectations on the RDFSimulator machinery — a tiny suite.
+"""CANVAS, Hommes, He, Poledna, Siqueira & Zhang (2025), J. Econ. Dyn. Control 172, 104986.
 
-The model lives in skabm/canvas.py: heterogeneous `Firm`s grow by a single
-aggregate expectation held on a `Belief` singleton, and that expectation is
-formed by two competing forecast heuristics (adaptive vs trend-following)
-whose weights evolve with accuracy — the Brock-Hommes heuristic switch that
-sets CANVAS apart from Poledna's constant drift.  The belief node's whole
-initial state is derived in-graph by BELIEF_INIT, so the caller passes only a
-bare `Belief={"id": ["belief"]}` frame (no Eurostat, no calibration).
-
-The model is deterministic (no `pr:` draws), so assertions are exact and no
-seed is needed.  Covered: the engine plug-in + per-tick state, the reused
-labor-capacity cap under a behavioral drift, the weights forming a proper
-distribution, the switch favoring the more accurate heuristic, in-graph belief
-derivation + self-scoping when no Belief is passed, and determinism.
+Model tests assert what the paper says: its Table 3 and 4 values, the price-quantity
+scenarios of Appendix A.2.4 (Fig. 10) through eqs. 39-42, that a firm never moves price
+and quantity together, and that a cheaper or larger firm is picked more (A.2.3).  The
+Taylor rule's coefficients are re-estimated every quarter and never reported (eq. 7), so
+it gets no model test: the rest runs without it.  Engine tests pin the SPARQL and JAX
+runs to each other and ``initial`` to a clearing opening quarter; their numbers are any.
 """
 
+import jax
+import numpy as np
 import polars as pl
+import pytest
+from worlds import world
 
-from skabm.canvas import (
-    BELIEF_INIT,
-    CANVAS_INIT_RULES,
-    CANVAS_PARAMS,
-    CANVAS_UPDATE_RULES,
-    FIRM_GROWTH,
-    state_extract,
-)
-from skabm.rules import DEF_NS, EX_NS
+from skabm.behaviour import canvas, defaults
+from skabm.behaviour.learning import sac
+from skabm.dsl import arrays, jax_tick, sparql
 from skabm.simulation import RDFSimulator
 
-_PREFIX = f"PREFIX ex:<{EX_NS}> PREFIX def:<{DEF_NS}>"
+jax.config.update("jax_enable_x64", True)
 
-# Two firms, both with labor capacity alpha * size = 100; aggregate output
-# starts at 135, leaving headroom so the behavioral drift bites before the cap.
-FIRMS = pl.DataFrame(
+WITHOUT_TAYLOR = [rule for rule in canvas.RULES if rule is not canvas.augmented_taylor]
+TAYLOR = {"boc_rho": 0.9, "boc_r_star": 0.005, "boc_xi_pi": 1.5, "boc_xi_gamma": 0.5}
+
+# One good is the whole basket, capital and input: the weights of Table 3's columns
+# sum to one, so a one-sector economy's are one.
+ONE_SECTOR = pl.DataFrame({"id": ["all"], "b_hh": [1.0], "b_cf": [1.0]})
+SELF = pl.DataFrame(
+    {"id": ["in"], "buyer": ["all"], "supplier": ["all"], "share": [1.0]}
+)
+
+
+def firms(**columns) -> pl.DataFrame:
+    """Firms, of the one sector unless *columns* say otherwise.  Their coefficients are
+    any: every cost ratio is zero while the sectors' prices are equal."""
+    n = len(next(iter(columns.values())))
+    coefficients = {
+        "alpha": 10.0,
+        "size": 10.0,
+        "margin": 0.1,
+        "w_bar": 5.0,
+        "tech_share": 0.5,
+    }
+    return pl.DataFrame(
+        {"id": [f"f{i}" for i in range(n)], "sector": ["all"] * n, "delta": [0.1] * n}
+        | {name: [value] * n for name, value in coefficients.items()}
+        | columns
+    )
+
+
+# Two sectors buying from each other; the numbers are any.
+NETWORK = pl.DataFrame({"id": ["a", "b"], "b_hh": [0.7, 0.3], "b_cf": [0.2, 0.8]})
+EDGES = pl.DataFrame(
     {
-        "id": ["firm_0", "firm_1"],
-        "output": [90.0, 45.0],
-        "alpha": [10.0, 10.0],
-        "size": [10, 10],
+        "id": ["aa", "ab", "ba", "bb"],
+        "buyer": ["a", "a", "b", "b"],
+        "supplier": ["a", "b", "a", "b"],
+        "share": [0.6, 0.4, 0.3, 0.7],
     }
 )
-# The belief singleton is a bare id — BELIEF_INIT derives every field in-graph.
-BELIEF = pl.DataFrame({"id": ["belief"]})
+MIXED = firms(
+    size=[5.0, 20.0, 8.0, 12.0],
+    price=[1.0, 1.1, 0.9, 1.05],
+    sector=["a", "a", "b", "b"],
+    w_bar=[3.0, 6.0, 4.0, 5.0],
+)
 
 
-def _belief(sim, *cols: str) -> dict:
-    """Read named predicates off the singleton belief node."""
-    sel = " ; ".join(f"def:{c} ?{c}" for c in cols)
-    row = sim.model_.query(f"{_PREFIX} SELECT * WHERE {{ ?b a ex:Belief ; {sel} }}")
-    return {c: row[c][0] for c in cols}
-
-
-def _canvas(**kw) -> RDFSimulator:
-    return RDFSimulator(
-        init_rules=CANVAS_INIT_RULES,
-        update_rules=CANVAS_UPDATE_RULES,
-        params=CANVAS_PARAMS,
-        state_extract=state_extract,
-        **kw,
-    )
-
-
-def test_fit_iter_yields_state_per_tick():
-    # Plugs into RDFSimulator unchanged: one state frame per tick, each with a
-    # firm block (output) and the belief row (g_exp).  Firms grow on the first
-    # tick (aggregate 135 -> 137.7 at the seeded 2% drift).
-    sim = _canvas(n_periods=12)
-    states = list(sim.fit_iter(Firm=FIRMS, Belief=BELIEF))
-    assert len(states) == 12
-
-    first = states[0]
-    assert first["output"].sum() > FIRMS["output"].sum()  # 137.7 > 135
-    # every tick carries exactly one belief row with a finite expectation
-    for s in states:
-        g = s.filter(pl.col("g_exp").is_not_null())
-        assert g.height == 1 and g["g_exp"].is_finite().all()
-
-
-def test_growth_respects_labor_capacity():
-    # The Poledna capacity cap, reused verbatim under the behavioral drift: with
-    # only FIRM_GROWTH and a constant high expectation (init_growth=0.5, no
-    # BELIEF_UPDATE to move it), both firms grow but never past alpha * size.
+def run(firm_frame, sectors, inputs, rules=WITHOUT_TAYLOR, ticks=1, **params):
+    """Every agent after each tick, from *firm_frame* in its opening quarter."""
+    firm_frame, sectors = canvas.initial(firm_frame, sectors, inputs)
     sim = RDFSimulator(
-        init_rules=[BELIEF_INIT],
-        update_rules=[FIRM_GROWTH],
-        params={**CANVAS_PARAMS, "init_growth": 0.5},
-        n_periods=10,
-    ).fit(Firm=FIRMS, Belief=BELIEF)
-
-    out = sim.model_.query(
-        f"{_PREFIX} SELECT ?f ?y ?a ?n "
-        "WHERE { ?f a ex:Firm ; def:output ?y ; def:alpha ?a ; def:size ?n }"
+        rules=rules, params=params, n_periods=ticks, udfs=canvas.CANVAS_UDFS
     )
-    assert (out["y"] <= out["a"] * out["n"] + 1e-9).all()
-    assert (out["y"] == 100.0).all()  # both driven up to the cap
-
-
-def test_weights_form_a_distribution():
-    # The heuristic weights are a genuine probability split every tick.
-    sim = _canvas(n_periods=12)
-    for s in sim.fit_iter(Firm=FIRMS, Belief=BELIEF):
-        r = s.filter(pl.col("g_exp").is_not_null())
-        w_ada, w_trend = r["w_ada"][0], r["w_trend"][0]
-        assert w_ada + w_trend == 1.0
-        assert 0.0 <= w_ada <= 1.0 and 0.0 <= w_trend <= 1.0
-
-
-def test_switching_favors_the_accurate_heuristic():
-    # The core mechanism, tested by consistency rather than by predicting a
-    # winner: after a run, the heuristic with the smaller accumulated squared
-    # error must carry the larger weight, and the split must have moved off the
-    # even 0.5 start (switching is active).  Here the trend follower wins —
-    # it tracks the deceleration toward capacity better — but the assertion
-    # holds whichever heuristic leads.
-    sim = _canvas(n_periods=12).fit(Firm=FIRMS, Belief=BELIEF)
-    b = _belief(sim, "u_ada", "u_trend", "w_ada", "w_trend")
-
-    assert (b["u_ada"] < b["u_trend"]) == (b["w_ada"] > b["w_trend"])
-    assert abs(b["w_ada"] - 0.5) > 0.01  # realized w_ada ~ 0.387, well off 0.5
-
-
-def test_belief_derived_in_graph_and_scopes():
-    # BELIEF_INIT materializes the whole belief state from a bare {"id"} frame:
-    # after zero ticks the node already carries g_exp = init_growth and
-    # prev_output = the firms' aggregate output (135), with even weights.
-    derived = _belief(
-        _canvas(n_periods=0).fit(Firm=FIRMS, Belief=BELIEF),
-        "g_exp",
-        "prev_output",
-        "w_ada",
+    graph = world(Firm=firm_frame, Sector=sectors, Input=inputs)
+    return pl.concat(sim.fit_iter(graph), how="diagonal").with_columns(
+        id=pl.col("agent").str.extract(r"#(.*)>$")
     )
-    assert derived == {"g_exp": 0.02, "prev_output": 135.0, "w_ada": 0.5}
 
-    # Self-scoping holds for the new family: with no Belief, FIRM_GROWTH finds
-    # no g_exp to bind and no-ops, so firms stay at their initial output.
-    sim = _canvas(n_periods=5).fit(Firm=FIRMS)
-    out = sim.model_.query(
-        f"{_PREFIX} SELECT ?y WHERE {{ ?f a ex:Firm ; def:output ?y }}"
+
+def test_the_rules_default_to_the_papers_values():
+    """Table 3's inventory depreciation (1 in every sector) and Table 4's τ^SIF and π*;
+    eq. 7's coefficients have no published value, so compiling without them raises."""
+    assert {
+        k: defaults()[k] for k in ("tau_sif", "inventory_depreciation", "pi_star")
+    } == {
+        "tau_sif": 0.0,  # τ^SIF, Table 4
+        "inventory_depreciation": 1.0,  # δ^S_s, Table 3
+        "pi_star": 0.005,  # π*, Table 4
+    }
+    with pytest.raises(KeyError, match="boc_r_star.*boc_rho.*boc_xi_gamma.*boc_xi_pi"):
+        sparql(canvas.augmented_taylor, defaults())
+
+
+def test_the_four_scenarios_of_fig_10():
+    """A.2.4 (a)-(d), by eqs. 39-42: excess supply at a price above the sector's cuts the
+    price, below it cuts production; excess demand above it raises production, below it
+    raises the price; the one that moves, moves by demand over supply."""
+    supply, demand = [100.0, 100.0, 80.0, 80.0], [80.0, 80.0, 100.0, 100.0]
+    price = [1.2, 0.8, 1.2, 0.8]  # the sector's index is 1: every firm sold 80
+    opening = firms(
+        price=price, supply=supply, demand=demand, output=supply, sales=[80.0] * 4
     )
-    assert sorted(out["y"].to_list()) == [45.0, 90.0]
+    after = run(opening, ONE_SECTOR, SELF).filter(pl.col("class") == "Firm").sort("id")
+    assert after["price"].to_list() == pytest.approx([1.2 * 0.8, 0.8, 1.2, 0.8 * 1.25])
+    assert after["output"].to_list() == pytest.approx(
+        [100.0, 100 * 0.8, 80 * 1.25, 80.0]
+    )
 
 
-def test_deterministic_across_cold_fits():
-    # No randomness anywhere in CANVAS, so two cold fits reproduce each other to
-    # the last digit — no seed required (contrast schelling's pr:uniform runs).
-    def path(sim):
-        return [
-            round(s["output"].sum(), 10)
-            for s in sim.fit_iter(Firm=FIRMS, Belief=BELIEF)
-        ]
+def test_a_firm_never_moves_price_and_quantity_together():
+    """ "We also assume that firms cannot change their quantity and price at the same
+    time" (A.2.4), in a production network run for twelve quarters."""
+    ticks = run(MIXED, NETWORK, EDGES, ticks=12).filter(pl.col("class") == "Firm")
+    assert ((ticks["gamma_d"] != 0) | (ticks["pi_d"] != 0)).any()  # something moved
+    assert (ticks["gamma_d"] * ticks["pi_d"] == 0).all()
 
-    assert path(_canvas(n_periods=12)) == path(_canvas(n_periods=12))
+
+def test_a_cheaper_or_larger_firm_is_picked_more():
+    """A.2.3: "a firm charging a relatively lower price than its competitors is more
+    likely to be picked by consumers", and "a larger firm tends to have a higher
+    probability".  Every market clears in the opening quarter, so nothing moves before
+    buyers choose."""
+    output, price = [100.0, 100.0, 200.0], [1.0, 0.9, 1.0]  # a base, cheaper, larger
+    opening = firms(price=price, output=output)
+    after = run(opening, ONE_SECTOR, SELF).filter(pl.col("class") == "Firm").sort("id")
+    base, cheaper, larger = after["demand"].to_list()
+    assert cheaper > base and larger > base
+
+
+def test_table_3s_weights_price_the_opening_basket_at_one():
+    """Eqs. 48 and 54 at §3.1's opening prices, all one, and Table 3's b^HH and b^CF
+    columns: the CPI and the capital price index are one, to the table's rounding, so
+    neither wages nor capital push costs in the opening quarter (eq. 43)."""
+    # fmt: off
+    b_hh = [0.0143, 0.0023, 0.0172, 0.0004, 0.1967, 0.0393, 0.1194, 0.0359, 0.0361,
+            0.3117, 0.0068, 0.0055, 0.0035, 0.0282, 0.0171, 0.0678, 0.0256, 0.0397, 0.0326]
+    b_cf = [0.0003, 0.0148, 0.0024, 0.5142, 0.2612, 0.0425, 0.0, 0.0086, 0.0172,
+            0.0147, 0.0705, 0.0012, 0.0001, 0.0004, 0.0003, 0.0001, 0.0007, 0.0006, 0.0502]
+    # fmt: on
+    ids = [f"s{i}" for i in range(19)]
+    sectors = pl.DataFrame({"id": ids, "b_hh": b_hh, "b_cf": b_cf})
+    opening = firms(output=[1.0] * 19, sector=ids)
+    none = pl.DataFrame(
+        schema={"buyer": pl.String, "supplier": pl.String, "share": float}
+    )
+    _, sectors = canvas.initial(opening, sectors, none)
+    assert sectors["labour_cost"].to_list() == pytest.approx([0.0] * 19, abs=1e-4)
+    assert sectors["capital_cost"].to_list() == pytest.approx([0.0] * 19, abs=1e-12)
+
+
+# --- engine -------------------------------------------------------------------------
+
+BANK = pl.DataFrame({"id": ["cb"], "policy_rate": [0.01]})
+
+
+def test_the_opening_quarter_clears_every_sector():
+    """``initial``: each sector's final demand plus what the others buy from it is what
+    its firms make, so its first quarter's demand is its opening sales' value, and data
+    it already has is kept."""
+    kept = NETWORK.with_columns(final_demand=pl.Series([None, 7.0]))
+    opening, sectors = canvas.initial(MIXED, kept, EDGES)
+    assert sectors.filter(pl.col("id") == "b")["final_demand"].item() == 7.0
+    first = run(MIXED, NETWORK, EDGES).filter(pl.col("class") == "Sector").sort("id")
+    made = opening.group_by("sector").agg((pl.col("price") * pl.col("output")).sum())
+    assert first["demand"].to_list() == pytest.approx(
+        made.sort("sector")["price"].to_list()
+    )
+
+
+def test_sparql_and_jax_agree_on_canvas():
+    """Every rule, the Taylor rule included, and the SAC learners, six quarters on the
+    graph and in JAX from the same opening frames."""
+    ticks = 6
+    opening, sectors = canvas.initial(MIXED, NETWORK, EDGES)
+    sim = RDFSimulator(
+        rules=canvas.RULES, params=TAYLOR, n_periods=ticks, udfs=canvas.CANVAS_UDFS
+    )
+    graph = world(Firm=opening, Sector=sectors, Input=EDGES, CentralBank=BANK)
+    *_, last = sim.fit_iter(graph)
+    last = last.with_columns(id=pl.col("agent").str.extract(r"#(.*)>$"))
+
+    frames = {"Firm": opening, "Sector": sectors, "Input": EDGES, "CentralBank": BANK}
+    learners = [sac(*signal) for signal in sorted(sim._consumed)]
+    state = arrays(frames, [*canvas.RULES, *learners])
+    params = {**defaults(), **TAYLOR}
+    learn, quarter = jax_tick(learners), jax_tick(canvas.RULES)
+    state = learn(state, params)
+    for _ in range(ticks):
+        state = learn(quarter(state, params), params)
+
+    for klass, fields in {
+        "Firm": ("price", "output", "demand", "sales", "pi_c"),
+        "Sector": ("price_index", "demand", "material_cost"),
+        "CentralBank": ("policy_rate",),
+    }.items():
+        agents = last.filter(pl.col("id").is_in(frames[klass]["id"].to_list())).sort(
+            "id"
+        )
+        order = np.argsort(frames[klass]["id"].to_numpy())
+        for field in fields:
+            got = np.asarray(state[klass][field])[order]
+            assert got == pytest.approx(agents[field].to_numpy(), rel=1e-9), field
