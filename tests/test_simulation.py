@@ -106,26 +106,28 @@ def gdp(state: pl.DataFrame) -> float:
 def path(sim) -> list:
     """GDP per tick, off the frame — a product no class-level aggregate spans."""
     return [
-        gdp(sim.extract())
-        for _ in sim.fit_iter(
+        gdp(frame)
+        for frame in sim.fit_iter(
             world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
         )
     ]
 
 
-def test_fit_iter_yields_measurements_per_tick(shocked):
+def test_fit_iter_yields_every_agent_per_tick(shocked):
     sim = RDFSimulator(params=shocked, n_periods=4, random_seed=11)
 
-    run = pl.DataFrame(
+    run = pl.concat(
         sim.fit_iter(world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK))
     )
-    # one row per tick, one column per observable plus t, and no hole in it
-    assert run.height == 4
-    assert run["t"].to_list() == [1, 2, 3, 4]
-    assert set(run.columns) == {"t"} | {o.signal for o in sim.observables_}
-    assert run["sig__SUM__Firm__output"].null_count() == 0
+    # every agent after every tick, with its class
+    agents = FIRMS.height + HOUSEHOLDS.height + CENTRAL_BANK.height
+    assert run.group_by("t").len().sort("t").rows() == [
+        (t, agents) for t in (1, 2, 3, 4)
+    ]
+    assert set(run["class"]) == {"Firm", "Household", "CentralBank"}
+    output = run.group_by("t", maintain_order=True).agg(pl.col("output").sum())
     # shocks move output, so the path is not flat
-    assert run["sig__SUM__Firm__output"].n_unique() == 4
+    assert output["output"].null_count() == 0 and output["output"].n_unique() == 4
 
     # a cold refit rebuilds the world from scratch: same trajectory again
     gdp_path = path(sim)
@@ -147,8 +149,8 @@ def test_warm_start_continues_the_world(shocked):
     warm = RDFSimulator(params=shocked, n_periods=2, warm_start=True, random_seed=5)
     warm.model_ = sim.model_
     rows = list(warm.fit_iter())
-    assert [r["t"] for r in rows] == [1, 2]
-    assert gdp(warm.extract()) != gdp_after_cold  # advanced beyond the cold fit
+    assert [r["t"][0] for r in rows] == [1, 2]
+    assert gdp(rows[-1]) != gdp_after_cold  # advanced beyond the cold fit
 
     with pytest.raises(TypeError, match="maplib Model"):
         warm.fit({"Firm": FIRMS})  # populations are mapped by the caller, not here
@@ -169,13 +171,14 @@ def test_fit_takes_a_model_someone_else_built(params):
         "WHERE { ?f a ex:Firm ; def:price ?p }"
     )
     sim = RDFSimulator(params=params, n_periods=2, random_seed=3)
-    run = pl.DataFrame(sim.fit_iter(world))
+    run = pl.concat(sim.fit_iter(world))
 
     assert sim.model_ is world  # advanced in place, not copied
-    assert run.height == 2
+    assert run["t"].n_unique() == 2
     # the init rules still ran on it, and the intervention was the opening state
     assert world.query(f"{_PREFIX} SELECT ?w WHERE {{ ?h def:wealth ?w }}").height == 3
-    assert run["sig__AVG__Firm__price"][0] > 2.0
+    first = run.filter((pl.col("t") == 1) & (pl.col("class") == "Firm"))
+    assert first["price"].mean() > 2.0
 
 
 def test_warm_start_takes_the_model_to_continue(params):
@@ -361,11 +364,9 @@ def test_get_params_and_clone(params):
         "n_periods",
         "warm_start",
         "state_extract",
-        "track",
         "udfs",
         "random_seed",
         "learner",
-        "duckdb_connection",
     }
     assert got["n_periods"] == 7
     assert got["params"]["total_deposits"] == 3000.0
@@ -416,25 +417,14 @@ def test_the_world_and_the_sidecar_stay_separate(params):
     assert sim.meta_.query(f"{_PREFIX} SELECT ?f WHERE {{ ?f a ex:Firm }}").height == 0
 
 
-def test_the_ir_decides_what_the_frontend_shows(params):
-    """The IR is machinery: it is never exposed, but it settles both frontends.
-
-    ``extract()``'s columns and the yielded row's keys are both consequences of
-    the state / structure partition, which is why nothing in either has to be
-    named by hand.  Pinned through the public surface, not through ``_ir``.
-    """
-    sim = RDFSimulator(params=params, n_periods=1).fit(
-        world(Firm=FIRMS, Household=HOUSEHOLDS)
-    )
-    assert not hasattr(sim, "ir_"), "the IR is machinery, not an interface"
-
-    columns = set(sim.extract().columns)
+def test_a_tick_yields_every_field(params):
+    """A tick's frame is every field the graph holds, none named by hand: the state the
+    rules write and the structure the data carries."""
+    sim = RDFSimulator(params=params, n_periods=1)
+    (frame,) = sim.fit_iter(world(Firm=FIRMS, Household=HOUSEHOLDS))
+    columns = set(frame.columns)
     assert {"output", "price", "wealth"} <= columns  # state, written by the rules
     assert {"alpha", "size", "psi"} <= columns  # structure, carried by the data
-
-    signals = {o.signal for o in sim.observables_}
-    assert "sig__SUM__Firm__output" in signals  # state is measured
-    assert not any("__alpha" in s for s in signals)  # structure never moves
 
 
 def test_starting_values_fill_in_rather_than_pile_on():

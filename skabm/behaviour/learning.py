@@ -4,8 +4,23 @@ from __future__ import annotations
 
 import sympy as sp
 
-from skabm.dsl import DSLError, coalesce, lag, mean, node, total
-from skabm.history import signal_name
+from skabm.dsl import DSLError, coalesce, is_rule, lag, mean, node, total
+
+# A signal's node is keyed by (aggregate, agent class, field): several classes share a
+# field (firms, households and government all carry a price).
+signal_name = "sig__{}__{}__{}".format
+
+
+def consumed(rules) -> set:
+    """``(agg, class, field)`` of every signal the rules read back (``expect``)."""
+    return {
+        tuple(s.name[1:].split(".")[0].split("__", 3)[1:])
+        for rule in rules
+        if is_rule(rule)
+        for e in rule.values()
+        for s in sp.sympify(e).atoms(sp.Symbol)
+        if s.name.startswith("@sig__")
+    }
 
 
 def sac(agg: str, klass: str, predicate: str) -> dict:
@@ -15,7 +30,7 @@ def sac(agg: str, klass: str, predicate: str) -> dict:
     J. Econ. Theory 149; Poledna et al. (2023) eqs. 6, 9.
 
     Seven running sums replace the sample, each 0 until the node carries it:
-    ``tests/test_history.py`` checks them against the two-pass estimate.
+    ``tests/test_learning.py`` checks them against the two-pass estimate.
     """
     levels = {"SUM": total, "AVG": mean}
     if agg not in levels:

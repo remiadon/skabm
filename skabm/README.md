@@ -10,7 +10,6 @@ and so do populations and parameter search ([calibration](calibration/README.md)
 | `dsl` | Rules as SymPy dicts: `Agents`, the graph operators, and the SPARQL and JAX compilers |
 | `translate` | `rules(description, templates)`: DSL rules generated from a description, under the templates' grammar |
 | `sparql` | Namespaces and the UDF registrars: random draws, `exp`/`log` (a rule compiles to SPARQL through `dsl.sparql`) |
-| `history` | The observables the rules imply, how they are measured, and the DuckDB table that persists them on request |
 | `simulation` | `RDFSimulator`: `fit`/`fit_iter` over rule dicts compiled to SPARQL |
 | `datasets` | Eurostat loaders (IO tables, business demography) |
 
@@ -21,7 +20,7 @@ and so do populations and parameter search ([calibration](calibration/README.md)
 | **X is the world** | a maplib `Model`, with populations mapped into it by `skabm.template` and `Model.map`. Predicates are column names, so the DataFrame schema *is* the graph schema, and an IRI-valued column (`employer`, `owns`) is a graph edge. Structure is built in polars before mapping (`firm.ownership`, `bank.depositors`, `schelling.grid_neighbors`), never by a rule |
 | **Rules are hyperparameters** | rule dicts are passed to `__init__`, so `get_params`/`clone` work. `rules` (a module's `RULES`) are the dynamics, upserted every tick in the paper's event order. There is no initialisation phase: the world a fit starts from is its opening state. The default set self-scopes, since rules whose classes are all absent match nothing |
 | **`model_` is the fitted artifact** | the graph where data and rules blend into one evolving world. A cold `fit` rebuilds it; `warm_start=True` continues it |
-| **Structure vs state** | predicates no rule writes (links, coefficients) are *structure*: written at fit, and edited only by intervention. Predicates the rules upsert are *state*, owned by the rules after t=0. This is derived, not asserted: a rule dict names what it writes, and `history.observables` measures exactly that |
+| **Structure vs state** | predicates no rule writes (links, coefficients) are *structure*: written at fit, and edited only by intervention. Predicates the rules upsert are *state*, owned by the rules after t=0. This is derived, not asserted: a rule dict names what it writes |
 | **Randomness is a UDF** | SPARQL has no `RAND`, so polars-random is registered as `pr:uniform`/`pr:normal` and pinned by `RDFSimulator(random_seed=...)`. `Normal`/`Uniform` in a DSL rule compile to it |
 
 ## The world
@@ -61,24 +60,23 @@ for `jax.grad`: `dsl.jax_tick(rules)` steps `{class: {field: array}}`, and
 The tick drops into `jax.lax.scan`. The labour market runs both ways to 1e-12, and a
 gradient through 25 ticks matches finite differences. The relational operators, and
 scatters over many-valued links, have no JAX form yet, and `jax_tick` refuses them by
-name. A simulation run on SPARQL still reaches JAX through its telemetry: the yielded
-rows are a numeric table that `polars.DataFrame.to_jax` turns into arrays.
+name. A simulation run on SPARQL still reaches JAX through its telemetry: a run is a
+polars frame, which `polars.DataFrame.to_jax` turns into arrays.
 
 ## What gets measured
 
-Mesa makes you declare `model_reporters`, Agents.jl `adata`, NetLogo a metric list,
-because their rules are opaque host-language functions. skabm's rules are SymPy, so
-`history.observables` reads the `(class, field, aggregate)` triples they imply directly
-off the expressions. Each predicate is measured under the aggregate the rules apply to it:
-`centralbank_rate` takes the mean price, so the price signal is a mean, not a sum.
+`fit_iter` yields every agent after each tick, one row each (every field it holds, with
+`class` and `t`; a many-valued link, like a cell's neighbours, is a list; `state_extract=`
+replaces the default frame), so a run is `pl.concat(sim.fit_iter(world))` and a macro quantity is
+polars over it: `run.group_by("t").agg(...)`. There is nothing to declare to the simulator.
 
-Every binding constraint becomes a series too. The `min` in Poledna's eq. 5 gives the share
-of firms pinned at `alpha * size`; the `max` in the Taylor rule gives the share of quarters
-at the zero lower bound.
+Mesa makes you declare `model_reporters`, Agents.jl `adata`, NetLogo a metric list. Here the
+run is the data: `class` tells apart the agents that share a field, and a binding constraint
+is one comparison, `(pl.col("output") >= pl.col("alpha") * pl.col("size")).mean()` for the
+share of firms at Poledna's eq. 5 cap.
 
-**Where the line is:** the total of firm output follows from the rules, but calling it
-*GDP* is a modelling claim, and a distributional statistic (a Gini, a percentile ratio) is
-not derivable at all. Both stay with you, in polars over `sim.extract()`.
+What to look at is the researcher's call: calling the total of firm output *GDP* is a
+modelling claim, and so is choosing a Gini over a percentile ratio.
 
 ## Learned expectations
 

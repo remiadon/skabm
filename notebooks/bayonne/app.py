@@ -162,7 +162,7 @@ days, flows = result["days"], result["flows"]
 after = days.filter(pl.col("phase") != "warm-up")["day"].to_list()
 day = {"before": BEFORE, "first": after[0], "last": after[-1]}[STATES[choice]]
 
-TIME, CAR, BUS = "sig__AVG__Commuter__time", "sig__AVG__Commuter__car", "sig__AVG__Commuter__bus"
+TIME, CAR, BUS = "time", "car", "bus"
 SHOWN = {"Mean commute": (TIME, 1 / 60, "{:.1f} min", "inverse"),
          "Commuting by car": (CAR, 100, "{:.1f}%", "inverse"),
          "By public transport": (BUS, 100, "{:.1f}%", "normal"),

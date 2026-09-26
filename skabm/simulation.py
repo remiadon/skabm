@@ -12,16 +12,16 @@ advanced in place.  How the agents got into it — ``skabm.template`` and
 The world is the opening state, starting values included: what happens before the first
 step is data (``household.initial``, ``firm.ownership``), not a rule.
 
-``fit_iter`` yields one ``{signal: level}`` row per tick — the observables
-``history.observables`` derives from the rules, so nothing declares a reporter.  ``model_`` is
-current at each yield, so ``sim.extract()`` in the loop body gives the per-agent
-frame a distributional statistic needs.
+``fit_iter`` yields every agent's state after each tick, one frame with ``t`` and
+``class`` columns: a run is ``pl.concat(sim.fit_iter(world))``, and a macro quantity is
+polars over it, written by whoever knows what to look for.  ``model_`` is current
+at each yield.
 
 A rule naming an ``ex:sig__<agg>__<Class>__<predicate>`` signal reads a learned
 expectation of that aggregate.  The simulator builds one ``learner`` rule per signal
 (``behaviour.learning.sac`` by default) and runs it after every tick, so the forecast is
 state on the signal's node, re-estimated from running sums rather than from a stored
-series.  A database is only for keeping the observables (``duckdb_connection=``).
+series.
 
 **Two models.**  ``model_`` is the world, agents plus the signal nodes their expectations
 live on; ``meta_`` is behaviour provenance, so a ``?s ?p ?o`` over the world is not
@@ -56,14 +56,12 @@ from skabm.behaviour.household import (
     household_income,
     satisificing_consume,
 )
-from skabm.behaviour.learning import sac
+from skabm.behaviour.learning import consumed, sac
 from skabm.behaviour.macro import (
     centralbank_rate,
     government_spend,
 )
 from skabm.dsl import is_rule, sparql
-from skabm.history import TABLE as HISTORY_TABLE
-from skabm.history import connect, consumed, measure, observables, record, state_frame
 from skabm.sparql import _PREFIXES, DEF_NS, EX_NS, register_polars_random
 
 # Canonical Poledna (2023) rule composition, sourced from behaviour/.
@@ -130,7 +128,10 @@ _BEHAVIOUR = EX_NS + "Behaviour"
 
 
 def _extract(model: Model) -> pl.DataFrame:
-    """Every agent's every field, one UNION branch per class, null where it has none."""
+    """Every agent's class and every field, one row per agent, null where it has none:
+    one UNION branch per class, then grouped by agent, since a many-valued link (a
+    cell's neighbours) repeats the agent once per value.  That link is the list of
+    them; every other field is its one value."""
     fields: dict = {}
     pairs = model.query("SELECT DISTINCT ?c ?p WHERE { ?a a ?c ; ?p ?o }")
     for c, p in pairs.iter_rows():
@@ -139,15 +140,20 @@ def _extract(model: Model) -> pl.DataFrame:
             fields.setdefault(c[len(EX_NS) :], set()).add(p[len(DEF_NS) :])
     columns = sorted(set().union(*fields.values()))
     branches = "\n  UNION ".join(
-        f"{{ ?agent a ex:{klass} "
+        f'{{ ?agent a ex:{klass} BIND("{klass}" AS ?class) '
         + " ".join(f"OPTIONAL {{ ?agent def:{p} ?{p} }}" for p in sorted(ps))
         + " }"
         for klass, ps in sorted(fields.items())
     )
-    return model.query(
-        f"{_PREFIXES}SELECT ?agent {' '.join('?' + c for c in columns)}\n"
+    rows = model.query(
+        f"{_PREFIXES}SELECT ?agent ?class {' '.join('?' + c for c in columns)}\n"
         f"WHERE {{\n  {branches}\n}}"
     )
+    grouped = rows.group_by("agent", maintain_order=True).agg(
+        pl.exclude("agent").drop_nulls().unique(maintain_order=True)
+    )
+    many = [c for c in grouped.columns[1:] if (grouped[c].list.len() > 1).any()]
+    return grouped.with_columns(pl.exclude("agent", *many).list.first())
 
 
 def _rules(learned) -> tuple:
@@ -180,13 +186,6 @@ class RDFSimulator(BaseEstimator):
         one only when that is not enough — a model whose state hangs off untyped
         link targets, like ``schelling.state_extract`` reaching ``def:x``
         through ``def:location``.
-    track : bool
-        Whether to measure every observable the rules imply, or only the signals
-        the rules read back.  The default measures everything: it is one
-        aggregate query per agent class per tick and it needs no database, so
-        the telemetry is there whether or not anything consumes it.  ``False``
-        is for a rule set whose aggregates are expensive and whose series
-        nobody wants.
     udfs : Sequence[Callable[[Model], None]]
         Registrars called on ``model_`` before mapping, each installing SPARQL
         UDFs via ``Model.add_udf``.  SPARQL's built-in function set is fixed and
@@ -204,65 +203,45 @@ class RDFSimulator(BaseEstimator):
         reproducible sequence.  Leave None for entropy-seeded stochastic runs.
     learner : Callable[[str, str, str], dict] | None
         ``(agg, class, predicate) -> rule``, called once per signal the rules read
-        (``ex:sig__<agg>__<Class>__<pred>``, ``history.consumed``).
+        (``ex:sig__<agg>__<Class>__<pred>``, ``learning.consumed``).
         The rules it returns run after every tick, the opening state included,
         and write ``def:forecast`` on the signal's node, which is what
         ``behaviour.learning.expect`` reads.  Defaults to
         ``behaviour.learning.sac``, Poledna's Sample-Autocorrelation-learned
         expectations (eq. 6/9); another estimator is another function.  ``None``
         learns nothing, and every expectation stays at its structural zero.
-    duckdb_connection : str | duckdb.DuckDBPyConnection | None
-        Where to persist the observables, one row per signal per tick.  ``None``
-        (default) keeps none: ``fit_iter`` yields them.  A string is a file path,
-        so a long run persists tick by tick and can be inspected after the
-        process exits; an already-open connection is used as given and never
-        closed here.
 
     Attributes
     ----------
     model_ : maplib.Model
         The world state: empty after ``__init__``, populated and evolved by
         ``fit`` / ``fit_iter``.
-    observables_ : tuple[skabm.history.Observable, ...]
-        The measurements this run takes, derived from the rules and name-sorted.
-        Their names are the keys of every row ``fit_iter`` yields.
     meta_ : maplib.Model
         Behaviour provenance.  Never holds agents — see "Two models" above.
-    connection_ : duckdb.DuckDBPyConnection | None
-        The DuckDB connection the observables are persisted to, ``None`` unless a
-        ``duckdb_connection`` was named.  ``history()`` returns the table as polars.
     """
 
     def __init__(
         self,
-        rules: Sequence[dict | str] = DEFAULT_RULES,
+        rules: Sequence[dict] = DEFAULT_RULES,
         params: dict | None = None,
         n_periods: int = 12,
         warm_start: bool = False,
         state_extract: Callable[[Model], pl.DataFrame] | None = None,
-        track: bool = True,
         udfs: Sequence[Callable[[Model], None]] = (register_polars_random,),
         random_seed: int | None = None,
         learner: Callable[[str, str, str], dict] | None = sac,
-        duckdb_connection: str | object | None = None,
     ):
         self.rules = rules
         self.params = params
         self.n_periods = n_periods
         self.warm_start = warm_start
         self.state_extract = state_extract
-        self.track = track
         self.udfs = udfs
         self.random_seed = random_seed
         self.learner = learner
-        self.duckdb_connection = duckdb_connection
         self.model_ = Model()
         self.meta_ = Model()
-        self.connection_ = None
-        self._learners = []
-        self._implied, self._consumed = (), set()
-        self._tick = 0
-        self.observables_ = ()
+        self._learners, self._consumed, self._tick = [], set(), 0
 
     def _cold_start(
         self,
@@ -275,9 +254,8 @@ class RDFSimulator(BaseEstimator):
         loop in ``fit_iter`` is shared by both paths.  *world* is a maplib
         ``Model``, used as given and advanced in place; ``None`` is an empty one.
 
-        The opening state is then observed as t=0: the learners see their first
-        level, so the first tick already has a base period to measure growth
-        against, and a database, if one was named, starts with that row.
+        The learners then run on the opening state, so the first tick already has a
+        base period to measure growth against.
         """
         self.model_ = Model() if world is None else world
         self.meta_ = Model()
@@ -295,28 +273,15 @@ class RDFSimulator(BaseEstimator):
         _inject_metadata(self.meta_, self.rules)
         self._bind_graph()
         self._tick = 0
-        self.connection_ = None
-        if self.duckdb_connection is not None:
-            # a cold fit restarts the world, memory included: a file the user
-            # pointed us at is cleared rather than silently continued.
-            self.connection_ = connect(self.duckdb_connection)
-            self.connection_.execute(f"DELETE FROM {HISTORY_TABLE}")
-        if self._learners or self.connection_ is not None:
-            self._observe(t=0)
+        self._learn()
 
-    def fit_iter(self, X=None) -> Iterator[dict]:
-        """Take the world, then yield one ``{signal: level}``
-        row after each of the ``n_periods`` ticks, ``t`` included.
+    def fit_iter(self, X=None) -> Iterator[pl.DataFrame]:
+        """Take the world, then yield every agent's state after each of
+        the ``n_periods`` ticks, with a ``t`` column: a run is ``pl.concat(...)``.
 
         *X* is a maplib ``Model`` — advanced in place, so whatever it already
         holds is the opening state.  ``None`` continues ``model_`` under
         ``warm_start``, and is an empty world otherwise.
-
-        The row is ``observables_``, settled at fit time and so the same width
-        every tick: a whole run is ``pl.DataFrame(sim.fit_iter(...))``.  For
-        per-agent state call ``sim.extract()`` in the loop body — ``model_`` is
-        current at each yield, and a loop that does not need the frame pays
-        nothing.
         """
         if X is not None and not isinstance(X, Model):
             raise TypeError(
@@ -327,28 +292,21 @@ class RDFSimulator(BaseEstimator):
             pr.set_random_seed(self.random_seed)
         merged = {**defaults(), **(self.params or {})}
         rules = [sparql(rule, merged) for rule in self.rules]
-        self._implied = observables(self.rules, merged)
         self._consumed = consumed(self.rules)
         if self.warm_start:
             if X is not None:
                 self.model_ = X
             self._register_udfs()
             self._bind_graph()
-            if self.duckdb_connection is not None and self.connection_ is None:
-                # a simulator continuing someone else's world keeps their
-                # database going: the tick count resumes from its last row.
-                self.connection_ = connect(self.duckdb_connection)
-                last = self.connection_.execute(
-                    f"SELECT MAX(t) FROM {HISTORY_TABLE}"
-                ).fetchone()[0]
-                self._tick = 0 if last is None else int(last)
         else:
             self._cold_start(X, rules)
         for _ in range(self.n_periods):
             for rule in rules:
                 self.model_.update(rule)
             self._tick += 1
-            yield self._observe(t=self._tick)
+            self._learn()
+            state = (self.state_extract or _extract)(self.model_)
+            yield state.with_columns(t=pl.lit(self._tick))
 
     def _register_udfs(self) -> None:
         """Install every UDF registrar in ``self.udfs`` on ``model_``.
@@ -359,31 +317,23 @@ class RDFSimulator(BaseEstimator):
         for register in self.udfs:
             register(self.model_)
 
-    def _observe(self, t: int) -> dict:
-        """Measure this period, persist it if there is a database, learn from it.
-
-        The measurement is the return value — the row ``fit_iter`` yields.  The
-        learners run after it, so the next tick's rules read forecasts that
-        include this period.
-        """
-        row = measure(self.model_, self.observables_)
-        if self.connection_ is not None:
-            record(self.connection_, row, t)
+    def _learn(self) -> None:
+        """Run the learners on this period, so the next tick's rules read forecasts
+        that include it."""
         for rule in self._learners:
             self.model_.update(rule)
-        return {"t": t, **row}
 
     def _bind_graph(self) -> None:
-        """Settle what gets recorded and learned, from the classes the graph holds.
+        """Settle what gets learned, from the classes the graph holds.
 
         A signal over a class the graph lacks gets no learner: there is no level to
         learn from, and its expectation stays at the structural zero ``expect``
         defaults to.
         """
         present = self._classes()
-        self.observables_ = self._recorded(present)
+        params = {**defaults(), **(self.params or {})}
         self._learners = [
-            sparql(rule, {**defaults(), **(self.params or {})})
+            sparql(rule, params)
             for signal in sorted(self._consumed if self.learner else ())
             if signal[1] in present
             for rule in _rules(self.learner(*signal))
@@ -397,43 +347,8 @@ class RDFSimulator(BaseEstimator):
             if iri.strip("<>").startswith(EX_NS)
         }
 
-    def _recorded(self, present: set) -> tuple:
-        """Which observables this run measures, name-sorted.
-
-        Sorting is the ``(N, D)`` contract a calibrator reads off the yielded
-        rows: column *j* means the same thing on every tick and across every
-        candidate.  Classes the graph does not have are dropped — the default
-        rule set implies a central bank whether or not one was passed, and a
-        column of nulls is not a measurement.
-        """
-        found = tuple(o for o in self._implied if o.klass in present)
-        if self.track:
-            return found
-        return tuple(o for o in found if (o.agg, o.klass, o.name) in self._consumed)
-
-    def extract(self) -> pl.DataFrame:
-        """Per-agent state: ``state_extract`` if one was given, else every field
-        of every agent the graph holds."""
-        if self.state_extract is not None:
-            return self.state_extract(self.model_)
-        return _extract(self.model_)
-
-    def history(self) -> pl.DataFrame:
-        """Every persisted observable, long — ``signal``, ``t``, ``level``.
-
-        The sidecar: the same series ``fit_iter`` yielded, after a database also
-        kept it.
-        """
-        if self.connection_ is None:
-            raise RuntimeError(
-                "no history was kept: no duckdb_connection was given. The "
-                "observables are yielded by fit_iter; pass duckdb_connection "
-                "(needs the 'history' extra) to keep them in a database too."
-            )
-        return state_frame(self.connection_)
-
     def fit(self, X=None) -> RDFSimulator:
-        """Take the world, apply init rules, run all ticks; return self."""
+        """Take the world, run all ticks; return self."""
         for _ in self.fit_iter(X):
             pass
         return self

@@ -56,29 +56,6 @@ def _model(cal_params, **kwargs):
     )
 
 
-def test_summarise_defaults_to_the_derived_observables(cal_params):
-    """The yielded observables *are* the per-tick summary statistics.
-
-    A method-of-moments loss wants a fixed vector per tick, which is what the
-    rule set already implies — so the common case passes no ``summarise`` and
-    the columns come out named.
-    """
-    model = simulator_model(cal_world, free=["growth_sigma"], params=cal_params)
-    out = model([0.0], 6, 0)
-
-    assert out.shape == (6, len(model.observables_))
-    assert "sig__SUM__Firm__output" in model.observables_
-    assert model.observables_ == tuple(sorted(model.observables_))  # stable columns
-    assert np.isfinite(out).all()
-
-    # track=False narrows the vector to the signals the rules read back
-    narrow = simulator_model(
-        cal_world, free=["growth_sigma"], params=cal_params, track=False
-    )
-    assert narrow([0.0], 6, 0).shape == (6, 3)
-    assert set(narrow.observables_) < set(model.observables_)
-
-
 def test_simulator_model_shape_and_guards(cal_params):
     """``model(theta, N, seed) -> (N, D)``, and the two ways to misuse it."""
     model = _model(cal_params)
@@ -140,8 +117,8 @@ def test_noise_floor_measures_seed_spread(cal_params):
         def compute_loss(self, simulated, real_data):
             return float(np.abs(np.mean(simulated, axis=0) - real_data).mean())
 
-    model = simulator_model(cal_world, free=["growth_sigma"], params=cal_params)
-    real = np.zeros((4, len(model([0.0], 4, 0)[0])))
+    model = _model(cal_params)
+    real = np.zeros((4, 2))
 
     losses = noise_floor(
         model,
@@ -154,19 +131,3 @@ def test_noise_floor_measures_seed_spread(cal_params):
     assert len(losses) == 3 and all(np.isfinite(losses))
     # disjoint seed sets, so the repeats are not identical by construction
     assert len(set(losses)) > 1
-
-
-def test_derived_summarise_needs_something_to_derive(cal_params):
-    """A rule set that implies no observable says so instead of returning (N, 0)."""
-    model = simulator_model(
-        cal_world,
-        free=["growth_sigma"],
-        params=cal_params,
-        rules=(),
-    )
-    # no rules at all, so Firm is inert and warns before the failure we are after
-    with (
-        pytest.warns(UserWarning, match="not referenced"),
-        pytest.raises(RuntimeError, match="implies no observable"),
-    ):
-        model([0.0], 3, 0)

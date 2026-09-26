@@ -76,12 +76,12 @@ def market(n: int = 8, employment: float = 1000.0, **overrides):
     return sim, world(Occupation=occ, Edge=ring(n), Clock=clock())
 
 
-def macro(row: dict) -> dict:
-    """The paper's aggregates, off the row the rules already imply."""
-    e, u, v, ltu = (
-        row[f"sig__SUM__Occupation__{name}"]
+def macro(frame: pl.DataFrame) -> dict:
+    """The paper's aggregates, polars over one tick's telemetry."""
+    e, u, v, ltu = frame.select(
+        pl.col(name).sum()
         for name in ("employment", "unemployment", "vacancies", "ltu")
-    )
+    ).row(0)
     return {"e": e, "u": u, "v": v, "ltu": ltu, "u_rate": u / (e + u)}
 
 

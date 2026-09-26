@@ -448,7 +448,7 @@ def simulate(parts: dict, scenario: str, period: str, params: dict | None = None
              seed: int = 0, warmup: int = WARMUP, days: int = DAYS, every: int = EVERY):
     """Warm up on the census, then live *days* under *scenario* and *period*.
 
-    Yields ``(phase, row, sim)`` per day.  The warm-up anchors every OD's mode
+    Yields ``(phase, frame, sim)`` per day, *frame* every agent after it.  The warm-up anchors every OD's mode
     shares on the census at school-term demand while routes equilibrate, re-routing
     on congested times every *every* days; then the anchor is dropped, demand
     becomes the period's, the scenario's streets close and open, and the choice set
@@ -463,8 +463,8 @@ def simulate(parts: dict, scenario: str, period: str, params: dict | None = None
                        params={**params, "anchor": 1.0, "demand": 1.0}, udfs=TRAFFIC_UDFS,
                        n_periods=every, random_seed=seed)
     for segment in range(warmup // every):
-        for row in sim.fit_iter(model if segment == 0 else None):
-            yield "warm-up", row, sim
+        for frame in sim.fit_iter(model if segment == 0 else None):
+            yield "warm-up", frame, sim
         reroute(sim.model_, parts)
         sim.set_params(warm_start=True, random_seed=None)  # one draw stream, not restarts
     unknown = set(streets) - set(parts["links"]["name"].drop_nulls())
@@ -474,8 +474,8 @@ def simulate(parts: dict, scenario: str, period: str, params: dict | None = None
         sim.model_.update(pedestrianize(areas, streets))
     reroute(sim.model_, parts)
     sim.set_params(n_periods=days, params={**params, "anchor": 0.0, "demand": PERIODS[period]})
-    for row in sim.fit_iter():
-        yield scenario, row, sim
+    for frame in sim.fit_iter():
+        yield scenario, frame, sim
 
 
 def run_once(scenario: str, period: str, sample: float, knobs: tuple) -> dict:
@@ -488,9 +488,12 @@ def run_once(scenario: str, period: str, sample: float, knobs: tuple) -> dict:
     """
     parts = frames(sample=sample)
     rows, flows = [], {}
-    for phase, day, sim in simulate(parts, scenario, period, dict(knobs)):
-        rows.append({"day": day["t"], "phase": phase, **day, "vkt": area_state(sim)["Grand Bayonne"]})
-        flows["before" if phase == "warm-up" else day["t"]] = link_state(sim).select("id", "flow")
+    for phase, frame, sim in simulate(parts, scenario, period, dict(knobs)):
+        t = frame["t"][0]
+        commuters = frame.filter(pl.col("class") == "Commuter")
+        day = commuters.select(pl.col("time", "car", "bus").mean()).row(0, named=True)
+        rows.append({"day": t, "phase": phase, **day, "vkt": area_state(sim)["Grand Bayonne"]})
+        flows["before" if phase == "warm-up" else t] = link_state(sim).select("id", "flow")
     return {"days": pl.DataFrame(rows), "flows": flows}
 
 

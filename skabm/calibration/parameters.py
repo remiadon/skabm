@@ -42,7 +42,7 @@ __all__ = ["noise_floor", "simulator_model"]
 def simulator_model(
     world: Callable[[], Model],
     free: Sequence[str],
-    summarise: Callable[[pl.DataFrame], Sequence[float]] | None = None,
+    summarise: Callable[[pl.DataFrame], Sequence[float]],
     params: dict | None = None,
     stop: Callable[[list[list[float]]], bool] | None = None,
     **simulator_kwargs,
@@ -60,19 +60,10 @@ def simulator_model(
         Names of the parameters ``θ`` indexes, in order.  Each must already
         exist in the merged parameter dict — a name no rule template reads would
         be searched over silently and change nothing, so it is rejected here.
-    summarise : Callable[[pl.DataFrame], Sequence[float]], optional
-        One per-tick state frame (``sim.extract()``) to the ``D`` observables.
-        **Usually unnecessary.**  The default (``None``) uses the row
-        ``fit_iter`` already yields — every state predicate under the aggregate
-        its own rules apply to it, plus the share of agents at each binding
-        constraint — which is exactly the vector of per-tick summary statistics
-        a method-of-moments loss consumes.  Their names, in column order, land
-        on ``model.observables_``.
-
-        Pass one only for a statistic the measured set cannot express: anything
-        distributional (a Gini coefficient, a percentile ratio) needs the
-        per-agent frame, because the measured observables are class-level
-        scalars.
+    summarise : Callable[[pl.DataFrame], Sequence[float]]
+        One tick's telemetry (the frame ``fit_iter`` yields: every agent, with its
+        ``class``) to the ``D`` numbers a loss compares, in polars.  What is worth
+        matching is the researcher's call, so there is no default.
     stop : Callable[[list[list[float]]], bool], optional
         Early stopping.  Called with every summarised row so far (so
         ``rows[-1]`` is the newest); returning True ends that candidate's run
@@ -156,27 +147,9 @@ def simulator_model(
             **simulator_kwargs,
         )
         rows: list[list[float]] = []
-        for measured in sim.fit_iter(world()):
-            if summarise is None:
-                if not sim.observables_:
-                    raise RuntimeError(
-                        "this rule set implies no observable, so summarise=None "
-                        "has nothing to derive a summary from: it would return an "
-                        "(N, 0) array. Pass a summarise callable."
-                    )
-                model.observables_ = tuple(k for k in measured if k != "t")  # type: ignore[attr-defined]
-                # name-sorted and the same width every tick, so column j means
-                # the same thing across ticks and candidates; a class with no
-                # population aggregates to null, which becomes nan not a hole
-                rows.append(
-                    [
-                        float("nan") if level is None else float(level)
-                        for signal, level in measured.items()
-                        if signal != "t"
-                    ]
-                )
-            else:
-                rows.append([float(v) for v in summarise(sim.extract())])
+        for frame in sim.fit_iter(world()):
+            # a mean over no agent is null: nan, not a hole in the row
+            rows.append([float("nan") if v is None else v for v in summarise(frame)])
             if stop is not None and stop(rows):
                 break
         model.ticks_ = len(rows)  # type: ignore[attr-defined]
@@ -186,7 +159,6 @@ def simulator_model(
 
     model.free = free  # type: ignore[attr-defined]
     model.ticks_ = 0  # type: ignore[attr-defined]
-    model.observables_ = ()  # type: ignore[attr-defined]
     return model
 
 

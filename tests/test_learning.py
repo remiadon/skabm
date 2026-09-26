@@ -1,8 +1,5 @@
-"""State history (``skabm.history``) and SAC learning (``behaviour.learning``).
-
-The two are independent: the engine measures aggregates and, when asked, persists
-them; learning is an ordinary rule on each signal's node, run after every tick.  The
-tests split the same way.  Forecasts are checked against ``sac_by_numpy``, the
+"""SAC learning (``behaviour.learning``): an ordinary rule on each signal's node, run
+after every tick.  Forecasts are checked against ``sac_by_numpy``, the
 two-pass textbook estimate, rather than golden numbers: the learner computes the same
 thing from running sums, and that equivalence is the claim under test.
 """
@@ -13,9 +10,8 @@ import polars as pl
 import pytest
 from maplib import Model
 
-from skabm import history as H
 from skabm import template
-from skabm.behaviour.learning import expect, sac
+from skabm.behaviour.learning import consumed, expect, sac, signal_name
 from skabm.dsl import Agents, DSLError, jax_tick, sparql
 from skabm.simulation import RDFSimulator
 from skabm.sparql import _PREFIXES, DEF_NS
@@ -73,110 +69,31 @@ def sac_by_numpy(levels) -> float:
     return float(a + b * (g[-1] - a))
 
 
-# ---------------------------------------------------------------------------
-# skabm.history — generic; knows nothing about what is being learned
-# ---------------------------------------------------------------------------
-
-
-PLAIN = {Firm.output: Firm.output * 1.1}
-
-
-def test_measuring_needs_no_database():
-    """A database is only ever asked for, never implied by the rules.
-
-    Reading ``expect`` is what makes a rule consume a signal, and a rule set yields
-    every observable it implies either way.  A
-    ``duckdb_connection`` is the one reason to open a database.
-    """
+def test_reading_expect_is_what_consumes_a_signal():
     learned = {Firm.output: Firm.output * (1 + expect(*OUTPUT))}
-    assert H.consumed([learned]) == {OUTPUT}
-    assert H.consumed([PLAIN]) == set()
-
-    bare = RDFSimulator(rules=(PLAIN,), n_periods=2)
-    run = pl.DataFrame(bare.fit_iter(firms()))
-    assert bare.connection_ is None
-    assert set(run.columns) == {
-        "t",
-        "sig__SUM__Firm__output",
-        "sig__AVG__Firm__output",
-    }
-    with pytest.raises(RuntimeError, match="no history was kept"):
-        bare.history()
-
-    kept = RDFSimulator(
-        rules=(PLAIN,),
-        n_periods=2,
-        duckdb_connection=H.connect(None),
-    ).fit(firms())
-    assert set(kept.history()["signal"]) == set(run.columns) - {"t"}
-
-    narrow = RDFSimulator(rules=(PLAIN,), n_periods=1, track=False)
-    *_, row = narrow.fit_iter(firms())
-    assert set(row) == {"t"}  # this rule set consumes nothing, so nothing is left
+    assert consumed([learned]) == {OUTPUT}
+    assert consumed([{Firm.output: Firm.output * 1.1}]) == set()
 
 
-def test_measurement_covers_every_observable_of_every_class_present(params):
-    """One value per observable per tick, and an absent class is dropped.
-
-    Firm-only, so every Household / Government / CentralBank observable the
-    default rule set implies has nobody to aggregate: those columns are not in
-    the run and no row is written for them, while the Firm ones are all there
-    and not just the two the rules read back.
-    """
-    sim = RDFSimulator(params=params, n_periods=4, duckdb_connection=H.connect(None))
-    run = pl.DataFrame(sim.fit_iter(firms()))
-    history = H.state_frame(sim.connection_)
-    recorded = set(history["signal"])
-
-    assert set(run.columns) == {"t"} | {o.signal for o in sim.observables_}
-    assert {o.signal for o in sim.observables_ if o.klass == "Firm"} == recorded
-    assert recorded > {"sig__SUM__Firm__output", "sig__AVG__Firm__price"}
-    assert not any(s.startswith("sig__SUM__Household") for s in recorded)
-    assert not any(c.startswith("sig__SUM__Household") for c in run.columns)
-    # the binding constraint nobody declared: alpha is far above output here
-    assert run["sig__AVG__Firm__binds__output"].to_list() == [0.0] * 4
-    # t=0 is recorded before the first tick, so four ticks leave five rows
-    assert history.filter(pl.col("signal") == "sig__SUM__Firm__output").height == 5
-
-
-def test_forecasts_live_on_signal_nodes_and_the_table_persists(tmp_path, params):
-    """Learning writes one forecast per signal the world can feed, and the table
-    of observables follows the world's lifecycle.
+def test_forecasts_live_on_signal_nodes(params):
+    """Learning writes one forecast per signal the world can feed, upserted.
 
     The default rules also read household income, but this world has no
     households: no level, so no learner, and the expectation stays at the
-    structural zero.  A cold refit restarts the world including its database, a
-    warm start continues it, and a file-backed run outlives the process.
+    structural zero.  A cold refit restarts the world; a warm start continues it.
     """
-    path = str(tmp_path / "history.duckdb")
-    sim = RDFSimulator(params=params, n_periods=4, duckdb_connection=path)
-    sim.fit(firms())
-
+    sim = RDFSimulator(params=params, n_periods=4).fit(firms())
     forecasts = f"{_PREFIX} SELECT ?s ?f WHERE {{ ?s def:forecast ?f }}"
     written = sim.model_.query(forecasts)
     assert {iri.strip("<>").rsplit("#", 1)[-1] for iri in written["s"]} == {
-        "sig__SUM__Firm__output",
+        "sig__SUM__Firm__output",  # the learners' nodes, one per signal read
         "sig__AVG__Firm__price",
     }
 
-    sim.fit(firms())  # cold refit clears the previous run's rows
-    assert H.state_frame(sim.connection_)["t"].max() == 4
+    sim.fit(firms())
     assert sim.model_.query(forecasts).height == 2  # upserted, not accumulated
-
-    sim.warm_start = True  # ... and a warm start appends rather than restarting
-    sim.fit()
-    assert H.state_frame(sim.connection_)["t"].max() == 8
-
-    # a fresh simulator continuing the world picks the tick count up from the file
-    resumed = RDFSimulator(
-        params=params, n_periods=2, warm_start=True, duckdb_connection=path
-    )
-    assert [row["t"] for row in resumed.fit_iter(sim.model_)] == [9, 10]
-
-    import duckdb
-
-    with duckdb.connect(path) as con:  # survived the simulator that wrote it
-        assert con.execute(f"SELECT COUNT(*) FROM {H.TABLE}").fetchone()[0] > 0
+    sim.warm_start = True
+    assert [frame["t"][0] for frame in sim.fit_iter()] == [5, 6, 7, 8]
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +132,7 @@ def test_sac_forecast_matches_the_textbook_formula_in_sparql_and_jax():
             _PREFIXES + "SELECT ?f WHERE { ex:sig__SUM__Firm__output def:forecast ?f }"
         )["f"][0]
         assert published == pytest.approx(expected, abs=1e-12)
-        assert float(state[H.signal_name(*OUTPUT)]["forecast"][0]) == pytest.approx(
+        assert float(state[signal_name(*OUTPUT)]["forecast"][0]) == pytest.approx(
             expected, abs=1e-12
         )
     assert sac_by_numpy(levels[:2]) == pytest.approx(0.03)
@@ -232,12 +149,16 @@ def test_expectations_are_learned_end_to_end_from_an_empty_history(params, shock
     something to estimate, and what gets published must equal the forecast
     recomputed by hand from the observed series.
     """
-    flat = pl.DataFrame(RDFSimulator(params=params, n_periods=5).fit_iter(firms()))
-    assert flat["sig__SUM__Firm__output"].to_list() == [OPENING] * 5
+
+    def output(sim):
+        run = pl.concat(sim.fit_iter(firms()))
+        return run.group_by("t", maintain_order=True).agg(pl.col("output").sum())
+
+    flat = output(RDFSimulator(params=params, n_periods=5))
+    assert flat["output"].to_list() == [OPENING] * 5
 
     sim = RDFSimulator(params=shocked, n_periods=10, random_seed=7)
-    run = pl.DataFrame(sim.fit_iter(firms()))
-    levels = [OPENING, *run["sig__SUM__Firm__output"]]
+    levels = [OPENING, *output(sim)["output"]]
     published = sim.model_.query(
         f"{_PREFIX} SELECT ?f WHERE {{ ex:sig__SUM__Firm__output def:forecast ?f }}"
     )["f"][0]

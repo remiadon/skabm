@@ -81,7 +81,8 @@ RELOCATE = {
 
 
 def state_extract(model) -> pl.DataFrame:
-    """One row per person: group, cell coordinates, share of similar neighbours."""
+    """One row per person: group, cell coordinates (a lattice's), share of similar
+    neighbours."""
     return model.query(
         _PREFIXES
         + """
@@ -91,7 +92,7 @@ def state_extract(model) -> pl.DataFrame:
                def:group ?group ;
                def:share_similar ?share_similar ;
                def:location ?c .
-        ?c def:x ?x ; def:y ?y .
+        OPTIONAL { ?c def:x ?x ; def:y ?y }
     }
     """
     )

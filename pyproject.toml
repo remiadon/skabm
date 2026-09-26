@@ -12,13 +12,7 @@ dependencies = [
     "sympy>=1.14",
 ]
 
-# Persisting the observables (RDFSimulator(duckdb_connection=...)) is the only
-# thing that needs a database, and only when asked; every rule set runs on the
-# core install.  The import is function-scoped, so the package imports without it.
 [project.optional-dependencies]
-history = [
-    "duckdb>=1.5.5",
-]
 # Model calibration (searching `params` to match macro series) is a different
 # problem from the population calibration in skabm.calibration, and black-it
 # already solves it — see chapter 4 of notebooks/poledna/poledna.ipynb.  Its

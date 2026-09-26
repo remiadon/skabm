@@ -5,8 +5,8 @@
 **Agent-based models written as equations, or in plain English, and run on a knowledge graph.**
 
 Say what an agent does and skabm turns it into a rule. Run the rules over a population
-calibrated from public data, and get back every series they imply, with no reporters to
-declare. Agents are nodes of an RDF graph ([maplib](https://github.com/DataTreehouse/maplib)),
+calibrated from public data, and get back every agent after every tick, as polars: any
+macro quantity is one expression. Agents are nodes of an RDF graph ([maplib](https://github.com/DataTreehouse/maplib)),
 relations are its edges, populations are [polars](https://pola.rs) DataFrames, and the API is
 scikit-learn's. The reference model is Poledna, Miess, Hommes & Rabitsch (2023), *Economic
 forecasting with an agent-based model* (EER 151): a six-sector economy calibrated 1:1 from
@@ -18,7 +18,7 @@ Eurostat.
 |---|---|
 | **Behaviour as equations** | a rule is a dict of SymPy expressions, `{Firm.price: Firm.price * (1 + inflation)}`. The same rule runs on the knowledge graph and, differentiably, in JAX |
 | **Rules from a description** | `translate.rules` writes those rules from plain English, with a local model that can only produce valid ones |
-| **Observables for free** | what to measure is read off the rules: every aggregate they use, and every binding constraint (the share of firms at capacity, of quarters at the zero lower bound) |
+| **Observables in polars** | a run is every agent after every tick, one DataFrame, so any macro quantity, a Gini included, is a polars expression you write. Nothing is declared to the simulator |
 | **Populations from public data** | Eurostat loaders, and calibrators that fit agent rows to known joint facts while every marginal survives exactly |
 | **Citations built in** | each model module carries its published parameter values next to their table and equation |
 | **Interventions as graph edits** | after a fit, the world is a graph: rewire an ownership edge, delete a bank, close a street, then keep simulating |
@@ -61,15 +61,14 @@ def economy() -> Model:
     return world
 
 sim = RDFSimulator(n_periods=8, random_seed=0)
-run = pl.DataFrame(sim.fit_iter(economy()))
+run = pl.concat(sim.fit_iter(economy()))   # every agent after every tick: agent, class, t, ...
 
-run.shape                    # 8 ticks x (t + every aggregate the rules imply)
-run.columns[:3]              # sig__AVG__Firm__binds__output, sig__AVG__Firm__liquidity, ...
-len(sim.extract().columns)   # 18 per-agent columns, none of them named by hand
+gdp = (pl.col("price") * pl.col("output")).sum()
+run.group_by("t").agg(gdp=gdp, wealth=pl.col("wealth").sum())
 ```
 
-Nothing was declared and no database was opened. What the rules cannot imply, such as a
-distributional statistic, is one polars expression over `sim.extract()`:
+A macro quantity is a polars expression, and so is one no aggregate spans, like a Gini.
+`class` tells apart the agents that share a field:
 
 ```python continuation
 def gini(column: str) -> pl.Expr:
@@ -77,11 +76,8 @@ def gini(column: str) -> pl.Expr:
     n = x.len()
     return 2 * (pl.int_range(1, n + 1, dtype=pl.Int64) * x).sum() / (n * x.sum()) - (n + 1) / n
 
-panel = pl.concat(
-    sim.extract().with_columns(t=pl.lit(row["t"]))
-    for row in sim.fit_iter(economy())
-)
-panel.lazy().group_by("t").agg(gini("wealth")).sort("t").collect()
+is_firm = pl.col("class") == "Firm"
+run.group_by("t").agg(gini("wealth"), price_level=pl.col("price").filter(is_firm).mean())
 ```
 
 ### Getting data in
@@ -110,7 +106,8 @@ Firm, inflation = Agents("Firm"), sp.Symbol("inflation")
 reprice = {Firm.price: Firm.price * (1 + inflation)}
 
 sim = RDFSimulator(rules=[reprice], params={"inflation": 0.02}, n_periods=4)
-sim.fit(economy()).extract()["price"]          # every price up 2% a tick, on the graph
+*_, last = sim.fit_iter(economy())
+last["price"]                                  # every price up 2% a tick, on the graph
 
 tick = jax_tick([reprice])
 
@@ -214,12 +211,10 @@ households = ownership(households, firms, ratio=300 / 10_000)  # who owns which 
 households = initial(households, firms)  # the starting income and wealth, eq. 49 and §5.2
 world.map(template.household, households.with_iri("employer", "owns"))
 sim = RDFSimulator(n_periods=12, params={"growth_sigma": 0.02, "inflation_sigma": 0.01})
-for row in sim.fit_iter(world):
-    # the price level and household wealth are yielded; GDP is a per-agent
-    # product taken before the sum, so it comes off the frame
-    active = sim.extract().drop_nulls("output")
-    print(row["sig__AVG__Firm__price"],
-          (active["price"] * active["output"] * (1 - active["tech_share"])).sum())
+for frame in sim.fit_iter(world):
+    # every agent after the tick: the price level and GDP are polars over it
+    print(frame.select(price_level=pl.col("price").filter(pl.col("class") == "Firm").mean(),
+                       gdp=(pl.col("price") * pl.col("output") * (1 - pl.col("tech_share"))).sum()))
 ```
 
 Step 3 is what a marginal sampler cannot do, and both marginals survive it exactly

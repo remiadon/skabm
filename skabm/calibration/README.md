@@ -29,9 +29,8 @@ skabm does not implement the search:
 [black-it](https://github.com/bancaditalia/black-it) does it well, and
 `simulator_model(world, free, ...)` is the adapter. It turns an `RDFSimulator`
 configuration into the `model(theta, N, seed) -> (N, D)` callable black-it (and most
-calibration toolboxes) expect. By default the `D` columns are the observables the rules
-imply, so a method-of-moments loss needs no summary function. `stop=` ends a diverging
-candidate early.
+calibration toolboxes) expect. `summarise` turns one tick's telemetry into the `D`
+numbers a loss compares, in polars. `stop=` ends a diverging candidate early.
 
 `noise_floor` is the diagnostic that belongs next to it. A simulated loss is an estimate,
 so a loss gap between two candidates means nothing until it exceeds the spread one

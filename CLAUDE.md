@@ -13,7 +13,7 @@ Rules:
 skABM is only as credible as its calibration, so tests split in two:
 
 - **Model tests** (anything exercising `skabm/behaviour/*` or `skabm/behaviour/schelling.py` rules) assert only what a cited source says: a published parameter value (Poledna et al. 2023 Table 2 is the model), an equation of the paper evaluated at those values, or a result the paper reports (e.g. the Beveridge curve slopes down). Cite the source (table, equation, section) next to the assertion. No invented parameters, no hand-picked targets, no asserting a constant against itself, no "row exists" smoke checks.
-- **Engine tests** (simulator, IR, history, templates, calibration machinery, loaders) pin software contracts and may use any numbers.
+- **Engine tests** (simulator, templates, calibration machinery, loaders) pin software contracts and may use any numbers.
 - A behaviour with no published calibration (e.g. the bank extension) gets no model tests until it has one. Say so in the test module, don't fake one.
 - The `poledna_params` fixture (`tests/conftest.py`) is the independent copy of Table 2. `test_default_rules_carry_the_cited_values` checks the rules' own defaults against it.
 - Trimming a test must not lower line coverage: run `uv run --with pytest-cov pytest --cov=skabm` before and after.

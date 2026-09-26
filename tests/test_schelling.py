@@ -60,6 +60,18 @@ def simulator(n_periods: int, seed: int = 0) -> RDFSimulator:
     )
 
 
+def test_a_tick_is_one_row_per_agent_with_many_valued_links_as_lists():
+    """The default frame: a cell's neighbours are one list, not one row each, so an
+    aggregate over cells counts each cell once."""
+    cells = grid(4)
+    sim = RDFSimulator(rules=RULES, n_periods=1)
+    (frame,) = sim.fit_iter(town(cells, grid_neighbors(cells)))
+    mine = frame.filter(pl.col("class") == "Cell")
+    assert mine.height == mine["agent"].n_unique() == 16
+    assert set(mine["neighbor"].list.len()) == {3, 5, 8}  # corners, edges, inside
+    assert mine["neighbor"].list.len().sum() == grid_neighbors(cells).height
+
+
 def test_settle_derives_population():
     # At density 1.0 every cell is occupied (the draw is always < 1), so the
     # count is exactly the cell count, one settler per cell, and both groups appear.
@@ -88,8 +100,8 @@ def test_segregation_rises_and_converges():
     sim = simulator(30)
     seg, unhappy = [], []
     for row in sim.fit_iter(town(grid(12), grid_neighbors(grid(12)))):
-        seg.append(row["sig__AVG__Person__share_similar"])
-        unhappy.append((sim.extract()["share_similar"] < want).sum())
+        seg.append(row["share_similar"].mean())
+        unhappy.append((row["share_similar"] < want).sum())
     assert seg[-1] > seg[0] + 0.2  # substantial rise from the mixed start
     assert min(unhappy) == 0  # reaches a configuration with nobody unhappy
 
@@ -99,7 +111,7 @@ def test_reproducible_under_random_seed():
     def seg_path(seed: int) -> list[float]:
         world = town(grid(10), grid_neighbors(grid(10)), seed)
         return [
-            round(row["sig__AVG__Person__share_similar"], 6)
+            round(row["share_similar"].mean(), 6)
             for row in simulator(10, seed).fit_iter(world)
         ]
 
@@ -125,7 +137,7 @@ def test_geo_variant_plugs_in():
     )
     sim = simulator(15)
     seg = [
-        row["sig__AVG__Person__share_similar"]
+        row["share_similar"].mean()
         for row in sim.fit_iter(town(cells, geo_neighbors(cells)))
     ]
     neighbours = sim.model_.query(

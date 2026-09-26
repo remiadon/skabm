@@ -211,11 +211,26 @@ def test_census_shares_hold_while_anchored():
     assert 0.05 < row["bus"][0] < 0.3
 
 
+def series(frames) -> pl.DataFrame:
+    """Kilometres driven in the areas, and the commuters' car share and trip time, per
+    tick: links and routes carry a car flag and a time too."""
+    commuter = pl.col("class") == "Commuter"
+    return (
+        pl.concat(frames)
+        .group_by("t", maintain_order=True)
+        .agg(
+            vkt=pl.col("vkt").sum(),
+            car=pl.col("car").filter(commuter).mean(),
+            time=pl.col("time").filter(commuter).mean(),
+        )
+    )
+
+
 def test_closing_the_centre():
     world, _ = town()
     sim = simulator(n_periods=15)
-    base = pl.DataFrame(sim.fit_iter(world))
-    assert base["sig__SUM__Area__vkt"][-1] > 0  # cars cross the centre today
+    base = series(sim.fit_iter(world))
+    assert base["vkt"][-1] > 0  # cars cross the centre today
 
     # the policy, by area — and the same four links by street name
     sim.model_.update(pedestrianize(areas=["Centre"]))
@@ -243,7 +258,7 @@ def test_closing_the_centre():
     sim.model_.map(template.via, via.with_iri("via"))
 
     sim.set_params(warm_start=True, n_periods=10, params={**PARAMS, "anchor": 0.0})
-    after = pl.DataFrame(sim.fit_iter())
+    after = series(sim.fit_iter())
 
     # day one: nobody drives a closed street, nobody lost or doubled
     first = query(
@@ -251,7 +266,7 @@ def test_closing_the_centre():
         "SELECT (COUNT(?c) AS ?n) WHERE { ?c a ex:Commuter ; def:route ?r . ?r def:open 0e0 }",
     )
     assert first["n"][0] == 0
-    assert after["sig__SUM__Area__vkt"][0] == 0
+    assert after["vkt"][0] == 0
     routes_per_commuter = query(
         sim.model_,
         "SELECT ?c (COUNT(?r) AS ?n) WHERE { ?c a ex:Commuter ; def:route ?r } GROUP BY ?c",
@@ -260,8 +275,8 @@ def test_closing_the_centre():
 
     # some drivers moved to the bus, most found the bypass; everyone's trip got longer
     car_before, car_after = (
-        base["sig__AVG__Commuter__car"][-1],
-        after["sig__AVG__Commuter__car"][-1],
+        base["car"][-1],
+        after["car"][-1],
     )
     assert 0.4 < car_after < car_before
-    assert after["sig__AVG__Commuter__time"][-1] > base["sig__AVG__Commuter__time"][-1]
+    assert after["time"][-1] > base["time"][-1]

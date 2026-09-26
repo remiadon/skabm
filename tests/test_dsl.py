@@ -53,10 +53,9 @@ def labour_state():
 
 def test_sparql_and_jax_agree_on_the_labour_market():
     sim, graph = market(n=N, n_periods=TICKS)
-    sim.fit(graph)
+    *_, last = sim.fit_iter(graph)
     sparql = (
-        sim.extract()
-        .filter(pl.col("employment").is_not_null())
+        last.filter(pl.col("employment").is_not_null())
         .with_columns(id=pl.col("agent").str.extract(r"#(.*)>$"))
         .sort("id")
     )
@@ -238,8 +237,10 @@ def test_the_poledna_quarter_runs_in_jax_too(poledna_params):
 
     params, ticks = {**poledna_params, **OVERRIDES}, 6
     sim = RDFSimulator(params=params, n_periods=ticks)
-    sim.fit(world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK))
-    sparql = sim.extract().with_columns(id=pl.col("agent").str.extract(r"#(.*)>$"))
+    *_, last = sim.fit_iter(
+        world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
+    )
+    sparql = last.with_columns(id=pl.col("agent").str.extract(r"#(.*)>$"))
 
     frames = {"Firm": FIRMS, "Household": HOUSEHOLDS, "CentralBank": CENTRAL_BANK}
     learners = [sac(*signal) for signal in sorted(sim._consumed)]
