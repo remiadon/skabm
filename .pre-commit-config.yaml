@@ -13,13 +13,59 @@ repos:
         language: system
         pass_filenames: false
 
-      - id: pytest-cov
-        name: pytest (coverage ≥ 99%)
-        entry: uv run --no-sync pytest --tb=short -q --cov=skabm --cov-fail-under=99
+      # Per-commit: only the tests that touch what changed. testmon keeps a
+      # line-level map of which test exercises which code in .testmondata, so an
+      # untouched tree collects nothing (~0.3s) and a one-module change runs its
+      # dependents only. It is AST-aware, so comments and formatting select
+      # nothing. A fresh clone has no map and runs everything once to build it.
+      #
+      # No coverage gate here on purpose: a percentage measured over a selected
+      # subset means nothing. That gate lives at pre-push, over the full suite.
+      - id: pytest-testmon
+        name: pytest (affected tests only)
+        entry: uv run --no-sync pytest --testmon --tb=short -q
         language: system
         pass_filenames: false
         stages: [pre-commit]
 
+      - id: pytest-cov
+        name: pytest (full suite, coverage ≥ 99%)
+        entry: uv run --no-sync pytest --tb=short -q --cov=skabm --cov-fail-under=99
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      # Executes every ```python fence in the README, so a renamed function or a
+      # moved module fails the commit instead of quietly rotting in the docs.
+      # Mark a block ```python notest to have it read but not run.
+      - id: doc-examples
+        name: run python blocks in README
+        entry: uv run --no-sync pytest --markdown-docs -q README.md
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # Executes the notebooks, so a renamed function or a changed signature
+      # fails before the push instead of rotting until someone opens the file.
+      # Pre-push rather than pre-commit because even without Poledna it is ~1
+      # minute. Needs the data caches warm: a cold notebooks/data goes to Zenodo.
+      #
+      # notebooks/poledna is excluded deliberately: at 3m24 it is four fifths of
+      # the total, and it is the one notebook that reaches the network on a cold
+      # cache (Eurostat, for poledna_io_at_2010.parquet). Run it in CI, or by
+      # hand: `pytest --nbmake notebooks/poledna`.
+      - id: notebooks
+        name: run notebooks (pre-push, excludes poledna)
+        entry: >-
+          uv run --no-sync pytest --nbmake -q notebooks/
+          --ignore=notebooks/poledna
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      # Reads .coverage, which only the full pre-push run writes — so the badge
+      # tracks the last full suite rather than the current commit. testmon does
+      # not clobber the file, so the number stays real; it just lags a push.
       - id: coverage-badge
         name: update coverage badge in README
         entry: >-

@@ -1,5 +1,4 @@
-"""
-Integration tests for the make_dataset → calibrator pipeline.
+"""Integration tests for the make_dataset to calibrator pipeline.
 
 Key properties verified:
   1. GeneticConstraintCalibration preserves per-column multisets exactly.
@@ -13,6 +12,8 @@ Key properties verified:
   6. make_dataset(calibrator.samplers_) generates fresh populations that
      inherit the learned inter-column structure.
   7. Single-column constraints trigger a UserWarning, not an error.
+
+No fixture bloat - shared helpers are own-section below.
 """
 
 from __future__ import annotations

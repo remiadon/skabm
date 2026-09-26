@@ -3,13 +3,34 @@ name = 'skabm'
 dynamic = ["version"]
 dependencies = [
     "eurostat>=1.1.1",
-    "httpx>=0.28.1",
     "maplib>=0.20.26",
     "numpy>=2.4.6",
     "polars>=1.42.1",
     "polars-random>=0.5.0",
     "pyarrow>=20.0.0",
     "scikit-learn>=1.6.0",
+    "sympy>=1.14",
+]
+
+[project.optional-dependencies]
+# Model calibration (searching `params` to match macro series) is a different
+# problem from the population calibration in skabm.calibration, and black-it
+# already solves it — see chapter 4 of notebooks/poledna/poledna.ipynb.  Its
+# numpy pin is conservative rather than real (black-it runs unchanged on 2.4.6),
+# hence the override below; its own `python <3.13` bound applies to this extra.
+model-calibration = [
+    "black-it>=0.3.3",
+]
+# skabm.dsl.jax_tick: the differentiable backend for rules written with skabm.dsl.
+jax = [
+    "jax>=0.10",
+]
+# skabm.translate.rules: a small local model writing DSL under the templates' grammar.
+llm = [
+    "llguidance>=1.8",
+    "mlx-lm>=0.28 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "torch>=2",
+    "transformers>=5",
 ]
 
 [tool.setuptools.packages.find]
@@ -19,14 +40,41 @@ include = ["skabm*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
+[tool.ruff.lint]
+extend-select = ["PLR0911", "PLR0912", "SIM", "C4"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
 [tool.uv]
 package = true
+# black-it pins numpy<1.27; skabm asks for >=2.4.6.  Without this, resolving the
+# model-calibration extra is unsatisfiable.
+override-dependencies = ["numpy>=2.4.6"]
+
+# The `infer` reasoning used by skabm.behaviour.bank (Datalog / recursive
+# SPARQL CONSTRUCT) is a licensed maplib add-on — free for academic / personal
+# use, but not shipped in the PyPI wheels. The academic build is vendored as a
+# local wheel; PyPI's 0.20.26 panics ("Contact Data Treehouse") the moment
+# `Model.infer` is called. Marker-scoped to this machine's platform so the
+# override is a no-op elsewhere.
+[tool.uv.sources]
+maplib = { path = "maplib-0.20.29-cp310-abi3-macosx_11_0_arm64.whl", marker = "sys_platform == 'darwin' and platform_machine == 'arm64'" }
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest-cov>=7.1.0",
     "ipython>=9.15.0",
     "prek>=0.4.6",
     "pytest>=9.1.1",
+    "pytest-markdown-docs>=0.9.2",
     "ruff>=0.15.20",
+    "matplotlib>=3.11.1",
+    "nbclient>=0.11.0",
+    "nbmake>=1.5.5",
+    "pytest-testmon>=2.2.0",
+    "flax>=0.12.0",
+    "ipykernel>=7.3.0",
+    "llguidance>=1.8",
 ]

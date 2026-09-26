@@ -1,85 +1,38 @@
 """
-Agent-population sampler and constraint calibrators for agent-based models.
+Population calibration — agent-population samplers and constraint calibrators.
 
-Calibration in ABM vs calibration in machine learning
-------------------------------------------------------
-In traditional ML, "calibration" refers to aligning predicted probabilities
-with empirical frequencies (e.g. Platt scaling, isotonic regression).
+*Population* calibration finds a synthetic micro-level population whose aggregate
+statistics reproduce observed macro facts: IO-table coefficients, census shares,
+Basel III ratios.  There is no training set, no label and no generalisation error —
+the goal is internal consistency of a simulated economy, not predictive accuracy.
+This is Poledna et al. (2023) §4's sense of the word, and survey sampling's
+(Deville & Särndal 1992, *calibration estimators*).
 
-Here the term carries its economic / ABM meaning: finding a synthetic
-micro-level population whose aggregate statistics reproduce observed macro-level
-stylized facts (IO-table coefficients, census shares, Basel III ratios, etc.).
-There is no training set, no label, and no generalisation error — the goal is
-internal consistency of a simulated economy, not predictive accuracy on held-out
-data.
+It is **not** the ABM literature's more common sense, fitting behavioural parameters
+so the model reproduces macro time series; that is ``skabm.calibration.parameters``,
+and the two compose — a population is fitted once, *outside* any parameter search,
+and held fixed while ``θ`` moves.
 
-The two concepts share the sklearn estimator interface purely for
-interoperability with pipelines, parameter search, and cross-validation
-scaffolding.  score() returns -energy (higher = better fit to constraints),
-which gives a meaningful optimisation signal even though it is not a
-classification or regression metric.
+The estimators share the sklearn interface, so pipelines and parameter search work on
+them.  ``score()`` returns -energy (higher is a better fit to the constraints), a
+meaningful optimisation signal even though it is neither a classification nor a
+regression metric.  ``transform(X_new)`` keeps the anchor column — the first column of
+the ``X`` passed to ``fit`` — and conditionally resamples each free column from
+``samplers_`` within each anchor value, so it works at any size.
 
-Public API
-----------
-    make_dataset(samplers, n_agents, seed)
-        Draw a synthetic population from marginal distributions.
-        Returns a polars DataFrame with a leading `id` column.
-        ABM equivalent of sklearn.datasets.make_*; no inter-column constraints.
+Constraints are ``Sequence[tuple[pl.Expr, float | pl.Expr]]``, and multi-column ones
+are the point: GA preserves each column's multiset exactly, MH preserves its
+distribution approximately.  A single-column constraint is accepted with a warning,
+since it can erode the marginal ``make_dataset`` set.
 
-    GeneticConstraintCalibration(constraints, ...)
-        Fits by permuting rows of the population (OX1 crossover).
-        Learns samplers_ — the optimal per-column value pools (including anchor).
-
-    MetropolisHastingsConstraintCalibration(constraints, ...)
-        Fits by mutating individual cell values (MH / simulated annealing).
-        Proposals are drawn from the empirical distribution of X seen at fit.
-
-    weighted_enum(enum, weights) -> pl.Expr
-        CDF-inversion sampler for a pl.Enum with given weights.
-
-    energy(df, constraints) -> float
-        Total MSE energy of df against all (metric_expr, target) constraints.
-
-Fitted attributes (both calibrators)
--------------------------------------
-    samplers_ : dict[str, pl.Series]
-        Optimal per-column value pools, including the anchor column.
-        Passing samplers_ to make_dataset() generates new populations that
-        reflect the learned marginal distributions (joint structure is
-        approximate; use transform() for exact conditional structure).
-
-    anchor_col_ : str
-        The first column of X passed to fit() — kept from X in transform().
-
-    best_energy_ : float
-        Energy achieved at the end of optimisation.
-
-transform() semantics
----------------------
-    transform(X_new) keeps the anchor column from X_new unchanged and
-    conditionally resamples each free column from samplers_: for each unique
-    anchor value v, free-column values are drawn (with replacement) from the
-    subset of the learned pool where anchor == v.  Works for any X size.
-
-Constraints
------------
-    Sequence[tuple[pl.Expr, float | pl.Expr]]
-
-    Single-column constraints are accepted with a UserWarning (may erode the
-    marginal distribution set by make_dataset).  Multi-column constraints are
-    the primary use case: GA preserves per-column multisets exactly; MH
-    preserves per-column distributions approximately.
-
-sklearn compatibility note
---------------------------
-    pl.Expr objects are serialised internally via pl.Expr.meta.serialize /
-    pl.Expr.deserialize so that get_params() / clone() work correctly.
+``pl.Expr`` objects are serialised internally through ``pl.Expr.meta.serialize`` so
+that ``get_params()`` / ``clone()`` work.
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import polars as pl
@@ -156,13 +109,6 @@ def _is_derived(col: str, entry, sampler_keys: set[str]) -> bool:
     if not isinstance(entry, pl.Expr):
         return False
     return bool(set(entry.meta.root_names()) & (sampler_keys - {col}))
-
-
-def _split(samplers: dict) -> tuple[dict, list]:
-    keys = set(samplers.keys())
-    mutable = {k: v for k, v in samplers.items() if not _is_derived(k, v, keys)}
-    derived = [(k, v) for k, v in samplers.items() if _is_derived(k, v, keys)]
-    return mutable, derived
 
 
 def energy(df: pl.DataFrame, constraints: Sequence[tuple]) -> float:
@@ -271,7 +217,7 @@ def _conditional_transform(
 
 
 def make_dataset(
-    samplers: dict[str, "pl.Series | pl.Expr"],
+    samplers: dict[str, pl.Series | pl.Expr],
     n_agents: int = 500,
     seed: int = 0,
 ) -> pl.DataFrame:
@@ -300,7 +246,9 @@ def make_dataset(
     -------
     pl.DataFrame with a leading ``id`` column (UInt32, 0-based).
     """
-    mutable, derived = _split(samplers)
+    keys = set(samplers.keys())
+    mutable = {k: v for k, v in samplers.items() if not _is_derived(k, v, keys)}
+    derived = [(k, v) for k, v in samplers.items() if _is_derived(k, v, keys)]
     col_series = {
         col: _pool(entry).sample(n_agents, with_replacement=True, seed=seed + i)
         for i, (col, entry) in enumerate(mutable.items())
@@ -361,19 +309,7 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
         self.seed = seed
         self.verbose = verbose
 
-    def get_params(self, deep: bool = True) -> dict:
-        return {  # pragma: no cover
-            "constraints": self.constraints,
-            "population_size": self.population_size,
-            "n_generations": self.n_generations,
-            "mutation_rate": self.mutation_rate,
-            "elite_frac": self.elite_frac,
-            "tournament_size": self.tournament_size,
-            "seed": self.seed,
-            "verbose": self.verbose,
-        }
-
-    def fit(self, X: pl.DataFrame, y=None) -> "GeneticConstraintCalibration":
+    def fit(self, X: pl.DataFrame, y=None) -> GeneticConstraintCalibration:
         """Permute rows of X to minimise constraint energy.  Populates samplers_."""
         constraints = _de_constraints(self.constraints)
         _warn_single_col_constraints(constraints)
@@ -392,42 +328,13 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
                 pl.col(c).gather(pl.Series(genome[c])) for c in free_cols
             )
 
-        n_free = max(1, len(free_cols))
+        rng = np.random.default_rng(self.seed)
 
-        # Pre-generate all random indices via polars (no numpy RNG).
-        # OX1 is called len(free_cols) times per genome; tournament twice per genome.
-        budget = self.n_generations * self.population_size
-        _rints = lambda n, hi, s: (  # noqa: E731
-            pl.int_range(hi, eager=True)
-            .sample(n, with_replacement=True, seed=s)
-            .to_numpy()
-        )
-        ab_pool = _rints(budget * 2 * n_free, n_agents, self.seed)
-        # 2 tournament calls per (genome, free_col): each parent per col is a separate call
-        tour_pool = _rints(
-            budget * self.tournament_size * 2 * n_free,
-            self.population_size,
-            self.seed + 1,
-        )
-        swap_pool = _rints(budget * n_swaps * 2 * n_free, n_agents, self.seed + 2)
-        ab_ptr = tour_ptr = swap_ptr = 0
-
-        def random_genome(idx: int) -> dict:
-            return {
-                c: pl.int_range(n_agents, eager=True)
-                .sample(
-                    n_agents,
-                    with_replacement=False,
-                    seed=self.seed + idx * len(free_cols) + j,
-                )
-                .to_numpy()
-                for j, c in enumerate(free_cols)
-            }
+        def random_genome() -> dict:
+            return {c: rng.permutation(n_agents) for c in free_cols}
 
         def ox1(p1: np.ndarray, p2: np.ndarray) -> np.ndarray:
-            nonlocal ab_ptr
-            a, b = sorted(ab_pool[ab_ptr : ab_ptr + 2])
-            ab_ptr += 2
+            a, b = sorted(rng.integers(n_agents, size=2))
             child = np.full(n_agents, -1, dtype=np.intp)
             child[a:b] = p1[a:b]
             in_slice = set(child[a:b].tolist())
@@ -437,32 +344,25 @@ class GeneticConstraintCalibration(BaseEstimator, TransformerMixin):
             return child
 
         def mutate(g: dict) -> dict:
-            nonlocal swap_ptr
             out = {}
             for c in free_cols:
                 perm = g[c].copy()
-                for _ in range(n_swaps):
-                    i, j = swap_pool[swap_ptr], swap_pool[swap_ptr + 1]
-                    swap_ptr += 2
+                for i, j in rng.integers(n_agents, size=(n_swaps, 2)):
                     perm[i], perm[j] = perm[j], perm[i]
                 out[c] = perm
             return out
 
         def tournament(scored: list) -> dict:
-            nonlocal tour_ptr
-            indices = tour_pool[tour_ptr : tour_ptr + self.tournament_size]
-            tour_ptr += self.tournament_size
-            return min([scored[k % len(scored)] for k in indices], key=lambda x: x[0])[
-                1
-            ]
+            picks = rng.integers(len(scored), size=self.tournament_size)
+            return min((scored[k] for k in picks), key=lambda x: x[0])[1]
 
-        initial = [random_genome(i) for i in range(self.population_size)]
+        initial = [random_genome() for _ in range(self.population_size)]
         scored = [(energy(apply_genome(g), constraints), g) for g in initial]
         scored.sort(key=lambda x: x[0])
         best_energy_val, best_genome = scored[0]
 
         EPS = 1e-9
-        for gen in range(self.n_generations):
+        for _ in range(self.n_generations):
             if best_energy_val <= EPS:
                 break  # pragma: no cover
             next_pop = [g for _, g in scored[:n_elite]]
@@ -535,17 +435,7 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
         self.seed = seed
         self.verbose = verbose
 
-    def get_params(self, deep: bool = True) -> dict:
-        return {  # pragma: no cover
-            "constraints": self.constraints,
-            "n_steps": self.n_steps,
-            "t0": self.t0,
-            "cooling": self.cooling,
-            "seed": self.seed,
-            "verbose": self.verbose,
-        }
-
-    def fit(self, X: pl.DataFrame, y=None) -> "MetropolisHastingsConstraintCalibration":
+    def fit(self, X: pl.DataFrame, y=None) -> MetropolisHastingsConstraintCalibration:
         """Run MH on X using X[col] as the proposal pool.  Populates samplers_."""
         constraints = _de_constraints(self.constraints)
         _warn_single_col_constraints(constraints)
@@ -563,7 +453,7 @@ class MetropolisHastingsConstraintCalibration(BaseEstimator, TransformerMixin):
             return pl.concat([working.select(anchors), df], how="horizontal_extend")
 
         # Pre-generate all random indices via polars (no numpy RNG).
-        _rints = lambda n, hi, s: (  # noqa: E731
+        _rints = lambda n, hi, s: (
             pl.int_range(hi, eager=True)
             .sample(n, with_replacement=True, seed=s)
             .to_list()
