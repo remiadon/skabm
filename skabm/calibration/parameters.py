@@ -24,7 +24,7 @@ exceeds the spread one candidate shows across seed draws — and that spread is
 what ``ensemble_size`` buys down.  Measuring it costs a few dozen simulations
 and routinely saves a few thousand.
 
-See ``notebooks/poledna/poledna.ipynb`` (chapter 4) for both in use, including
+See ``notebooks/poledna.ipynb`` (chapter 4) for both in use, including
 the identification reading of a calibration result.
 """
 

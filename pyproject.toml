@@ -3,6 +3,7 @@ name = 'skabm'
 dynamic = ["version"]
 dependencies = [
     "eurostat>=1.1.1",
+    "lonboard>=0.17.0",
     "maplib>=0.20.26",
     "numpy>=2.4.6",
     "polars>=1.42.1",
@@ -15,7 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 # Model calibration (searching `params` to match macro series) is a different
 # problem from the population calibration in skabm.calibration, and black-it
-# already solves it — see chapter 4 of notebooks/poledna/poledna.ipynb.  Its
+# already solves it — see chapter 4 of notebooks/poledna.ipynb.  Its
 # numpy pin is conservative rather than real (black-it runs unchanged on 2.4.6),
 # hence the override below; its own `python <3.13` bound applies to this extra.
 model-calibration = [
@@ -24,6 +25,15 @@ model-calibration = [
 # skabm.dsl.jax_tick: the differentiable backend for rules written with skabm.dsl.
 jax = [
     "jax>=0.10",
+]
+# The live simulation pages, the notebooks built on skabm.player, served by Voilà;
+# lonboard draws the maps, matplotlib the curves, httpx fetches Bayonne's open data.
+voila = [
+    "voila>=0.5.13",
+    "ipywidgets>=8.1.9",
+    "lonboard>=0.17",
+    "matplotlib>=3.11.1",
+    "httpx>=0.28.1",
 ]
 
 [tool.setuptools.packages.find]
@@ -69,4 +79,5 @@ dev = [
     "pytest-testmon>=2.2.0",
     "flax>=0.12.0",
     "ipykernel>=7.3.0",
+    "ipywidgets>=8.1.9",
 ]

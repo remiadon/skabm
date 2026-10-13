@@ -50,15 +50,15 @@ repos:
       # Pre-push rather than pre-commit because even without Poledna it is ~1
       # minute. Needs the data caches warm: a cold notebooks/data goes to Zenodo.
       #
-      # notebooks/poledna is excluded deliberately: at 3m24 it is four fifths of
+      # notebooks/poledna.ipynb is excluded deliberately: at 3m24 it is four fifths of
       # the total, and it is the one notebook that reaches the network on a cold
       # cache (Eurostat, for poledna_io_at_2010.parquet). Run it in CI, or by
-      # hand: `pytest --nbmake notebooks/poledna`.
+      # hand: `pytest --nbmake notebooks/poledna.ipynb`.
       - id: notebooks
         name: run notebooks (pre-push, excludes poledna)
         entry: >-
           uv run --no-sync pytest --nbmake -q notebooks/
-          --ignore=notebooks/poledna
+          --ignore=notebooks/poledna.ipynb
         language: system
         pass_filenames: false
         stages: [pre-push]

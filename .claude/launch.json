@@ -2,10 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "bayonne",
-      "runtimeExecutable": "/Users/remiadon/skabm/.venv/bin/streamlit",
-      "runtimeArgs": ["run", "notebooks/bayonne/app.py", "--server.port", "8511", "--server.headless", "true"],
-      "port": 8511
+      "name": "pages",
+      "runtimeExecutable": "/opt/homebrew/bin/uv",
+      "runtimeArgs": ["run", "--extra", "voila", "voila", "notebooks", "--port=8513", "--no-browser", "--MappingKernelManager.cull_interval=60", "--MappingKernelManager.cull_idle_timeout=300"],
+      "port": 8513
     }
   ]
 }

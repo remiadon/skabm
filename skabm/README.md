@@ -103,5 +103,5 @@ rule engine carries an economic ABM, so the walls are documented on purpose.
 
 Hooks are split by what they cost. Per commit: `ruff`, every ```python fence in the root README,
 and `pytest --testmon` (~0.3 s on an untouched tree). Per push: the full suite with the
-coverage gate, plus `pytest --nbmake notebooks/`, minus `notebooks/poledna`, which takes
+coverage gate, plus `pytest --nbmake notebooks/`, minus `notebooks/poledna.ipynb`, which takes
 3m24 and is the only notebook hitting the network.

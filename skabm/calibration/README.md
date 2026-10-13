@@ -38,4 +38,4 @@ candidate shows across seeds. Run it at the parameters you believe and at a clea
 candidate: if the two ranges overlap, the observables do not identify that parameter.
 
 `pip install "skabm[model-calibration]"` brings in black-it. Chapter 4 of
-[notebooks/poledna](../../notebooks/poledna/poledna.ipynb) shows both in use.
+[notebooks/poledna](../../notebooks/poledna.ipynb) shows both in use.
