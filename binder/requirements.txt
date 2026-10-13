@@ -1,0 +1,2 @@
+# Selects repo2docker's Python build; skabm itself, with the pages' extra, is installed
+# from the clone by postBuild.

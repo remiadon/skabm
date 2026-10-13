@@ -1,0 +1,5 @@
+#!/bin/bash
+# A Binder session has 1-2 GB, and polars (maplib's too) holds memory per worker thread:
+# the Bayonne page peaks at 1.4 GB on two threads, where a bare run on twelve took 1.8.
+export POLARS_MAX_THREADS=2 RAYON_NUM_THREADS=2
+exec "$@"

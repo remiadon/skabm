@@ -30,6 +30,7 @@ jax = [
 # lonboard draws the maps, matplotlib the curves, httpx fetches Bayonne's open data.
 voila = [
     "voila>=0.5.13",
+    "ipykernel>=7.3.0",
     "ipywidgets>=8.1.9",
     "lonboard>=0.17",
     "matplotlib>=3.11.1",

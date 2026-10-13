@@ -13,9 +13,11 @@ Behaviour comes from published models, each cited to its tables: Poledna et al. 
 Austrian economy calibrated 1:1 from Eurostat, CANVAS (Hommes et al. 2025), del
 Rio-Chanona et al. (2021)'s occupational mobility, Schelling (1971).
 
-**Watch one run.** [Schelling](notebooks/schelling.ipynb) and [Bayonne](notebooks/bayonne.ipynb)
-are live pages: set one up, press Run, and the city segregates or the traffic reroutes tick by tick
-(`skabm.player`). Serve them all with
+**Watch one run.** [Schelling](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fschelling.ipynb)
+and [Bayonne](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fbayonne.ipynb)
+are live pages on [Binder](https://mybinder.org): set one up, press Run, and the city segregates
+or the traffic reroutes tick by tick (`skabm.player`). A first launch builds for a few
+minutes. Locally, serve them all with
 
 ```bash
 uv run --extra voila voila notebooks

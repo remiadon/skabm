@@ -1,0 +1,11 @@
+#!/bin/bash
+# skabm with the pages' extra, then every page (a notebook built on skabm.player) executed
+# once: that sets it up without simulating, so whatever it downloads (Bayonne's roads and
+# census data) is in the image and a session doesn't refetch it.  A page that fails to
+# set up fails the build.
+set -euo pipefail
+pip install --no-cache-dir "${REPO_DIR}[voila]"
+cd "${REPO_DIR}/notebooks"
+for notebook in *.ipynb; do
+    if grep -q "skabm.player" "$notebook"; then jupyter execute "$notebook"; fi
+done
