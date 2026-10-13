@@ -284,6 +284,51 @@ person = agent(
     },
 )
 
+# Spatial evolutionary markets (skabm.behaviour.trader): traders on a lattice, the
+# market they trade in, and the days of data that drive it.
+trader = agent(
+    "Trader",
+    "x y strategy demand fund_around chart_around",
+    {"neighbor": Link("Trader", many=True), "market": Link("Market")},
+    doc={
+        "x": "column on the lattice",
+        "y": "row on the lattice",
+        "strategy": "0 fundamentalist, 1 chartist (momentum), 2 noise trader",
+        "demand": "what the trader asks for this step, as a share of the price",
+        "fund_around": "share of the eight neighbours who are fundamentalists",
+        "chart_around": "share of the eight neighbours who are chartists",
+        "neighbor": "the eight traders around this one, on a torus (trader.torus_neighbors)",
+        "market": "the market the trader trades in",
+    },
+)
+
+market = agent(
+    "Market",
+    "t price fundamental ret momentum fitness_fund fitness_chart fitness_noise",
+    doc={
+        "t": "days traded",
+        "price": "the asset's price",
+        "fundamental": "the value fundamentalists believe the price reverts to",
+        "ret": "the day's log return of the real asset, added to the traders' impact",
+        "momentum": "the price's last relative change, which chartists extrapolate",
+        "fitness_fund": "the fundamentalists' discounted past profits",
+        "fitness_chart": "the chartists' discounted past profits",
+        "fitness_noise": "the noise traders' discounted past profits",
+    },
+)
+
+day = agent(
+    "Day",
+    "t fundamental ret",
+    {"market": Link("Market")},
+    doc={
+        "t": "the day's rank, from 0",
+        "fundamental": "the fundamental value that day (trader.days: the log-linear trend)",
+        "ret": "the real asset's log return that day",
+        "market": "the market this day of data drives",
+    },
+)
+
 occupation = agent(
     "Occupation",
     "demand_init demand_final target_demand employment unemployment vacancies "
@@ -447,6 +492,9 @@ TEMPLATES = {
         bank,
         cell,
         person,
+        trader,
+        market,
+        day,
         occupation,
         edge,
         clock,

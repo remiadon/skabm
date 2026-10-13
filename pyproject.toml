@@ -27,9 +27,11 @@ jax = [
     "jax>=0.10",
 ]
 # The live simulation pages, the notebooks built on skabm.player, served by Voilà;
-# lonboard draws the maps, matplotlib the curves, httpx fetches Bayonne's open data.
+# lonboard draws the maps, matplotlib the curves, httpx fetches their open data, and jax
+# runs the pages on the JAX engine.
 voila = [
     "voila>=0.5.13",
+    "jax>=0.10",
     "ipykernel>=7.3.0",
     "ipywidgets>=8.1.9",
     "lonboard>=0.17",

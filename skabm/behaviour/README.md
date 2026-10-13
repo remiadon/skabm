@@ -11,6 +11,7 @@ it cites, one list of rules per source:
 | `bank` | banks and their depositors | `contagion_rules`: a skabm extension, distress and depositor flight spreading one step per tick. No published calibration, so no model tests | `depositors`: each depositor's bank, drawn by deposit share |
 | `labour` | occupations | `delrio_rules`: del Rio-Chanona et al. (2021), occupational mobility under an automation shock | `mobility_network`: edges from observed transitions |
 | `residence` | people, and the cells they live in | `schelling_rules`: Schelling (1971) segregation, on a lattice or continuous geometry | `settle`, `grid_neighbors`, `geo_neighbors` |
+| `trader` | traders on a lattice, the market they trade in, the days of data driving it | `brock_hommes_rules`: Brock & Hommes (1998)'s adaptive belief system on a lattice, as an open-source implementation writes it: strategy demands, the price on the S&P 500's returns plus the traders' impact, logit switching on past profits with a neighbour pull. Values from the implementation, no published calibration, so no model tests | `lattice`, `torus_neighbors`, `days`, `opening` |
 | `traffic` | commuters, routes, road links | `bayonne_rules`: day-to-day route choice and pivot-point mode choice (the Bayonne model) | `routes`, `area_membership`; `pedestrianize` is the closure, as an intervention |
 | `learning` | the forecasts every agent reads | SAC expectations (Hommes & Zhu 2014), as running sums on a signal node | |
 

@@ -13,11 +13,18 @@ Behaviour comes from published models, each cited to its tables: Poledna et al. 
 Austrian economy calibrated 1:1 from Eurostat, CANVAS (Hommes et al. 2025), del
 Rio-Chanona et al. (2021)'s occupational mobility, Schelling (1971).
 
-**Watch one run.** [Schelling](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fschelling.ipynb)
-and [Bayonne](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fbayonne.ipynb)
-are live pages on [Binder](https://mybinder.org): set one up, press Run, and the city segregates
-or the traffic reroutes tick by tick (`skabm.player`). A first launch builds for a few
-minutes. Locally, serve them all with
+**Watch one run.** Each model below is a live page on [Binder](https://mybinder.org): set it
+up, press Run, and watch it unfold tick by tick (`skabm.player`). A first launch builds for a
+few minutes.
+
+| Model | Live page | Reference | Engine | Main plot |
+|---|---|---|---|---|
+| Schelling segregation | [launch](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fschelling.ipynb) | Schelling (1971) | RDF, SPARQL | 2-D grid |
+| Bayonne with a car-free old town | [launch](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fbayonne.ipynb) | day-to-day route choice (Horowitz 1984; Cascetta 1989), pivot-point mode choice (Koppelman 1983), BPR delays (1964), on census 2022 flows and OpenStreetMap roads | RDF, SPARQL | geographical map |
+| Occupational mobility and automation | [launch](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Flabour_automation.ipynb) | del Rio-Chanona et al. (2021), J. R. Soc. Interface 18:20200898, on the paper's US data | JAX | time series, with a per-occupation scatter or the Beveridge curve |
+| Spatial evolutionary markets | [launch](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fmarkets.ipynb) | Brock & Hommes (1998), on a lattice ([implementation](https://github.com/zakhac/Spatial-Evolutionary-Markets)), on the S&P 500 | RDF, SPARQL | 2-D grid, with price and strategy-share curves |
+
+Locally, serve them all with
 
 ```bash
 uv run --extra voila voila notebooks
@@ -231,9 +238,6 @@ Step 3 is what a marginal sampler cannot do, and both marginals survive it exact
 |---|---|
 | [notebooks/poledna](notebooks/poledna.ipynb) | the model in five chapters on one population: **0** calibration, **1** the quarter plus an intervention, **2** a banking layer whose distress spreads a step per quarter, **3** learned expectations as running sums on the signal nodes, **4** black-it parameter calibration read as an identification test |
 | [notebooks/extraction](notebooks/extraction.ipynb) | what to *do* with derived state: Gini as one polars expression, an intervention that moves it, telemetry into JAX |
-| [notebooks/labour_automation](notebooks/labour_automation.ipynb) | occupational mobility under an automation shock: a labour-flow network whose central quantity lives on the *edge* |
-| [notebooks/schelling](notebooks/schelling.ipynb) | spatial segregation on the lattice, as a live page; the continuous-geometry swap is covered by `tests/test_schelling.py` |
-| [notebooks/bayonne](notebooks/bayonne.ipynb) | closing Bayonne's old town to cars: 9,400 commuters from the 2022 census on 37,000 OpenStreetMap links, the closure as a graph edit, as a live map |
 
 ## Architecture
 
