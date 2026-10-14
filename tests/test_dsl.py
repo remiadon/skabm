@@ -17,7 +17,7 @@ from sympy.stats import Exponential, Normal, Uniform
 from test_labour import NEVER, clock, market, occupations, ring
 
 from skabm import template
-from skabm.behaviour import labour
+from skabm.behaviour import labour, trader
 from skabm.behaviour.labour import PARAMETERS as LABOUR
 from skabm.behaviour.residence import schelling_relocate
 from skabm.behaviour.traffic import bayonne_area_traffic
@@ -25,6 +25,7 @@ from skabm.dsl import (
     Agents,
     DSLError,
     arrays,
+    coalesce,
     jax_tick,
     lag,
     mean,
@@ -139,6 +140,34 @@ def test_rules_are_checked_when_compiled():
         sparql({Route.time: Route.via.t0})  # which of its links?
     with pytest.raises(DSLError, match="not for its own class"):
         sparql({Cell.rank: pick(Cell, Cell.draw > 0, Cell.draw)})
+
+
+def test_a_sum_in_a_condition_stays_a_sum():
+    """SymPy folds a Piecewise out of a function in a condition, as if it read one
+    value: each neighbour's strategy would be tested at the trader itself."""
+    Trader = Agents("Trader")
+    fund = sp.Piecewise((1, sp.Eq(Trader.neighbor.strategy, 0)), (0, True))
+    crowd = sp.Piecewise((1, sum_over(Trader.neighbor, fund) > 3), (0, True))
+    traders = trader.lattice(4, seed=0)
+    around = trader.torus_neighbors(traders)
+    world = Model()
+    world.map(template.trader, traders.with_iri("market"))
+    world.map(template.links("neighbor"), around.with_iri("neighbor"))
+    world.update(sparql({Trader.demand: crowd}))
+    got = world.query(_PREFIXES + "SELECT ?t ?d WHERE { ?t def:demand ?d }")
+    want = (
+        around.join(traders.select(neighbor="id", s="strategy"), on="neighbor")
+        .group_by("id")
+        .agg(d=((pl.col("s") == 0).sum() > 3).cast(pl.Float64))
+    )
+    assert set(want["d"]) == {0.0, 1.0}
+    assert dict(zip(got["t"].str.extract(r"#(.*)>$"), got["d"])) == dict(
+        zip(want["id"], want["d"])
+    )
+    # every graph function keeps its own Piecewise
+    inner = sp.Piecewise((Firm.price, Firm.price > 1), (0, True))
+    for f in (mean(inner), total(inner), lag(inner), coalesce(inner, 0)):
+        assert sp.Piecewise((1, f > 1), (0, True)).args[0].cond == (f > 1)
 
 
 def test_jax_refuses_what_it_cannot_shape():

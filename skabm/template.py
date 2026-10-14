@@ -288,15 +288,13 @@ person = agent(
 # market they trade in, and the days of data that drive it.
 trader = agent(
     "Trader",
-    "x y strategy demand fund_around chart_around",
+    "x y strategy demand",
     {"neighbor": Link("Trader", many=True), "market": Link("Market")},
     doc={
         "x": "column on the lattice",
         "y": "row on the lattice",
         "strategy": "0 fundamentalist, 1 chartist (momentum), 2 noise trader",
         "demand": "what the trader asks for this step, as a share of the price",
-        "fund_around": "share of the eight neighbours who are fundamentalists",
-        "chart_around": "share of the eight neighbours who are chartists",
         "neighbor": "the eight traders around this one, on a torus (trader.torus_neighbors)",
         "market": "the market the trader trades in",
     },

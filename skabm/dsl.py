@@ -51,31 +51,41 @@ class DSLError(ValueError):
     """A rule the compiler cannot place; the message says where and why."""
 
 
-class gather(sp.Function):
+class _Scoped(sp.Function):
+    """A graph function: its argument is read elsewhere (at other agents, a run ago,
+    or where it may be missing).  SymPy folds a Piecewise out of a function inside a
+    condition (``piecewise_fold``), testing it here; it asks ``has(Piecewise)``
+    first, and a graph function says no."""
+
+    def has(self, *patterns):
+        return patterns != (sp.Piecewise,) and super().has(*patterns)
+
+
+class gather(_Scoped):
     """What ``Edge.src.unemployment`` builds: a field read across a link."""
 
     nargs = 2
 
 
-class total(sp.Function):
+class total(_Scoped):
     """``total(Firm.output)``: the sum over every agent of the class."""
 
     nargs = 1
 
 
-class mean(sp.Function):
+class mean(_Scoped):
     """``mean(Firm.price)``: the mean over every agent of the class."""
 
     nargs = 1
 
 
-class lag(sp.Function):
+class lag(_Scoped):
     """``lag(e)``: ``e`` one run of the rule ago, itself on the first run."""
 
     nargs = 1
 
 
-class coalesce(sp.Function):
+class coalesce(_Scoped):
     """``coalesce(Household.employer.w_bar, benefit)``: the first argument that exists."""
 
 
@@ -84,7 +94,7 @@ def node(subject: str, field: str) -> sp.Symbol:
     return sp.Symbol(f"@{subject}.{field}")
 
 
-class sum_over(sp.Function):
+class sum_over(_Scoped):
     """``sum_over(link, e)``: the sum of ``e`` over the agents a link relates to this one.
 
     Another class's link sums over its agents that point here: ``sum_over(Edge.dst,
@@ -96,20 +106,20 @@ class sum_over(sp.Function):
     nargs = 2
 
 
-class total_by(sp.Function):
+class total_by(_Scoped):
     """``total_by(Option.od, e)``: the sum of ``e`` over the agents sharing this ``od``."""
 
     nargs = 2
 
 
-class running_sum(sp.Function):
+class running_sum(_Scoped):
     """``running_sum(Route.rank, e, Route.od)``: the sum of ``e`` over the agents
     (sharing this ``od``, if given) whose ``rank`` is at most this one's."""
 
     nargs = (2, 3)
 
 
-class pick(sp.Function):
+class pick(_Scoped):
     """``pick(Route, where, order)``: the agent of that class meeting ``where`` with
     the smallest ``order``, missing if none does; ``where`` reads both agents."""
 

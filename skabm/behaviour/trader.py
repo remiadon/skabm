@@ -1,7 +1,7 @@
 """Traders on a lattice, and the market they trade in. Brock & Hommes (1998),
 ``brock_hommes_rules``: their adaptive belief system on a lattice, as the open-source
 implementation by Z. Hachemi writes it (github.com/zakhac/Spatial-Evolutionary-Markets,
-``simulation.py`` and ``market.py`` in its S&P 500 mode), five rules, in this order. The
+``simulation.py`` and ``market.py`` in its S&P 500 mode), four rules, in this order. The
 paper's: each trader picks a strategy by a logit, of intensity the parameter
 choice_intensity, in the strategies' past profits with the parameter memory. The
 implementation's: the three strategies' demands, a price moved by the real asset's return
@@ -25,14 +25,11 @@ fitness becomes the parameter memory times itself, plus a demand times the chang
 fundamentalists' demand, the chartists' demand, and the mean demand of the market's noise
 traders (0 when it has none).
 
-4. A trader's fund_around and chart_around become the shares of its eight neighbours who
-are fundamentalists and chartists.
-
-5. A trader's strategy becomes a fresh draw among the three, each with a weight: the
+4. A trader's strategy becomes a fresh draw among the three, each with a weight: the
 exponential of the parameter choice_intensity times the strategy's fitness less the
 largest of the three, plus, for the fundamentalist and chartist strategies, the parameter
-social_pressure times its fund_around or chart_around. A uniform
-draw between 0 and 1 below the fundamentalist's share of the weights picks it, below the
+social_pressure times the share of its eight neighbours who hold it. A uniform draw
+between 0 and 1 below the fundamentalist's share of the weights picks it, below the
 fundamentalist's and the chartist's shares together the chartist, else the noise trader.
 """
 
@@ -103,22 +100,18 @@ brock_hommes_price = {
 }
 
 
-# The implementation's simulation.py, SpatialSimulation._evolve_grid_spatial: the neighbour
-# counts, a rule of their own because the draw that reads them is a condition
-around = Trader.neighbor
-brock_hommes_around = {
-    Trader.fund_around: sum_over(around, sp.Piecewise((1, sp.Eq(around.strategy, FUND)), (0, True))) / 8,
-    Trader.chart_around: sum_over(around, sp.Piecewise((1, sp.Eq(around.strategy, CHART)), (0, True))) / 8,
-}  # fmt: skip
-
 # Brock & Hommes (1998), logit switching; the neighbour pull, the implementation's
 # simulation.py, SpatialSimulation._evolve_grid_spatial
 best = sp.Max(Market.fitness_fund, Market.fitness_chart, Market.fitness_noise)
+pull = {
+    s: social_pressure * sum_over(Trader.neighbor, holding(s)) / 8
+    for s in (FUND, CHART)
+}
 weight = {
-    FUND: sp.exp(choice_intensity * (Market.fitness_fund - best) + social_pressure * Trader.fund_around),
-    CHART: sp.exp(choice_intensity * (Market.fitness_chart - best) + social_pressure * Trader.chart_around),
+    FUND: sp.exp(choice_intensity * (Market.fitness_fund - best) + pull[FUND]),
+    CHART: sp.exp(choice_intensity * (Market.fitness_chart - best) + pull[CHART]),
     NOISE: sp.exp(choice_intensity * (Market.fitness_noise - best)),
-}  # fmt: skip
+}
 u = Uniform("u", 0, 1)
 brock_hommes_imitate = {
     Trader.strategy: sp.Piecewise(
@@ -132,7 +125,6 @@ brock_hommes_rules = [
     brock_hommes_day,
     brock_hommes_demand,
     brock_hommes_price,
-    brock_hommes_around,
     brock_hommes_imitate,
 ]
 
