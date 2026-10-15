@@ -245,7 +245,7 @@ class _Rule:
         if missing:
             raise KeyError(
                 f"rule needs parameters {missing}: pass them in params= "
-                "(skabm.behaviour's own are in each module's PARAMETERS)"
+                "(a model's own are in its PARAMETERS)"
             )
         return self
 

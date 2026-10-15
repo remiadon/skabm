@@ -1,14 +1,20 @@
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = 'skabm'
-dynamic = ["version"]
+dynamic = ["version"]  # from the git tag (setuptools-scm): tag v0.3.0, get 0.3.0
+description = "Agent-based models as SymPy rules, run on a knowledge graph or in JAX"
+readme = "README.md"
+requires-python = ">=3.11"
 dependencies = [
-    "eurostat>=1.1.1",
     "lonboard>=0.17.0",
     "maplib>=0.20.26",
     "numpy>=2.4.6",
     "polars>=1.42.1",
     "polars-random>=0.5.0",
-    "pyarrow>=20.0.0",
+    "pyarrow>=20.0.0,<24",  # maplib's Model.map segfaults on pyarrow 24
     "scikit-learn>=1.6.0",
     "sympy>=1.14",
 ]
@@ -28,8 +34,9 @@ jax = [
 ]
 # The live simulation pages, the notebooks built on skabm.player, served by Voilà;
 # lonboard draws the maps, matplotlib the curves, httpx fetches their open data, and jax
-# runs the pages on the JAX engine.
+# runs the pages on the JAX engine; eurostat reads the tables notebooks/poledna fetches.
 voila = [
+    "eurostat>=1.1.1",
     "voila>=0.5.13",
     "jax>=0.10",
     "ipykernel>=7.3.0",
@@ -38,6 +45,8 @@ voila = [
     "matplotlib>=3.11.1",
     "httpx>=0.28.1",
 ]
+
+[tool.setuptools_scm]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -58,7 +67,7 @@ package = true
 # model-calibration extra is unsatisfiable.
 override-dependencies = ["numpy>=2.4.6"]
 
-# The `infer` reasoning used by skabm.behaviour.bank (Datalog / recursive
+# The `infer` reasoning once used by the bank contagion rules (Datalog / recursive
 # SPARQL CONSTRUCT) is a licensed maplib add-on — free for academic / personal
 # use, but not shipped in the PyPI wheels. The academic build is vendored as a
 # local wheel; PyPI's 0.20.26 panics ("Contact Data Treehouse") the moment

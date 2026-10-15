@@ -15,11 +15,12 @@ import pytest
 import sympy as sp
 from maplib import Model
 from sklearn.base import clone
-from worlds import world
+from worlds import POLEDNA, world
 
 from skabm import template
-from skabm.behaviour.firm import Firm, ownership, poledna_produce
-from skabm.behaviour.household import initial, poledna_income
+from skabm.behaviour import firm, household
+from skabm.behaviour.firm import Firm
+from skabm.behaviour.household import opening_balance, ownership
 from skabm.simulation import RDFSimulator
 from skabm.sparql import DEF_NS
 
@@ -75,7 +76,7 @@ OVERRIDES = {
     "xi_pi": 0.5,
     "xi_gamma": 0.5,
 }
-HOUSEHOLDS = initial(
+HOUSEHOLDS = opening_balance(
     RAW_HOUSEHOLDS, FIRMS, **OVERRIDES
 )  # the opening income and wealth
 
@@ -114,7 +115,7 @@ def path(sim) -> list:
 
 
 def test_fit_iter_yields_every_agent_per_tick(shocked):
-    sim = RDFSimulator(params=shocked, n_periods=4, random_seed=11)
+    sim = RDFSimulator(POLEDNA, params=shocked, n_periods=4, random_seed=11)
 
     run = pl.concat(
         sim.fit_iter(world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK))
@@ -136,7 +137,7 @@ def test_fit_iter_yields_every_agent_per_tick(shocked):
 
 
 def test_warm_start_continues_the_world(shocked):
-    sim = RDFSimulator(params=shocked, n_periods=2, random_seed=5).fit(
+    sim = RDFSimulator(POLEDNA, params=shocked, n_periods=2, random_seed=5).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
     )
     gdp_after_cold = gdp(
@@ -146,7 +147,9 @@ def test_warm_start_continues_the_world(shocked):
         )
     )
 
-    warm = RDFSimulator(params=shocked, n_periods=2, warm_start=True, random_seed=5)
+    warm = RDFSimulator(
+        POLEDNA, params=shocked, n_periods=2, warm_start=True, random_seed=5
+    )
     warm.model_ = sim.model_
     rows = list(warm.fit_iter())
     assert [r["t"][0] for r in rows] == [1, 2]
@@ -170,7 +173,7 @@ def test_fit_takes_a_model_someone_else_built(params):
         f"{_PREFIX} DELETE {{ ?f def:price ?p }} INSERT {{ ?f def:price 3e0 }} "
         "WHERE { ?f a ex:Firm ; def:price ?p }"
     )
-    sim = RDFSimulator(params=params, n_periods=2, random_seed=3)
+    sim = RDFSimulator(POLEDNA, params=params, n_periods=2, random_seed=3)
     run = pl.concat(sim.fit_iter(world))
 
     assert sim.model_ is world  # advanced in place, not copied
@@ -183,12 +186,14 @@ def test_fit_takes_a_model_someone_else_built(params):
 
 def test_warm_start_takes_the_model_to_continue(params):
     """The replacement for assigning ``model_`` and flipping the flag."""
-    cold = RDFSimulator(params=params, n_periods=2, random_seed=3).fit(
+    cold = RDFSimulator(POLEDNA, params=params, n_periods=2, random_seed=3).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS)
     )
     owners = cold.model_.query(f"{_PREFIX} SELECT ?h WHERE {{ ?h def:owns ?f }}").height
 
-    warm = RDFSimulator(params=params, n_periods=2, warm_start=True, random_seed=3)
+    warm = RDFSimulator(
+        POLEDNA, params=params, n_periods=2, warm_start=True, random_seed=3
+    )
     rows = list(warm.fit_iter(cold.model_))
 
     assert warm.model_ is cold.model_ and len(rows) == 2
@@ -208,10 +213,10 @@ def test_a_placeholder_without_a_published_value_is_named():
 
 
 def test_default_rules_scoped_to_passed_kinds(shocked):
-    # only firms: default rules anchored on absent classes (Household,
+    # only firms: Poledna's rules anchored on absent classes (Household,
     # CentralBank) match nothing and no-op — SPARQL pattern matching scopes
-    # the full default rule set to the kinds actually mapped
-    sim = RDFSimulator(params=shocked, n_periods=2, random_seed=5).fit(
+    # the full quarter to the kinds actually mapped
+    sim = RDFSimulator(POLEDNA, params=shocked, n_periods=2, random_seed=5).fit(
         world(Firm=FIRMS)
     )
 
@@ -223,7 +228,7 @@ def test_default_rules_scoped_to_passed_kinds(shocked):
 
 
 def test_unreferenced_population_warns(params):
-    sim = RDFSimulator(params=params, n_periods=1)
+    sim = RDFSimulator(POLEDNA, params=params, n_periods=1)
     ghosts = pl.DataFrame({"id": ["ghost_0"], "x": [1.0]})
     with pytest.warns(UserWarning, match="Ghost"):
         sim.fit(
@@ -234,7 +239,7 @@ def test_unreferenced_population_warns(params):
 
 
 def test_upserts_do_not_duplicate_state(params):
-    sim = RDFSimulator(params=params, n_periods=3).fit(
+    sim = RDFSimulator(POLEDNA, params=params, n_periods=3).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
     )
 
@@ -248,7 +253,7 @@ def test_upserts_do_not_duplicate_state(params):
 
 def test_production_respects_labor_capacity():
     sim = RDFSimulator(
-        rules=[poledna_produce],
+        rules=[firm.adaptive_output],
         params={"growth_sigma": 0.0},
         n_periods=10,
     ).fit(world(Firm=FIRMS))
@@ -262,7 +267,7 @@ def test_production_respects_labor_capacity():
 
 def test_income_by_activity_status(poledna_params):
     # Poledna eq. 49 with Table 2's own θ^UB and θ^DIV
-    sim = RDFSimulator(params=poledna_params, n_periods=1).fit(
+    sim = RDFSimulator(POLEDNA, params=poledna_params, n_periods=1).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
     )
 
@@ -316,9 +321,9 @@ def test_bare_link_resolves_from_model(params):
         }
     )
     households = pl.DataFrame({"id": ["hh_0"], "employer": ["firm_0"], "psi": [0.9]})
-    sim = RDFSimulator(rules=[poledna_income], params=params, n_periods=1).fit(
-        world(Firm=firms, Household=households)
-    )
+    sim = RDFSimulator(
+        rules=[household.income_by_status], params=params, n_periods=1
+    ).fit(world(Firm=firms, Household=households))
     income = sim.model_.query(f"{_PREFIX} SELECT ?i WHERE {{ ?h def:income ?i }}")
     assert income["i"].to_list() == [30.0]
 
@@ -334,21 +339,29 @@ def test_ar_shocks_opt_in_and_reproducible(params, shocked):
             )["y"]
         )
 
-    base = outputs(RDFSimulator(params=params, n_periods=3).fit(world(Firm=FIRMS)))
+    base = outputs(
+        RDFSimulator(POLEDNA, params=params, n_periods=3).fit(world(Firm=FIRMS))
+    )
     assert base == outputs(
-        RDFSimulator(params=params, n_periods=3).fit(world(Firm=FIRMS))
+        RDFSimulator(POLEDNA, params=params, n_periods=3).fit(world(Firm=FIRMS))
     )
 
     # growth_sigma > 0 turns FIRM_PRODUCTION stochastic; random_seed pins it.
     shocked = dict(params, growth_sigma=0.02)
     s1 = outputs(
-        RDFSimulator(params=shocked, n_periods=3, random_seed=1).fit(world(Firm=FIRMS))
+        RDFSimulator(POLEDNA, params=shocked, n_periods=3, random_seed=1).fit(
+            world(Firm=FIRMS)
+        )
     )
     s2 = outputs(
-        RDFSimulator(params=shocked, n_periods=3, random_seed=1).fit(world(Firm=FIRMS))
+        RDFSimulator(POLEDNA, params=shocked, n_periods=3, random_seed=1).fit(
+            world(Firm=FIRMS)
+        )
     )
     s3 = outputs(
-        RDFSimulator(params=shocked, n_periods=3, random_seed=2).fit(world(Firm=FIRMS))
+        RDFSimulator(POLEDNA, params=shocked, n_periods=3, random_seed=2).fit(
+            world(Firm=FIRMS)
+        )
     )
     assert s1 != base  # shocks moved the path off the deterministic drift
     assert s1 == s2  # same seed -> identical run
@@ -356,7 +369,7 @@ def test_ar_shocks_opt_in_and_reproducible(params, shocked):
 
 
 def test_get_params_and_clone(params):
-    sim = RDFSimulator(params=params, n_periods=7)
+    sim = RDFSimulator(POLEDNA, params=params, n_periods=7)
     got = sim.get_params()
     assert set(got) == {
         "rules",
@@ -386,11 +399,11 @@ def test_inject_metadata_adds_triples():
     from skabm.simulation import _inject_metadata
 
     model = Model()
-    _inject_metadata(model, [poledna_produce])
+    _inject_metadata(model, [firm.adaptive_output])
     triples = model.query("SELECT ?s ?p ?o WHERE { ?s ?p ?o }")
     assert triples.height >= 3  # class-behaviour, type, source
     sources = [o for p, o in zip(triples["p"], triples["o"]) if "source" in p]
-    assert "Poledna" in sources[0]  # the module's docstring, citation included
+    assert "Poledna et al. (2023) eqs. 5, 12" in sources[0]  # the rule's citation
     pvals = {str(p).replace("<", "").replace(">", "") for p in triples["p"]}
     assert "http://example.net/skabm#behaviour" in pvals
 
@@ -401,7 +414,7 @@ def test_the_world_and_the_sidecar_stay_separate(params):
     Keeping provenance out means a plain ``?s ?p ?o`` over ``model_`` returns the
     world, so the simulation graph stays portable.
     """
-    sim = RDFSimulator(params=params, n_periods=1).fit(
+    sim = RDFSimulator(POLEDNA, params=params, n_periods=1).fit(
         world(Firm=FIRMS, Household=HOUSEHOLDS)
     )
 
@@ -419,7 +432,7 @@ def test_the_world_and_the_sidecar_stay_separate(params):
 def test_a_tick_yields_every_field(params):
     """A tick's frame is every field the graph holds, none named by hand: the state the
     rules write and the structure the data carries."""
-    sim = RDFSimulator(params=params, n_periods=1)
+    sim = RDFSimulator(POLEDNA, params=params, n_periods=1)
     (frame,) = sim.fit_iter(world(Firm=FIRMS, Household=HOUSEHOLDS))
     columns = set(frame.columns)
     assert {"output", "price", "wealth"} <= columns  # state, written by the rules
@@ -427,14 +440,14 @@ def test_a_tick_yields_every_field(params):
 
 
 def test_starting_values_fill_in_rather_than_pile_on():
-    """``household.initial`` keeps what the data carries and fills in the rest: eq. 49
+    """``household.opening_balance`` keeps what the data carries and fills in the rest: eq. 49
     for income, the deposits shared in proportion to it for wealth (Section 5.2)."""
     carried = RAW_HOUSEHOLDS.with_columns(income=pl.lit(3.0), wealth=pl.lit(7.0))
-    kept = initial(carried, FIRMS, **OVERRIDES)
+    kept = opening_balance(carried, FIRMS, **OVERRIDES)
     assert (
         kept["income"].to_list() == [3.0] * 3 and kept["wealth"].to_list() == [7.0] * 3
     )
-    filled = initial(RAW_HOUSEHOLDS, FIRMS, **OVERRIDES)
+    filled = opening_balance(RAW_HOUSEHOLDS, FIRMS, **OVERRIDES)
     # worker: the wage; investor in a loss-maker: nothing; unemployed: the benefit
     assert filled["income"].to_list() == pytest.approx([30.0, 0.0, 0.4 * 35.0])
     assert filled["wealth"].sum() == pytest.approx(OVERRIDES["total_deposits"])

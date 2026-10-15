@@ -4,9 +4,10 @@ import numpy as np
 import polars as pl
 import pytest
 from maplib import Model
+from worlds import POLEDNA
 
 from skabm import template
-from skabm.behaviour.household import initial
+from skabm.behaviour.household import opening_balance
 from skabm.calibration import noise_floor, simulator_model
 
 CAL_FIRMS = pl.DataFrame({"id": [f"firm_{i}" for i in range(6)]}).with_columns(
@@ -31,7 +32,7 @@ CAL_HH = pl.DataFrame(
 def cal_world() -> Model:
     world = Model()
     world.map(template.firm, CAL_FIRMS.with_iri())
-    households = initial(CAL_HH, CAL_FIRMS, total_deposits=4.0e5)
+    households = opening_balance(CAL_HH, CAL_FIRMS, total_deposits=4.0e5)
     world.map(template.household, households.with_iri("employer"))
     return world
 
@@ -49,6 +50,7 @@ def _summarise(state: pl.DataFrame) -> list[float]:
 def _model(cal_params, **kwargs):
     return simulator_model(
         cal_world,
+        rules=POLEDNA,
         free=["growth_sigma"],
         summarise=_summarise,
         params=cal_params,
@@ -68,7 +70,11 @@ def test_simulator_model_shape_and_guards(cal_params):
         _model(cal_params, n_periods=5)
     with pytest.raises(ValueError, match="not in the parameter set"):
         simulator_model(
-            cal_world, free=["no_such_knob"], summarise=_summarise, params=cal_params
+            cal_world,
+            free=["no_such_knob"],
+            summarise=_summarise,
+            params=cal_params,
+            rules=POLEDNA,
         )
 
 
@@ -81,6 +87,7 @@ def test_early_stopping_preserves_the_shape_contract(cal_params):
     """
     diverged = simulator_model(
         cal_world,
+        rules=POLEDNA,
         free=["growth_sigma"],
         summarise=_summarise,
         params=cal_params,
@@ -97,6 +104,7 @@ def test_early_stopping_preserves_the_shape_contract(cal_params):
     # a criterion that never fires costs nothing and changes nothing
     never = simulator_model(
         cal_world,
+        rules=POLEDNA,
         free=["growth_sigma"],
         summarise=_summarise,
         params=cal_params,

@@ -11,7 +11,20 @@ graph ([maplib](https://github.com/DataTreehouse/maplib)), relations are its edg
 populations are [polars](https://pola.rs) DataFrames, and the API is scikit-learn's.
 Behaviour comes from published models, each cited to its tables: Poledna et al. (2023)'s
 Austrian economy calibrated 1:1 from Eurostat, CANVAS (Hommes et al. 2025), del
-Rio-Chanona et al. (2021)'s occupational mobility, Schelling (1971).
+Rio-Chanona et al. (2021)'s occupational mobility, Schelling (1971), and Pangallo et al.
+(2024)'s epidemic and economy of New York in spring 2020.
+
+**Install.**
+
+```bash notest
+pip install "skabm[voila]"
+```
+
+The coding-agent skills install as a Claude Code plugin, pinned to the release you installed
+(`/plugin marketplace add remiadon/skabm#v<version>`, then `/plugin install skabm@skabm`):
+`skabm-core` writes a model from a paper, `skabm-simulation` takes a request to a working
+simulation with a Voilà app. They lean on Polars' own skill
+(`/plugin marketplace add polars-inc/skills`, then `/plugin install polars@polars`).
 
 **Watch one run.** Each model below is a live page on [Binder](https://mybinder.org): set it
 up, press Run, and watch it unfold tick by tick (`skabm.player`). A first launch builds for a
@@ -23,6 +36,7 @@ few minutes.
 | Bayonne with a car-free old town | [launch](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fbayonne.ipynb) | day-to-day route choice (Horowitz 1984; Cascetta 1989), pivot-point mode choice (Koppelman 1983), BPR delays (1964), on census 2022 flows and OpenStreetMap roads | RDF, SPARQL | geographical map |
 | Occupational mobility and automation | [launch](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Flabour_automation.ipynb) | del Rio-Chanona et al. (2021), J. R. Soc. Interface 18:20200898, on the paper's US data | JAX | time series, with a per-occupation scatter or the Beveridge curve |
 | Spatial evolutionary markets | [launch](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fmarkets.ipynb) | Brock & Hommes (1998), on a lattice ([implementation](https://github.com/zakhac/Spatial-Evolutionary-Markets)), on the S&P 500 | RDF, SPARQL | 2-D grid, with price and strategy-share curves |
+| COVID-19 in New York | [launch](https://mybinder.org/v2/gh/remiadon/skabm/main?urlpath=voila%2Frender%2Fnotebooks%2Fpangallo.ipynb) | Pangallo et al. (2024), Nat. Hum. Behav. 8:264-275, in a lighter form, on the paper's NY metro area and the authors' replication data | JAX | geographical map, with deaths, employment and output |
 
 Locally, serve them all with
 
@@ -35,100 +49,85 @@ uv run --extra voila voila notebooks
 | | |
 |---|---|
 | **Behaviour as equations** | a rule is a dict of SymPy expressions, `{Firm.price: Firm.price * (1 + inflation)}`. The same rule runs on the knowledge graph and, differentiably, in JAX |
-| **Rules from a paper** | the `skabm` skill takes a coding agent from a model section to cited, tested rules ([.claude/skills/skabm](.claude/skills/skabm/SKILL.md)) |
+| **Rules from a paper** | the `skabm-core` skill takes a coding agent from a model section to cited, tested rules ([.claude/skills/skabm-core](.claude/skills/skabm-core/SKILL.md)); `skabm-simulation` takes it from a request to a Voilà app ([.claude/skills/skabm-simulation](.claude/skills/skabm-simulation/SKILL.md)) |
 | **Observables in polars** | a run is every agent after every tick, one DataFrame, so any macro quantity, a Gini included, is a polars expression you write. Nothing is declared to the simulator |
-| **Populations from public data** | Eurostat loaders, and calibrators that fit agent rows to known joint facts while every marginal survives exactly |
-| **Citations built in** | each model module carries its published parameter values next to their table and equation |
+| **Populations from public data** | calibrators that fit agent rows to known joint facts while every marginal survives exactly |
+| **Citations built in** | each behaviour module carries its published parameter values next to their table and equation |
 | **Interventions as graph edits** | after a fit, the world is a graph: rewire an ownership edge, delete a bank, close a street, then keep simulating |
 | **Learned expectations** | agents forecast with learning rules (SAC, Hommes & Zhu 2014) that are just more rules |
 
-### A module is how one kind of agent behaves, per source
+### A first model
 
-```python
-from skabm.behaviour import defaults, firm, household, macro
-
-firm.poledna_rules                     # firms as Poledna et al. (2023) has them
-firm.canvas_rules                      # firms as CANVAS (Hommes et al. 2025) has them
-firm.PARAMETERS[firm.vat_rate]         # 0.1529: τ^VAT, Poledna et al. (2023) Table 2
-macro.PARAMETERS[macro.rho]            # 0.9263, the Taylor-rule smoothing
-assert defaults()["vat_rate"] == 0.1529 and len(household.poledna_rules) == 2
-```
-
-A rule is named after its source (`firm.poledna_produce`), so a model takes one source's
-list or mixes rules from several. `RDFSimulator(params={"vat_rate": 0.2})` overrides a
-default by name. More in [skabm/behaviour](skabm/behaviour/README.md).
-
-### What a run yields
+Schelling (1971) in a dozen lines: people of two groups on a grid, and whoever has too few
+neighbours like them moves to an empty cell.
 
 ```python
 import polars as pl
 from maplib import Model
 
+from skabm import template  # adds DataFrame.with_iri
+from skabm.behaviour import person
 from skabm.simulation import RDFSimulator
-from skabm import template  # + DataFrame.with_iri
+from skabm.space import moore_neighbors
 
-firms = pl.DataFrame({"id": ["firm_0", "firm_1"], "output": [100.0, 120.0],
-                      "price": [1.0, 1.1], "alpha": [10.0, 10.0], "size": [12.0, 13.0],
-                      "margin": [0.1, 0.1], "liquidity": [50.0, 60.0], "profit": [1.0, 1.0]})
-households = pl.DataFrame({"id": ["hh_0", "hh_1"], "wealth": [100.0, 200.0],
-                          "income": [10.0, 12.0], "psi": [0.9, 0.9],
-                          "employer": ["firm_0", "firm_1"]})
+# the world: a 20 x 20 grid of cells, four in five settled by someone of group 0 or 1
+cells = pl.DataFrame({"x": range(20)}).join(pl.DataFrame({"y": range(20)}), how="cross")
+cells = cells.with_columns(pl.col("x", "y").cast(pl.Float64), id=pl.format("cell_{}_{}", "x", "y"))
+people = person.settle(cells)
 
-def economy() -> Model:
-    world = Model()
-    world.map(template.firm, firms.with_iri())
-    world.map(template.household, households.with_iri("employer"))
-    return world
+world = Model()
+world.map(template.cell, cells.with_iri())
+world.map(template.person, people.with_iri("location"))
+world.map(template.links("neighbor"), moore_neighbors(cells).with_iri("neighbor"))
 
-sim = RDFSimulator(n_periods=8, random_seed=0)
-run = pl.concat(sim.fit_iter(economy()))   # every agent after every tick: agent, class, t, ...
-
-gdp = (pl.col("price") * pl.col("output")).sum()
-run.group_by("t").agg(gdp=gdp, wealth=pl.col("wealth").sum())
+# the model: a list of behaviours, run in order every tick
+RULES = [person.occupancy, person.happiness, person.cell_rank, person.person_rank, person.relocate]
+run = pl.concat(RDFSimulator(RULES, n_periods=10, random_seed=0).fit_iter(world))
 ```
 
-A macro quantity is a polars expression, and so is one no aggregate spans, like a Gini.
-`class` tells apart the agents that share a field:
+`run` is every agent after every tick, one polars DataFrame. What you measure is a polars
+expression, written after the fact: here, how alike people's neighbours are, which rises
+as they sort themselves out.
 
 ```python continuation
-def gini(column: str) -> pl.Expr:
-    x = pl.col(column).drop_nulls().sort()
-    n = x.len()
-    return 2 * (pl.int_range(1, n + 1, dtype=pl.Int64) * x).sum() / (n * x.sum()) - (n + 1) / n
-
-is_firm = pl.col("class") == "Firm"
-run.group_by("t").agg(gini("wealth"), price_level=pl.col("price").filter(is_firm).mean())
+run.filter(pl.col("class") == "Person").group_by("t", maintain_order=True).agg(
+    alike=pl.col("share_similar").mean()
+)  # about 0.52 after the first tick, 0.83 by the tenth
 ```
 
-### Getting data in
+### Behaviours, with the values of their source
 
-The world is maplib's own `Model`, and `Model.map` checks a population against its template
-before anything simulates:
+A behaviour is a rule for one type of agent (`firm`, `household`, `person`, `trader`,
+`commuter`, ...), named for what it does and carrying the values of the paper that
+introduced it ([skabm/behaviour](skabm/behaviour/README.md)). Override one by name:
 
-```python continuation
-try:
-    Model().map(template.firm, firms.drop("alpha").with_iri())
-except Exception as error:
-    print(error)          # Expected column alpha is missing
+```python
+from skabm.behaviour import defaults, person
+
+person.PARAMETERS[person.want_similar]   # 0.375: 3 of 8 neighbours, Schelling (1971)
+assert defaults()["want_similar"] == 0.375
+# RDFSimulator(RULES, params={"want_similar": 0.5}) asks for more like neighbours
 ```
 
-### One rule, two backends
+Each published model is a list of behaviours, checked against its paper in
+`tests/validation` and shown on its page in `notebooks/`.
 
-Your own rule is one line. It runs on the graph, and the same dict gives you `jax.grad`:
+### Your own rule, on the graph and in JAX
 
-```python continuation
+A rule is a dict of SymPy expressions, one per field it updates, and the same dict runs on
+the knowledge graph and, differentiably, in JAX:
+
+```python
 import jax
+import polars as pl
 import sympy as sp
 
 from skabm.dsl import Agents, arrays, jax_tick
 
 Firm, inflation = Agents("Firm"), sp.Symbol("inflation")
-reprice = {Firm.price: Firm.price * (1 + inflation)}
+reprice = {Firm.price: Firm.price * (1 + inflation)}   # every firm's price, each tick
 
-sim = RDFSimulator(rules=[reprice], params={"inflation": 0.02}, n_periods=4)
-*_, last = sim.fit_iter(economy())
-last["price"]                                  # every price up 2% a tick, on the graph
-
+firms = pl.DataFrame({"id": ["firm_0", "firm_1"], "price": [1.0, 1.1]})
 tick = jax_tick([reprice])
 
 def price_level(inflation):
@@ -137,106 +136,17 @@ def price_level(inflation):
         state = tick(state, {"inflation": inflation})
     return state["Firm"]["price"].mean()
 
-jax.grad(price_level)(0.02)                    # 4 × 1.05 × 1.02³, the exact derivative
+jax.grad(price_level)(0.02)   # 4 × 1.05 × 1.02³, the exact derivative
 ```
 
-### From a paper to rules
-
-A rule is short enough that a coding agent writes it from a paper's model section. The
-`skabm` skill ([.claude/skills/skabm](.claude/skills/skabm/SKILL.md)) is the method: read the
-source, fix the scope, map the equations to the templates' fields, cite every parameter,
-then check the rules on the graph, in JAX and over a long run. CANVAS's rules
-(`firm.canvas_rules`, `macro.canvas_rules`) came out of it, from Hommes et al. (2025).
-
-## Quickstart
-
-A population calibrated from real Eurostat data, then simulated:
-
-```python
-import polars as pl
-import polars_random as pr
-
-from skabm.calibration import GeneticConstraintCalibration, make_dataset, weighted_enum
-from maplib import Model
-
-from skabm.behaviour.firm import ownership
-from skabm.behaviour.household import initial
-from skabm.datasets import build_firm_io_df
-from skabm.simulation import RDFSimulator
-from skabm import template
-
-# 1. Real data: Austrian input-output table + business demography (Poledna §4.1).
-io = build_firm_io_df("AT", 2010).drop_nulls(["n_firms", "alpha_s"])
-by_industry = lambda v: pl.col("industry").replace_strict(io["industry"], v, return_dtype=pl.Float64)  # noqa: E731
-
-# 2. Marginals: industry in proportion to real enterprise counts, size log-normal (§4.1.1).
-firms = make_dataset(
-    samplers={
-        "industry": weighted_enum(pl.Enum(io["industry"].to_list()), io["n_firms"], seed=100),
-        "size": pr.normal(3.0, 1.0, seed=101).exp().cast(pl.Int64).clip(1, None),
-    },
-    n_agents=300,
-    seed=0,
-)
-
-# 3. Population calibration: industry and size were drawn independently, but Eurostat
-#    reports persons per enterprise per industry — a joint fact no marginal encodes.
-observed = by_industry((io["n_employed"] / io["n_firms"]).log())
-shift = firms.select(pl.col("size").log().mean() - observed.mean()).item()
-firms = pl.DataFrame(
-    GeneticConstraintCalibration(
-        constraints=[(pl.col("size").log().mean().over("industry"), observed + shift)],
-        n_generations=600,
-        seed=7,
-    ).fit(firms).samplers_
-).with_row_index("id")
-
-# 4. IO coefficients are functions of industry, attached after calibration.
-firms = firms.with_columns(
-    pl.format("firm_{}", pl.col("id")).alias("id"), pl.col("industry").cast(pl.String),
-    alpha=by_industry(io["alpha_s"]), w_bar=by_industry(io["w_bar_s"]),
-    delta=by_industry(io["delta_s"]), tech_share=by_industry(io["tech_share_s"]),
-    price=pl.lit(1.0), margin=pl.lit(0.2), liquidity=pl.lit(0.0),
-    size=pl.col("size").cast(pl.Float64),           # a headcount, as the double the rules compute in
-).with_columns(output=0.9 * pl.col("alpha") * pl.col("size"))
-
-# 5. Households: census active/inactive shares, and an `employer` *link* column whose
-#    values name firms — it becomes a graph edge at map time, not a join you maintain.
-households = make_dataset(
-    samplers={
-        "status": weighted_enum(pl.Enum(["active", "inactive"]), [4_729_215, 4_130_385], seed=110),
-        "employer": weighted_enum(pl.Enum(firms["id"].to_list()), firms["size"], seed=111),
-    },
-    n_agents=10_000,
-    seed=1,
-).with_columns(
-    pl.format("hh_{}", pl.col("id")).alias("id"),
-    psi=pl.lit(0.9394),                             # propensity to consume, Table 2
-    employer=pl.when(pl.col("status") == "active")  # inactive households supply no labour
-              .then(pl.col("employer").cast(pl.String)).otherwise(None),
-).drop("status")
-
-# 6. Map, then simulate. The default rule set is the full Poledna economy and
-#    self-scopes to the classes in the graph, so a Firm + Household world executes
-#    exactly those dynamics.
-world = Model()
-world.map(template.firm, firms.with_iri())
-households = ownership(households, firms, ratio=300 / 10_000)  # who owns which firm, §3.2
-households = initial(households, firms)  # the starting income and wealth, eq. 49 and §5.2
-world.map(template.household, households.with_iri("employer", "owns"))
-sim = RDFSimulator(n_periods=12, params={"growth_sigma": 0.02, "inflation_sigma": 0.01})
-for frame in sim.fit_iter(world):
-    # every agent after the tick: the price level and GDP are polars over it
-    print(frame.select(price_level=pl.col("price").filter(pl.col("class") == "Firm").mean(),
-                       gdp=(pl.col("price") * pl.col("output") * (1 - pl.col("tech_share"))).sum()))
-```
-
-Step 3 is what a marginal sampler cannot do, and both marginals survive it exactly
-([why](skabm/calibration/README.md#populations)).
+`RDFSimulator([reprice], params={"inflation": 0.02})` runs it on the graph. The `skabm-core`
+skill ([.claude/skills/skabm-core](.claude/skills/skabm-core/SKILL.md)) takes a coding agent
+from a paper's model section to such rules, cited and tested: CANVAS's (Hommes et al. 2025)
+came out of it.
 
 | Where to look next | |
 |---|---|
-| [notebooks/poledna](notebooks/poledna.ipynb) | the model in five chapters on one population: **0** calibration, **1** the quarter plus an intervention, **2** a banking layer whose distress spreads a step per quarter, **3** learned expectations as running sums on the signal nodes, **4** black-it parameter calibration read as an identification test |
+| [notebooks/poledna](notebooks/poledna.ipynb) | Poledna et al. (2023)'s Austrian economy, its population calibrated from Eurostat, in five chapters: **0** calibration, **1** the quarter plus an intervention, **2** a banking layer whose distress spreads a step per quarter, **3** learned expectations as running sums on the signal nodes, **4** black-it parameter calibration read as an identification test |
 | [notebooks/extraction](notebooks/extraction.ipynb) | what to *do* with derived state: Gini as one polars expression, an intervention that moves it, telemetry into JAX |
 
 ## Architecture
@@ -244,7 +154,8 @@ Step 3 is what a marginal sampler cannot do, and both marginals survive it exact
 | Package | What it is |
 |---|---|
 | [skabm](skabm/README.md) | the engine: templates, the rule DSL and its SPARQL and JAX compilers, the simulator, what gets measured, rules from a description |
-| [skabm.behaviour](skabm/behaviour/README.md) | the rule library, by agent type: firms, households, government and central bank, banks, occupations, residence, traffic, each after the sources it cites |
+| [skabm.behaviour](skabm/behaviour/README.md) | the agent behaviours, one module per type of agent, each rule named for its mechanism |
+| `skabm.space` | neighbourhoods on a lattice or among points, and the areas a link falls in |
 | [skabm.calibration](skabm/calibration/README.md) | populations fitted to public data, and parameters fitted to macro series with black-it |
 
 ## Limitations

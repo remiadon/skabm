@@ -88,7 +88,7 @@ def simulator_model(
         Base parameters the search perturbs, laid over
         ``skabm.behaviour.defaults()``.
     **simulator_kwargs
-        Passed to ``RDFSimulator`` (``rules``, ``udfs``, ...).
+        Passed to ``RDFSimulator``: ``rules``, required, and ``udfs``, ...
         ``n_periods``, ``random_seed`` and ``warm_start`` are owned by the
         returned callable and rejected here: black-it supplies the first two per
         call, and a warm start would leak one candidate's state into the next.
@@ -109,15 +109,13 @@ def simulator_model(
     ...     free=("dividend_ratio", "rho"),
     ...     summarise=lambda s: [s["wealth"].drop_nulls().sum()],
     ...     params={"vat_rate": 0.15},
+    ...     rules=RULES,
     ... )
     >>> Calibrator(model=model, ...).calibrate(n_batches=6)   # doctest: +SKIP
     """
 
     from skabm.dsl import _Rule
-    from skabm.simulation import (
-        DEFAULT_RULES,
-        RDFSimulator,
-    )
+    from skabm.simulation import RDFSimulator
 
     owned = {"n_periods", "random_seed", "warm_start"} & set(simulator_kwargs)
     if owned:
@@ -127,7 +125,7 @@ def simulator_model(
         )
 
     base = dict(params or {})
-    rules = (*simulator_kwargs.get("rules", DEFAULT_RULES),)
+    rules = (*simulator_kwargs["rules"],)
     known = set(base).union(*(_Rule(r).parameters() for r in rules))
     unknown = [name for name in free if name not in known]
     if unknown:

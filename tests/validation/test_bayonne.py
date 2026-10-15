@@ -1,4 +1,4 @@
-"""Commuter route and mode choice on the RDFSimulator machinery — skabm.behaviour.traffic.
+"""Commuter route and mode choice on the RDFSimulator machinery — the Bayonne page's model, from skabm.behaviour.commuter.
 
 A toy town with the shape of the Bayonne question: West and East joined by a centre
 street through an ``Area``, with a slower, narrower bypass around it.
@@ -14,16 +14,28 @@ import pytest
 from maplib import Model
 
 from skabm import template
-from skabm.behaviour.traffic import (
-    MODES,
-    TRAFFIC_UDFS,
-    area_membership,
-    bayonne_rules,
-    pedestrianize,
-    routes,
-)
+from skabm.behaviour import commuter
+from skabm.behaviour.commuter import MODES, pedestrianize, routes
 from skabm.simulation import RDFSimulator
-from skabm.sparql import _PREFIXES
+from skabm.space import area_membership
+from skabm.sparql import _PREFIXES, register_math, register_polars_random
+
+# one morning; routes come from routes(), not from a rule
+RULES = [
+    commuter.route_time,
+    commuter.option_sum,
+    commuter.option_base,
+    commuter.option_share,
+    commuter.route_prob,
+    commuter.route_cum,
+    commuter.route_choice,
+    commuter.route_load,
+    commuter.link_load,
+    commuter.bpr_delay,
+    commuter.commuter_state,
+    commuter.area_traffic,
+]
+UDFS = (register_polars_random, register_math)
 
 #        W ---- A ====== C ====== B ---- E        centre street, 50 km/h
 #                \     [Area]    /
@@ -155,9 +167,9 @@ def town(n: int = 60) -> tuple[Model, pl.DataFrame]:
 
 def simulator(n_periods: int, anchor: float = 1.0) -> RDFSimulator:
     return RDFSimulator(
-        rules=bayonne_rules,
+        rules=RULES,
         params={**PARAMS, "anchor": anchor},
-        udfs=TRAFFIC_UDFS,
+        udfs=UDFS,
         n_periods=n_periods,
         random_seed=0,
     )
@@ -240,9 +252,9 @@ def test_closing_the_centre():
     assert set(closed) == {"AC", "CA", "CB", "BC"}
     by_street, _ = town()
     RDFSimulator(
-        rules=bayonne_rules,
+        rules=RULES,
         params=PARAMS,
-        udfs=TRAFFIC_UDFS,
+        udfs=UDFS,
         n_periods=0,
     ).fit(by_street)
     by_street.update(pedestrianize(streets=["Rue du Centre"]))

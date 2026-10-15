@@ -45,3 +45,37 @@ def test_a_failing_run_hands_the_controls_back():
     player.history = []
     player.slider.max, player.slider.value = 1, 1
     assert drawn == [0]  # a replay with no run behind it draws nothing
+
+
+def test_fetch_reads_only_the_members_asked_for(tmp_path, monkeypatch):
+    """``fetch`` opens a remote zip by range requests and keeps what it already has."""
+    import io
+    import zipfile
+
+    import httpx
+
+    from skabm import player
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("deep/dir/wanted.csv", "a,b\n1,2\n")
+        z.writestr("other.csv", "x" * 10_000)
+    body, ranges = archive.getvalue(), []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD":
+            return httpx.Response(200, headers={"content-length": str(len(body))})
+        start, end = map(int, request.headers["range"][6:].split("-"))
+        ranges.append((start, end))
+        return httpx.Response(206, content=body[start : end + 1])
+
+    real = httpx.Client
+    monkeypatch.setattr(
+        player.httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(serve))
+    )
+    got = player.fetch("https://example.org/a.zip", ["wanted.csv"], tmp_path / "data")
+    assert got["wanted.csv"].read_text() == "a,b\n1,2\n"
+    assert ranges and not (tmp_path / "data" / "other.csv").exists()
+    ranges.clear()
+    player.fetch("https://example.org/a.zip", ["wanted.csv"], tmp_path / "data")
+    assert ranges == []  # already there

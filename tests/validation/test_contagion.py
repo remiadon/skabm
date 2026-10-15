@@ -6,9 +6,13 @@ per-tick contagion rules give: one step of the cascade per tick.
 import polars as pl
 from worlds import world
 
-from skabm.behaviour.bank import contagion_rules, depositors
+from skabm.behaviour import bank
+from skabm.behaviour.bank import depositors
 from skabm.simulation import RDFSimulator
 from skabm.sparql import _PREFIXES
+
+# one step of the cascade
+RULES = [bank.distress, bank.household_flight, bank.firm_flight, bank.capital]
 
 BANKS = pl.DataFrame(
     {
@@ -35,9 +39,9 @@ def test_contagion_spreads_one_step_per_tick():
     ).with_columns(holds_at=pl.Series(["weak", "sound"]))
 
     def distressed(n_periods: int) -> dict:
-        sim = RDFSimulator(
-            rules=contagion_rules, n_periods=n_periods, random_seed=0
-        ).fit(world(links=("holds_at",), Bank=BANKS, Household=households))
+        sim = RDFSimulator(rules=RULES, n_periods=n_periods, random_seed=0).fit(
+            world(links=("holds_at",), Bank=BANKS, Household=households)
+        )
         rows = sim.model_.query(
             _PREFIXES + "SELECT ?b ?d WHERE { ?b a ex:Bank ; def:distressed ?d }"
         )

@@ -4,7 +4,7 @@ Engine tests: they pin that the SPARQL and JAX compilations of the same rule com
 the same thing, that the JAX one differentiates, and that a rule is checked against
 the templates when it is compiled.  The labour market is the workload because it is
 all per-agent arithmetic plus sums over a network; what the model itself must
-reproduce is ``tests/test_labour.py``'s.
+reproduce is ``tests/validation/test_del_riochanona.py``'s.
 """
 
 import jax
@@ -14,13 +14,17 @@ import pytest
 import sympy as sp
 from maplib import Model
 from sympy.stats import Exponential, Normal, Uniform
-from test_labour import NEVER, clock, market, occupations, ring
+from validation.test_del_riochanona import (
+    NEVER,
+    RULES,
+    clock,
+    market,
+    occupations,
+    ring,
+)
 
 from skabm import template
-from skabm.behaviour import labour, trader
-from skabm.behaviour.labour import PARAMETERS as LABOUR
-from skabm.behaviour.residence import schelling_relocate
-from skabm.behaviour.traffic import bayonne_area_traffic
+from skabm.behaviour import commuter, labour_market, person, trader
 from skabm.dsl import (
     Agents,
     DSLError,
@@ -35,13 +39,17 @@ from skabm.dsl import (
     sum_over,
     total,
 )
+from skabm.space import moore_neighbors
 from skabm.sparql import _PREFIXES, register_math, register_polars_random
 
 jax.config.update("jax_enable_x64", True)
 
 Occupation, Edge, Firm = Agents("Occupation"), Agents("Edge"), Agents("Firm")
 N, TICKS = 8, 25
-CALM = {**{str(k): v for k, v in LABOUR.items()}, "shock_start": NEVER}
+CALM = {
+    **{str(k): v for k, v in labour_market.PARAMETERS.items()},
+    "shock_start": NEVER,
+}
 
 
 def labour_state():
@@ -49,7 +57,7 @@ def labour_state():
         pl.DataFrame({"id": [f"occ_{i}" for i in range(N)], "employment": [1e3] * N})
     )
     frames = {"Occupation": occ, "Edge": ring(N), "Clock": clock()}
-    return occ, arrays(frames, labour.delrio_rules)
+    return occ, arrays(frames, RULES)
 
 
 def test_sparql_and_jax_agree_on_the_labour_market():
@@ -62,7 +70,7 @@ def test_sparql_and_jax_agree_on_the_labour_market():
     )
 
     occ, state = labour_state()
-    tick = jax.jit(jax_tick(labour.delrio_rules))
+    tick = jax.jit(jax_tick(RULES))
     for _ in range(TICKS):
         state = tick(state, CALM)
 
@@ -76,7 +84,7 @@ def test_a_gradient_flows_through_the_whole_run():
     """d(unemployment after 25 ticks)/d(gamma), through ``lax.scan``, as a finite
     difference of the same run would have it."""
     _, start = labour_state()
-    tick = jax_tick(labour.delrio_rules)
+    tick = jax_tick(RULES)
 
     def unemployed(gamma):
         params = {**CALM, "gamma": gamma}
@@ -149,7 +157,7 @@ def test_a_sum_in_a_condition_stays_a_sum():
     fund = sp.Piecewise((1, sp.Eq(Trader.neighbor.strategy, 0)), (0, True))
     crowd = sp.Piecewise((1, sum_over(Trader.neighbor, fund) > 3), (0, True))
     traders = trader.lattice(4, seed=0)
-    around = trader.torus_neighbors(traders)
+    around = moore_neighbors(traders, torus=True)
     world = Model()
     world.map(template.trader, traders.with_iri("market"))
     world.map(template.links("neighbor"), around.with_iri("neighbor"))
@@ -172,9 +180,9 @@ def test_a_sum_in_a_condition_stays_a_sum():
 
 def test_jax_refuses_what_it_cannot_shape():
     with pytest.raises(DSLError, match="no JAX form"):
-        jax_tick([schelling_relocate])  # pick has no fixed-shape form yet
+        jax_tick([person.relocate])  # pick has no fixed-shape form yet
     with pytest.raises(DSLError, match="no JAX form"):
-        jax_tick([bayonne_area_traffic])  # a scatter over a many-valued link
+        jax_tick([commuter.area_traffic])  # a scatter over a many-valued link
 
 
 def test_a_draw_is_bound_once_however_often_it_is_read():
@@ -256,16 +264,16 @@ def test_every_node_prints_the_same_value_in_both_backends():
 
 
 def test_the_poledna_quarter_runs_in_jax_too(poledna_params):
-    """The default rule set and SAC learners, stepped in JAX from the same frames,
+    """Poledna's quarter and SAC learners, stepped in JAX from the same frames,
     lands where the SPARQL simulator does."""
     from test_simulation import CENTRAL_BANK, FIRMS, HOUSEHOLDS, OVERRIDES
-    from worlds import world
+    from worlds import POLEDNA, world
 
     from skabm.behaviour.learning import sac
-    from skabm.simulation import DEFAULT_RULES, RDFSimulator
+    from skabm.simulation import RDFSimulator
 
     params, ticks = {**poledna_params, **OVERRIDES}, 6
-    sim = RDFSimulator(params=params, n_periods=ticks)
+    sim = RDFSimulator(POLEDNA, params=params, n_periods=ticks)
     *_, last = sim.fit_iter(
         world(Firm=FIRMS, Household=HOUSEHOLDS, CentralBank=CENTRAL_BANK)
     )
@@ -273,9 +281,9 @@ def test_the_poledna_quarter_runs_in_jax_too(poledna_params):
 
     frames = {"Firm": FIRMS, "Household": HOUSEHOLDS, "CentralBank": CENTRAL_BANK}
     learners = [sac(*signal) for signal in sorted(sim._consumed)]
-    state = arrays(frames, [*DEFAULT_RULES, *learners])
+    state = arrays(frames, [*POLEDNA, *learners])
     key = jax.random.key(0)  # the draws are there, scaled by a zero sigma
-    learn, quarter = jax_tick(learners), jax_tick(DEFAULT_RULES)
+    learn, quarter = jax_tick(learners), jax_tick(POLEDNA)
     state = learn(state, params)  # the opening state is observed, as in SPARQL
     for _ in range(ticks):
         state = learn(quarter(state, params, key), params)

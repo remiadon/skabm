@@ -1,8 +1,7 @@
 # skabm, the engine
 
 How a simulation works under the hood: the world, the rules, what gets measured, and
-where the walls are. The rule library has its own page ([behaviour](behaviour/README.md)),
-and so do populations and parameter search ([calibration](calibration/README.md)).
+where the walls are. The behaviours have their own page ([behaviour](behaviour/README.md)), and so do populations and parameter search ([calibration](calibration/README.md)).
 
 | Module | Role |
 |---|---|
@@ -10,14 +9,13 @@ and so do populations and parameter search ([calibration](calibration/README.md)
 | `dsl` | Rules as SymPy dicts: `Agents`, the graph operators, and the SPARQL and JAX compilers |
 | `sparql` | Namespaces and the UDF registrars: random draws, `exp`/`log` (a rule compiles to SPARQL through `dsl.sparql`) |
 | `simulation` | `RDFSimulator`: `fit`/`fit_iter` over rule dicts compiled to SPARQL |
-| `datasets` | Eurostat loaders (IO tables, business demography) |
 
 ## Design, in scikit-learn vocabulary
 
 | | |
 |---|---|
-| **X is the world** | a maplib `Model`, with populations mapped into it by `skabm.template` and `Model.map`. Predicates are column names, so the DataFrame schema *is* the graph schema, and an IRI-valued column (`employer`, `owns`) is a graph edge. Structure is built in polars before mapping (`firm.ownership`, `bank.depositors`, `residence.grid_neighbors`), never by a rule |
-| **Rules are hyperparameters** | rule dicts are passed to `__init__`, so `get_params`/`clone` work. `rules` (a source's list, `firm.poledna_rules`) are the dynamics, upserted every tick in the paper's event order. There is no initialisation phase: the world a fit starts from is its opening state. The default set self-scopes, since rules whose classes are all absent match nothing |
+| **X is the world** | a maplib `Model`, with populations mapped into it by `skabm.template` and `Model.map`. Predicates are column names, so the DataFrame schema *is* the graph schema, and an IRI-valued column (`employer`, `owns`) is a graph edge. Structure is built in polars before mapping (`household.ownership`, `bank.depositors`, `space.moore_neighbors`), never by a rule |
+| **Rules are hyperparameters** | rule dicts are passed to `__init__`, so `get_params`/`clone` work. `rules` (a model's `RULES`, `poledna.RULES`) are the dynamics, upserted every tick in the paper's event order. There is no initialisation phase: the world a fit starts from is its opening state. The default set self-scopes, since rules whose classes are all absent match nothing |
 | **`model_` is the fitted artifact** | the graph where data and rules blend into one evolving world. A cold `fit` rebuilds it; `warm_start=True` continues it |
 | **Structure vs state** | predicates no rule writes (links, coefficients) are *structure*: written at fit, and edited only by intervention. Predicates the rules upsert are *state*, owned by the rules after t=0. This is derived, not asserted: a rule dict names what it writes |
 | **Randomness is a UDF** | SPARQL has no `RAND`, so polars-random is registered as `pr:uniform`/`pr:normal` and pinned by `RDFSimulator(random_seed=...)`. `Normal`/`Uniform` in a DSL rule compile to it |
@@ -30,8 +28,8 @@ examples build the world in a function: each run gets a fresh one. Mapping a pop
 maplib's own `Model.map`, which checks the frame before anything simulates. A missing
 column, a typo or an integer column where the rules compute in doubles is refused at map
 time, naming the column, rather than silently joining with nothing twelve ticks later.
-Undeclared columns are refused too: drop them, or declare your own class with
-`template.agent`.
+Undeclared columns are refused too: drop them. The classes and their fields are
+skabm's (`template.SCHEMA` lists them); a missing one is a feature request.
 
 Importing `skabm.template` registers `DataFrame.with_iri(*links)`, which turns `id` and the
 named link columns into `ex:` IRIs.
@@ -92,11 +90,11 @@ rule engine carries an economic ABM, so the walls are documented on purpose.
 
 | Wall | Why, and what is *not* walled |
 |---|---|
-| **No sequential search-and-matching** | the paper's goods, labour and credit markets are *random sequential*: consumers visit firms in random order until stocks run out. SPARQL expresses only the simultaneous approximation, so Poledna's employment links stay static. Matching as such is fine where a model states it in closed form: `behaviour.labour` does del Rio-Chanona et al. (2021), urn-ball function included, and reproduces the Beveridge curve; `residence.schelling_relocate` does one-to-one assignment with `pick` on matched ranks. The wall is agent-by-agent *ordering*, and CANVAS (`firm.canvas_rules`) shows what it holds up: with demand at each buyer's first pick, the smallest firms face 14 times their supply in the opening quarter and prices diverge within 15, where the sequential market sends buyers on from a sold-out firm |
+| **No sequential search-and-matching** | the paper's goods, labour and credit markets are *random sequential*: consumers visit firms in random order until stocks run out. SPARQL expresses only the simultaneous approximation, so Poledna's employment links stay static. Matching as such is fine where a model states it in closed form: `behaviour.labour_market` does del Rio-Chanona et al. (2021), urn-ball function included, and reproduces the Beveridge curve; `person.relocate` does one-to-one assignment with `pick` on matched ranks. The wall is agent-by-agent *ordering*, and CANVAS (`firm`'s CANVAS rules) shows what it holds up: with demand at each buyer's first pick, the smallest firms face 14 times their supply in the opening quarter and prices diverge within 15, where the sequential market sends buyers on from a sold-out firm |
 | **The past is state, not a series** | a rule sees one time slice, so a behaviour that depends on history keeps what it needs as state: `dsl.lag` for a value one step ago, running sums for a statistic of the whole sample (SAC's mean and autocorrelation decompose exactly). A statistic over the unbounded past that does not decompose has no home |
 | **Right-associative arithmetic** | in maplib's SPARQL, operators of equal precedence associate right, against the grammar: `?a - ?b + ?c` evaluates as `?a - (?b + ?c)`, silently. The `skabm.dsl` printer brackets every operation, so this only bites hand-written SPARQL |
 | **Synchronous, staged activation** | and no scheduler, on purpose. A SPARQL UPDATE evaluates its WHERE against the pre-update graph, so all agents update simultaneously and rules fire in list order: exactly Mesa's `StagedActivation`, with `RandomActivation` structurally unreachable. Activation regime is a modelling assumption (Huberman & Glance 1993), and it only becomes an implementable choice with a numerical backend |
-| **`log`/`exp` are UDFs** | plain SPARQL has neither. `sparql.register_math` supplies `math:exp`/`math:log` on the same `add_udf` seam as the random draws, which is how `behaviour.labour` states its urn-ball function and S-curve verbatim. Which UDFs a rule set needs is the `udfs=` hyperparameter |
+| **`log`/`exp` are UDFs** | plain SPARQL has neither. `sparql.register_math` supplies `math:exp`/`math:log` on the same `add_udf` seam as the random draws, which is how `labour_market` states its urn-ball function and S-curve verbatim. Which UDFs a rule set needs is the `udfs=` hyperparameter |
 | **Reproducibility** | a *simulation* is reproducible via `random_seed=`. *Calibration* is subtler: `polars_random.set_random_seed` reaches only the `size=N` Series form, not the expression form `make_dataset` uses, so a population is reproducible only when each sampler gets an explicit `seed=` |
 
 ## Development

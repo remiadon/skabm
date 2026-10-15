@@ -1,8 +1,8 @@
 """Schelling segregation on the RDFSimulator machinery — a tiny suite.
 
-The model lives in skabm/behaviour/residence.py: the 2D grid is a `Cell` population,
-the Moore neighbourhood and the Person population are data (`grid_neighbors`,
-`settle`), and `schelling_rules` advances the world.  There is no Eurostat access and no
+The model is `RULES` below, from skabm/behaviour/person.py: the 2D grid is a `Cell` population,
+the Moore neighbourhood and the Person population are data (`moore_neighbors`,
+`settle`), and `RULES` advances the world.  There is no Eurostat access and no
 calibration layer here.
 
 Randomness comes from `settle(seed=)` and the `pr:uniform` SPARQL UDF, which
@@ -18,16 +18,20 @@ from maplib import Model
 from worlds import world
 
 from skabm import template
-from skabm.behaviour.residence import (
-    PARAMETERS,
-    geo_neighbors,
-    grid_neighbors,
-    schelling_rules,
-    settle,
-    want_similar,
-)
+from skabm.behaviour import person
+from skabm.behaviour.person import PARAMETERS, settle, want_similar
 from skabm.simulation import RDFSimulator
+from skabm.space import geo_neighbors, moore_neighbors
 from skabm.sparql import _PREFIXES
+
+# one step, as AMBER's segregation demo runs it
+RULES = [
+    person.occupancy,
+    person.happiness,
+    person.cell_rank,
+    person.person_rank,
+    person.relocate,
+]
 
 
 def grid(size: int) -> pl.DataFrame:
@@ -52,7 +56,7 @@ def town(cells: pl.DataFrame, neighbors: pl.DataFrame, seed: int = 0) -> Model:
 
 def simulator(n_periods: int, seed: int = 0) -> RDFSimulator:
     return RDFSimulator(
-        rules=schelling_rules,
+        rules=RULES,
         n_periods=n_periods,
         random_seed=seed,
     )
@@ -62,11 +66,11 @@ def test_a_tick_is_one_row_per_agent_with_many_valued_links_as_lists():
     """A cell's neighbours are one list, not one row each, so an
     aggregate over cells counts each cell once."""
     cells = grid(4)
-    (frame,) = simulator(1).fit_iter(town(cells, grid_neighbors(cells)))
+    (frame,) = simulator(1).fit_iter(town(cells, moore_neighbors(cells)))
     mine = frame.filter(pl.col("class") == "Cell")
     assert mine.height == mine["agent"].n_unique() == 16
     assert set(mine["neighbor"].list.len()) == {3, 5, 8}  # corners, edges, inside
-    assert mine["neighbor"].list.len().sum() == grid_neighbors(cells).height
+    assert mine["neighbor"].list.len().sum() == moore_neighbors(cells).height
 
 
 def test_settle_derives_population():
@@ -77,13 +81,13 @@ def test_settle_derives_population():
     assert people["location"].n_unique() == 36
     assert set(people["group"]) == {0.0, 1.0}
     # and the Moore neighbourhood of a bounded 6 x 6 grid has 4*3 + 16*5 + 16*8 links
-    assert grid_neighbors(grid(6)).height == 4 * 3 + 16 * 5 + 16 * 8
+    assert moore_neighbors(grid(6)).height == 4 * 3 + 16 * 5 + 16 * 8
 
 
 def test_one_person_per_cell_invariant():
-    # schelling_relocate's rank-join must never place two movers on the same cell.  After
+    # relocate's rank-join must never place two movers on the same cell.  After
     # several ticks, occupied cells still equal people — matching is one-to-one.
-    sim = simulator(8).fit(town(grid(12), grid_neighbors(grid(12))))
+    sim = simulator(8).fit(town(grid(12), moore_neighbors(grid(12))))
     occ = sim.model_.query(
         _PREFIXES + "SELECT ?p ?c WHERE { ?p a ex:Person ; def:location ?c }"
     )
@@ -96,7 +100,7 @@ def test_segregation_rises_and_converges():
     want = PARAMETERS[want_similar]  # 3 of 8 Moore neighbours, Schelling (1971)
     sim = simulator(30)
     seg, unhappy = [], []
-    for row in sim.fit_iter(town(grid(12), grid_neighbors(grid(12)))):
+    for row in sim.fit_iter(town(grid(12), moore_neighbors(grid(12)))):
         seg.append(row["share_similar"].mean())
         unhappy.append((row["share_similar"] < want).sum())
     assert seg[-1] > seg[0] + 0.2  # substantial rise from the mixed start
@@ -106,7 +110,7 @@ def test_segregation_rises_and_converges():
 def test_reproducible_under_random_seed():
     # settle(seed=) and random_seed pin the whole trajectory; another seed changes it.
     def seg_path(seed: int) -> list[float]:
-        world = town(grid(10), grid_neighbors(grid(10)), seed)
+        world = town(grid(10), moore_neighbors(grid(10)), seed)
         return [
             round(row["share_similar"].mean(), 6)
             for row in simulator(10, seed).fit_iter(world)

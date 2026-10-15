@@ -1,49 +1,9 @@
-"""Occupational mobility and automation, del Rio-Chanona et al. (2021), mean-field,
-``delrio_rules``: seven rules, in this order.
+"""Occupations and the job transitions between them: workers separated and hired along
+a network of observed moves, vacancies opening and closing towards a target demand.
 
-1. Each step, the clock's t advances by one.
-
-2. An occupation's target_demand has two cases. Before the shock, when (the total over
-clocks of their t) times the parameter weeks_per_step / 52 - the parameter shock_start is
-below 0, it becomes its demand_init. Otherwise it becomes its demand_init plus (its
-demand_final minus its demand_init) divided by
-(1 + exp(-the parameter shock_k times ((the total over clocks of their t) times the
-parameter weeks_per_step / 52 - the parameter shock_start - the parameter
-shock_halfway))).
-
-3. Then an occupation's separations, openings and app_norm update together, in one rule.
-Its separations become the parameter delta_u times its employment plus (1 - delta_u)
-times the smaller of its employment and the parameter gamma times the larger of 0 and
-(employment + vacancies - target_demand). Its openings become the parameter delta_v
-times its employment plus (1 - delta_v) times the smaller of its employment and gamma
-times the larger of 0 and (target_demand - employment - vacancies). Its app_norm becomes
-the sum, over the edges whose source is this occupation, of the edge's weight times the
-vacancies of the edge's destination.
-
-4. An occupation's applications become its vacancies times the sum, over the edges whose
-destination is this occupation, of the edge's weight times a share that is the source's
-unemployment divided by the source's app_norm when the source's app_norm is above 0, and
-0 otherwise.
-
-5. An edge's flow becomes the edge's weight times the source's unemployment divided by
-the source's app_norm, times the destination's vacancies squared divided by the
-destination's applications, times (1 - exp(-the destination's applications divided by
-the destination's vacancies)), when the destination's vacancies are above 0 and the
-destination's applications are above 0 and the source's app_norm is above 0; and 0
-otherwise.
-
-6. An occupation's job_finding becomes 0 when its unemployment is not above 0, and
-otherwise the sum of flow over the edges whose source is this occupation divided by its
-unemployment.
-
-7. Then an occupation's stocks and unemployment spells update together, in one rule.
-Employment becomes employment minus separations plus the sum of flow over the edges
-whose destination is this occupation. Unemployment becomes unemployment plus separations
-minus the sum of flow over the edges whose source is this occupation. Vacancies become
-vacancies plus openings minus the sum of flow over the edges whose destination is this
-occupation. u_spell1 becomes separations; u_spell2 becomes u_spell1 times (1 -
-job_finding); u_spell3 becomes u_spell2 times (1 - job_finding); and ltu becomes
-(u_spell3 + ltu) times (1 - job_finding).
+Urn-ball matching on an occupational mobility network, with an S-curve target for a
+demand shock such as automation: del Rio-Chanona et al. (2021), J. R. Soc. Interface 18,
+20200898, in its mean-field form.
 """
 
 from __future__ import annotations
@@ -52,10 +12,6 @@ import polars as pl
 import sympy as sp
 
 from skabm.dsl import Agents, sum_over, total
-from skabm.sparql import register_math, register_polars_random
-
-# the rules call math:exp: RDFSimulator(udfs=LABOUR_UDFS)
-LABOUR_UDFS = (register_polars_random, register_math)
 
 Occupation, Edge, Clock = Agents("Occupation"), Agents("Edge"), Agents("Clock")
 weeks_per_step, shock_start, shock_halfway, shock_k = sp.symbols(
@@ -74,12 +30,12 @@ PARAMETERS = {
 }
 
 # del Rio-Chanona et al. (2021), J. R. Soc. Interface 18:20200898
-delrio_clock_tick = {Clock.t: Clock.t + 1}
+clock = {Clock.t: Clock.t + 1}
 # eq. 19 (the exponent's sign as the text implies)
 years = total(Clock.t) * weeks_per_step / 52
 since = years - shock_start
 initial, final = Occupation.demand_init, Occupation.demand_final
-delrio_target = {
+s_curve_target = {
     Occupation.target_demand: sp.Piecewise(
         (initial, since < 0),
         (
@@ -90,11 +46,11 @@ delrio_target = {
     )
 }
 # eqs. 7, 9-12
-employed, target = Occupation.employment, Occupation.target_demand
+employed, wanted = Occupation.employment, Occupation.target_demand
 realised = employed + Occupation.vacancies
-excess = sp.Min(employed, gamma * sp.Max(0, realised - target))
-shortfall = sp.Min(employed, gamma * sp.Max(0, target - realised))
-delrio_demand = {
+excess = sp.Min(employed, gamma * sp.Max(0, realised - wanted))
+shortfall = sp.Min(employed, gamma * sp.Max(0, wanted - realised))
+separations_openings = {
     Occupation.separations: delta_u * employed + (1 - delta_u) * excess,
     Occupation.openings: delta_v * employed + (1 - delta_v) * shortfall,
     Occupation.app_norm: sum_over(Edge.src, Edge.weight * Edge.dst.vacancies),
@@ -104,14 +60,14 @@ origin = Edge.src
 share = sp.Piecewise(
     (origin.unemployment / origin.app_norm, origin.app_norm > 0), (0, True)
 )
-delrio_applications = {
+applications = {
     Occupation.applications: Occupation.vacancies
     * sum_over(Edge.dst, Edge.weight * share)
 }
 # eq. 16
 u_i, z_i = Edge.src.unemployment, Edge.src.app_norm
 v_j, s_j = Edge.dst.vacancies, Edge.dst.applications
-delrio_flow = {
+urn_ball_flow = {
     Edge.flow: sp.Piecewise(
         (
             u_i * v_j**2 * Edge.weight * (1 - sp.exp(-s_j / v_j)) / (s_j * z_i),
@@ -123,13 +79,13 @@ delrio_flow = {
 # eqs. 13-15, Methods (long-term unemployment)
 hired, matched = sum_over(Edge.dst, Edge.flow), sum_over(Edge.src, Edge.flow)
 unemployed, separated = Occupation.unemployment, Occupation.separations
-delrio_job_finding = {
+job_finding = {
     Occupation.job_finding: sp.Piecewise(
         (matched / unemployed, unemployed > 0), (0, True)
     )
 }
 stay = 1 - Occupation.job_finding
-delrio_market_clearing = {
+stock_flow_clearing = {
     Occupation.employment: employed - separated + hired,
     Occupation.unemployment: unemployed + separated - matched,
     Occupation.vacancies: Occupation.vacancies + Occupation.openings - hired,
@@ -139,17 +95,8 @@ delrio_market_clearing = {
     Occupation.ltu: (Occupation.u_spell3 + Occupation.ltu) * stay,
 }
 
-STAY_PROBABILITY = 0.55  # r of eq. 21, baked into the edge weights by mobility_network
 
-delrio_rules = [
-    delrio_clock_tick,
-    delrio_target,
-    delrio_demand,
-    delrio_applications,
-    delrio_flow,
-    delrio_job_finding,
-    delrio_market_clearing,
-]
+STAY_PROBABILITY = 0.55  # r of del Rio-Chanona et al. (2021) eq. 21, baked into the edge weights by mobility_network
 
 
 def mobility_network(

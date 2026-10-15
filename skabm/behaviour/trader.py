@@ -1,36 +1,10 @@
-"""Traders on a lattice, and the market they trade in. Brock & Hommes (1998),
-``brock_hommes_rules``: their adaptive belief system on a lattice, as the open-source
-implementation by Z. Hachemi writes it (github.com/zakhac/Spatial-Evolutionary-Markets,
-``simulation.py`` and ``market.py`` in its S&P 500 mode), four rules, in this order. The
-paper's: each trader picks a strategy by a logit, of intensity the parameter
-choice_intensity, in the strategies' past profits with the parameter memory. The
-implementation's: the three strategies' demands, a price moved by the real asset's return
-plus the traders' impact, the noise traders, and the pull of the eight neighbours.
+"""Traders on a lattice, and the market they trade in: each holds one of three
+strategies (fundamentalist, chartist, noise), demands accordingly, and switches by a
+logit in the strategies' past profits, pulled towards what its neighbours hold.
 
-1. A market's day advances: its t becomes t plus 1, and its fundamental and ret become
-the fundamental and ret of the day of this market whose t is the market's t plus 1: the
-sum, over the market's days, of the day's value for that day and 0 for any other.
-
-2. A trader's demand becomes, for a fundamentalist (strategy 0), its market's fundamental
-minus its price, over its price; for a chartist (strategy 1), the parameter chart_gain
-times its market's momentum; for a noise trader (strategy 2), a fresh normal draw of mean
-0 and standard deviation the parameter noise_sd.
-
-3. A market's price, momentum and three fitnesses update together, in one rule. Its
-return is the parameter price_impact times the mean demand of its traders, plus its ret,
-bounded by the parameter max_return either way; its price becomes the price times the
-exponential of that return, and the change is the new price minus the price. Its
-momentum becomes the change over the price from its second day on, and 0 before. Each
-fitness becomes the parameter memory times itself, plus a demand times the change: the
-fundamentalists' demand, the chartists' demand, and the mean demand of the market's noise
-traders (0 when it has none).
-
-4. A trader's strategy becomes a fresh draw among the three, each with a weight: the
-exponential of the parameter choice_intensity times the strategy's fitness less the
-largest of the three, plus, for the fundamentalist and chartist strategies, the parameter
-social_pressure times the share of its eight neighbours who hold it. A uniform draw
-between 0 and 1 below the fundamentalist's share of the weights picks it, below the
-fundamentalist's and the chartist's shares together the chartist, else the noise trader.
+Logit switching on fitness with memory: Brock & Hommes (1998), J. Econ. Dyn. Control 22.
+The demands, the price on a real asset's returns plus the traders' impact, and the
+neighbour pull: the open-source implementation github.com/zakhac/Spatial-Evolutionary-Markets.
 """
 
 import numpy as np
@@ -67,7 +41,7 @@ def holding(strategy) -> sp.Piecewise:
 
 # The implementation's market.py, Market.update_fundamental
 today = sp.Eq(Day.t, Day.market.t + 1)
-brock_hommes_day = {
+market_day = {
     Market.t: Market.t + 1,
     Market.fundamental: sum_over(
         Day.market, sp.Piecewise((Day.fundamental, today), (0, True))
@@ -76,7 +50,7 @@ brock_hommes_day = {
 }
 
 # The implementation's simulation.py, SpatialSimulation.get_agent_demands
-brock_hommes_demand = {
+strategy_demand = {
     Trader.demand: sp.Piecewise(
         (fundamentalist, sp.Eq(Trader.strategy, FUND)),
         (chartist, sp.Eq(Trader.strategy, CHART)),
@@ -91,7 +65,7 @@ change = Market.price * (sp.exp(day_return) - 1)
 noise_demand = sum_over(Trader.market, Trader.demand * holding(NOISE)) / sp.Max(
     sum_over(Trader.market, holding(NOISE)), 1
 )
-brock_hommes_price = {
+impact_price = {
     Market.price: Market.price * sp.exp(day_return),
     Market.momentum: sp.Piecewise((change / Market.price, Market.t >= 2), (0, True)),
     Market.fitness_fund: memory * Market.fitness_fund + fundamentalist * change,
@@ -113,20 +87,13 @@ weight = {
     NOISE: sp.exp(choice_intensity * (Market.fitness_noise - best)),
 }
 u = Uniform("u", 0, 1)
-brock_hommes_imitate = {
+logit_imitation = {
     Trader.strategy: sp.Piecewise(
         (FUND, u < weight[FUND] / sum(weight.values())),
         (CHART, u < (weight[FUND] + weight[CHART]) / sum(weight.values())),
         (NOISE, True),
     )
 }
-
-brock_hommes_rules = [
-    brock_hommes_day,
-    brock_hommes_demand,
-    brock_hommes_price,
-    brock_hommes_imitate,
-]
 
 
 def lattice(
@@ -153,25 +120,7 @@ def lattice(
     )
 
 
-def torus_neighbors(traders: pl.DataFrame) -> pl.DataFrame:
-    """``(id, neighbor)``: the eight traders around each, the lattice wrapped into a torus,
-    for ``template.links("neighbor")``."""
-    size = int(traders["x"].max()) + 1
-    steps = (
-        pl.DataFrame({"dx": [-1, 0, 1]})
-        .join(pl.DataFrame({"dy": [-1, 0, 1]}), how="cross")
-        .filter((pl.col("dx") != 0) | (pl.col("dy") != 0))
-    )
-    return (
-        traders.select("id", "x", "y")
-        .join(steps, how="cross")
-        .select("id", x=(pl.col("x") + pl.col("dx")) % size, y=(pl.col("y") + pl.col("dy")) % size)
-        .join(traders.select(neighbor="id", x="x", y="y"), on=["x", "y"])
-        .select("id", "neighbor")
-    )  # fmt: skip
-
-
-def days(close: pl.Series) -> pl.DataFrame:
+def trading_days(close: pl.Series) -> pl.DataFrame:
     """The Day population from a series of closing prices: each day's fundamental is the
     log-linear trend fitted to the whole series, and its ret the close's log return (0 on
     the first day), as the implementation's market.py has them."""
@@ -189,7 +138,7 @@ def days(close: pl.Series) -> pl.DataFrame:
     )
 
 
-def opening(close: pl.Series) -> pl.DataFrame:
+def opening_market(close: pl.Series) -> pl.DataFrame:
     """The Market on its first day: price and fundamental at the first close, as
     the implementation's market.py opens it, no momentum and no fitness yet."""
     return pl.DataFrame({"id": ["market"], "price": [float(close[0])]}).with_columns(

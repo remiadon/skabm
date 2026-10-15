@@ -6,12 +6,67 @@ an iterator of steps, and *show(history, k)*, which draws step k of the steps so
 ``Player`` adds the rest: nothing runs until ``button`` is clicked, each step is drawn
 as it comes and stays at least ``pace`` seconds, ``slider`` replays the run afterwards,
 and ``errors`` shows what a callback raised, which Voilà would otherwise swallow.
+``fetch`` gets the data files a page needs out of a remote zip archive.
 """
 
+import io
 import time
+import zipfile
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
+import httpx
 import ipywidgets as w
+
+
+class _HttpFile(io.RawIOBase):
+    """A seekable file over HTTP range requests, so zipfile can open a remote archive."""
+
+    def __init__(self, url: str, client: httpx.Client):
+        self.url, self.client, self.pos = url, client, 0
+        self.size = int(client.head(url).headers["content-length"])
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def tell(self):
+        return self.pos
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self.pos, io.SEEK_END: self.size}[whence]
+        self.pos = base + offset
+        return self.pos
+
+    def readinto(self, buffer):
+        n = min(len(buffer), self.size - self.pos)
+        if n <= 0:
+            return 0
+        response = self.client.get(
+            self.url, headers={"Range": f"bytes={self.pos}-{self.pos + n - 1}"}
+        )
+        response.raise_for_status()
+        buffer[:n] = response.content
+        self.pos += n
+        return n
+
+
+def fetch(url: str, names: list[str], into: Path) -> dict[str, Path]:
+    """``{name: path}``: the members of the zip archive at *url* with these base names,
+    saved in *into*.  Only their bytes are downloaded, and a file already there is
+    kept."""
+    into.mkdir(exist_ok=True)
+    missing = [name for name in names if not (into / name).exists()]
+    if missing:
+        with httpx.Client(follow_redirects=True, timeout=120.0) as client:
+            remote = io.BufferedReader(_HttpFile(url, client), buffer_size=1 << 20)
+            with zipfile.ZipFile(remote) as archive:
+                members = {Path(n).name: n for n in archive.namelist()}
+                for name in missing:
+                    (into / name).write_bytes(archive.read(members[name]))
+    return {name: into / name for name in names}
 
 
 class Player:

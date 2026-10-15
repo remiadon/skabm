@@ -7,10 +7,10 @@ advanced in place.  How the agents got into it — ``skabm.template`` and
 
     world = Model()
     world.map(template.firm, firms.with_iri())
-    RDFSimulator(params=params, n_periods=12).fit(world)   # Poledna rules by default
+    RDFSimulator(rules, params=params, n_periods=12).fit(world)
 
 The world is the opening state, starting values included: what happens before the first
-step is data (``household.initial``, ``firm.ownership``), not a rule.
+step is data (``household.opening_balance``, ``household.ownership``), not a rule.
 
 ``fit_iter`` yields every agent's state after each tick, one frame with ``t`` and
 ``class`` columns: a run is ``pl.concat(sim.fit_iter(world))``, and a macro quantity is
@@ -34,7 +34,9 @@ SPARQL run is the reference the differentiable one is checked against.
 from __future__ import annotations
 
 import importlib
+import inspect
 import pkgutil
+import re
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from functools import cache
@@ -46,36 +48,9 @@ from maplib import Model
 from sklearn.base import BaseEstimator
 
 from skabm.behaviour import defaults
-from skabm.behaviour.firm import (
-    poledna_liquidity,
-    poledna_price,
-    poledna_produce,
-    poledna_sales,
-)
-from skabm.behaviour.household import (
-    poledna_consume,
-    poledna_income,
-)
 from skabm.behaviour.learning import consumed, sac
-from skabm.behaviour.macro import (
-    poledna_rate,
-    poledna_spend,
-)
 from skabm.dsl import is_rule, sparql
 from skabm.sparql import _PREFIXES, DEF_NS, EX_NS, register_polars_random
-
-# Canonical Poledna (2023) rule composition, sourced from behaviour/.
-# Users override via __init__(rules=..., params=...).
-DEFAULT_RULES = (
-    poledna_produce,  # supply choice, eq. 5 + 12
-    poledna_price,  # price setting, eq. 8
-    poledna_income,  # income refresh, eq. 49
-    poledna_consume,  # consumption + savings, eqs. 40 + 50
-    poledna_sales,  # goods market, eqs. 1-2 + 27
-    poledna_liquidity,  # eq. 31
-    poledna_spend,  # AR(1), eq. 51
-    poledna_rate,  # Taylor rule, eq. 69
-)
 
 
 def rule_name(rule, index: int) -> str:
@@ -85,17 +60,21 @@ def rule_name(rule, index: int) -> str:
 
 @cache
 def _shipped() -> dict:
-    """``id(rule) -> (module-level name, the module's first docstring line)`` for every
-    rule in skabm.behaviour."""
+    """``id(rule) -> (module-level name, its citation)`` for every rule in
+    skabm.behaviour: the comment block right above the rule's assignment."""
     from skabm import behaviour
 
     shipped: dict = {}
     for module in pkgutil.iter_modules(behaviour.__path__):
         found = importlib.import_module(f"skabm.behaviour.{module.name}")
-        source = (found.__doc__ or "").strip().split("\n")[0]
-        shipped.update(
-            {id(v): (k, source) for k, v in vars(found).items() if is_rule(v)}
-        )
+        text = inspect.getsource(found)
+        for name, value in vars(found).items():
+            if is_rule(value):
+                above = re.search(rf"((?:^#.*\n)*)^{name} = ", text, re.MULTILINE)
+                cited = " ".join(
+                    line.lstrip("# ") for line in above.group(1).splitlines()
+                )
+                shipped[id(value)] = (name, cited)
     return shipped
 
 
@@ -167,11 +146,12 @@ class RDFSimulator(BaseEstimator):
     Parameters
     ----------
     rules : Sequence[dict]
-        Rule dicts (a module's ``<source>_rules``), applied in order at every tick: the model's event sequence (Poledna Section 3.5).  Rules over
+        Rule dicts from ``skabm.behaviour``, applied in order at every tick: the model's
+        event sequence (e.g. Poledna et al. 2023 §3.5).  Rules over
         unmapped agent classes no-op harmlessly.
     params : dict | None
         Parameter values by name, laid over ``skabm.behaviour.defaults()``, every
-        module's cited ``PARAMETERS``.  A parameter with no published value has no
+        behaviour's cited ``PARAMETERS``.  A parameter with no published value has no
         default and must be passed; a missing one raises at fit time, naming it.
     n_periods : int
         Number of ticks ``fit`` runs (and ``fit_iter`` yields).
@@ -188,7 +168,7 @@ class RDFSimulator(BaseEstimator):
         therefore a hyperparameter rather than a hard-coded call.  Defaults to
         ``pr:uniform`` / ``pr:normal`` for the Poledna rules.  Schelling needs only
         ``rules.register_polars_random``; the labour-market rules additionally
-        need ``rules.register_math`` (``behaviour.labour.LABOUR_UDFS``).
+        need ``rules.register_math`` (as ``labour_market``'s do).
     random_seed : int | None
         When set, ``pr.set_random_seed`` is called at the start of each
         ``fit``/``fit_iter`` so the ``pr:uniform`` / ``pr:normal`` SPARQL UDFs
@@ -215,7 +195,7 @@ class RDFSimulator(BaseEstimator):
 
     def __init__(
         self,
-        rules: Sequence[dict] = DEFAULT_RULES,
+        rules: Sequence[dict],
         params: dict | None = None,
         n_periods: int = 12,
         warm_start: bool = False,

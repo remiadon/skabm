@@ -1,0 +1,59 @@
+# Release on a version tag: `git tag v0.3.0 && git push origin v0.3.0`.
+# The tag is the version of everything: setuptools-scm reads it for the package, and
+# users pin the skills to it with `/plugin marketplace add remiadon/skabm#v0.3.0`.
+# Tests are not run here: they are the local pre-commit and pre-push hooks.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # setuptools-scm needs the tag
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - name: The package carries the tag's version and imports
+        run: |
+          version=$(ls dist/*.whl | sed -E 's/.*skabm-([^-]+)-.*/\1/')
+          test "v$version" = "$GITHUB_REF_NAME"
+          uv run --isolated --no-project --with dist/*.whl python -c "import skabm.behaviour, skabm.space, skabm.simulation"
+      - name: The skills plugin and its marketplace validate
+        run: |
+          npx -y @anthropic-ai/claude-code plugin validate --strict ./plugin
+          npx -y @anthropic-ai/claude-code plugin validate --strict .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # PyPI trusted publishing: no token stored in the repository
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

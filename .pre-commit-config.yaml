@@ -7,6 +7,14 @@ repos:
         language: system
         pass_filenames: false
 
+      # a page's simulation runs only on Run, which nbmake never presses: an
+      # undefined name there passes nbmake, so lint for one
+      - id: ruff-notebooks
+        name: ruff undefined names in notebooks
+        entry: uv run --no-sync ruff check --select F821 notebooks
+        language: system
+        pass_filenames: false
+
       - id: ruff-format
         name: ruff format
         entry: uv run --no-sync ruff format skabm tests
@@ -19,11 +27,14 @@ repos:
       # dependents only. It is AST-aware, so comments and formatting select
       # nothing. A fresh clone has no map and runs everything once to build it.
       #
+      # tests/validation (each paper's model against the paper) waits for
+      # pre-push, where the full suite runs.
+      #
       # No coverage gate here on purpose: a percentage measured over a selected
       # subset means nothing. That gate lives at pre-push, over the full suite.
       - id: pytest-testmon
         name: pytest (affected tests only)
-        entry: uv run --no-sync pytest --testmon --tb=short -q
+        entry: uv run --no-sync pytest --testmon --tb=short -q --ignore=tests/validation
         language: system
         pass_filenames: false
         stages: [pre-commit]

@@ -1,0 +1,12 @@
+{
+  "name": "skabm",
+  "description": "skabm's Claude Code skills",
+  "owner": { "name": "Rémi Adon" },
+  "plugins": [
+    {
+      "name": "skabm",
+      "source": "./plugin",
+      "description": "Write agent-based models with skabm, and simulations with a Voilà app"
+    }
+  ]
+}

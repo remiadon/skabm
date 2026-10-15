@@ -1,26 +1,14 @@
-"""Government and central bank, by source: Poledna et al. (2023) and CANVAS, Hommes et
-al. (2025).
+"""Government, central bank and regions.
 
-Poledna et al. (2023), ``poledna_rules``.
-
-Each step, the government's budget is multiplied by (1 + the parameter gov_growth + a
-normal shock with mean 0 and standard deviation the parameter gov_growth_sigma).
-
-Then the central bank updates its policy_rate, prev_output and prev_price together, in
-one rule. Its policy_rate becomes the larger of 0 and the parameter rho times its
-policy_rate plus (1 - rho) times (the parameter r_star + the parameter pi_star + the
-parameter xi_pi times ((the mean (average) over firms of their price) / prev_price - 1 -
-pi_star) + the parameter xi_gamma times ((the total over firms of their output) /
-prev_output - 1)). Its prev_output becomes the total over firms of their output, and its
-prev_price the mean (average) over firms of their price.
-
-CANVAS, Hommes, He, Poledna, Siqueira & Zhang (2025), ``canvas_rules``.
-
-The central bank's policy_rate becomes the parameter boc_rho times its policy_rate plus
-(1 - boc_rho) times the sum of four terms: the parameter boc_r_star; the parameter
-pi_star; the parameter boc_xi_pi times the gap between the expected growth of the mean
-over firms of their price and pi_star; and the parameter boc_xi_gamma times the expected
-growth of the total over firms of their output.
+- Government spending growing by an AR(1) drift; a Taylor rule on realised growth and
+  inflation: Poledna et al. (2023), European Economic Review 151, 104306, eqs. 51, 69.
+- A Taylor rule on SAC forecasts: CANVAS, Hommes et al. (2025), J. Econ. Dyn. Control
+  172, 104986, eq. 7. Its coefficients are re-estimated each quarter on the model's own
+  history and never reported, so boc_rho, boc_r_star, boc_xi_pi and boc_xi_gamma stay
+  required.
+- A region's day: the deaths reported among its people the day before, and its
+  lockdown and mandates: Pangallo et al. (2024), Nat. Hum. Behav. 8, 264-275, Methods
+  ("Coupling", "Timeline").
 """
 
 from __future__ import annotations
@@ -29,22 +17,18 @@ import sympy as sp
 from sympy.stats import Normal
 
 from skabm.behaviour.learning import expect
+from skabm.behaviour.person import REPORTED
 from skabm.dsl import Agents, mean, total
 
-Government, CentralBank, Firm = (
-    Agents("Government"),
-    Agents("CentralBank"),
-    Agents("Firm"),
-)
+Government, CentralBank = Agents("Government"), Agents("CentralBank")
+Firm, Region, Person = Agents("Firm"), Agents("Region"), Agents("Person")
 gov_growth, gov_growth_sigma = sp.symbols("gov_growth gov_growth_sigma")
 rho, r_star, pi_star, xi_pi, xi_gamma = sp.symbols("rho r_star pi_star xi_pi xi_gamma")
 boc_rho, boc_r_star, boc_xi_pi, boc_xi_gamma = sp.symbols(
     "boc_rho boc_r_star boc_xi_pi boc_xi_gamma"
 )
+lockdown_start, lockdown_end = sp.symbols("lockdown_start lockdown_end")
 
-# CANVAS's central bank re-estimates boc_rho, boc_r_star, boc_xi_pi and boc_xi_gamma
-# every quarter on the model's own history (eq. 7), and the paper reports none: no
-# default.
 PARAMETERS = {
     gov_growth: 0.005,  # unsourced: eq. 51 drift
     gov_growth_sigma: 0.0,  # scenario knob: AR(1) innovation std, 0 = deterministic
@@ -54,36 +38,50 @@ PARAMETERS = {
     pi_star: 0.005,
     xi_pi: 0.3214,  # inflation-gap weight, Poledna et al. (2023) Table 2
     xi_gamma: 1.2994,  # growth-gap weight, Poledna et al. (2023) Table 2
+    # 16 March 2020 in days after 12 February, Pangallo et al. (2024) Methods, Timeline
+    lockdown_start: 33.0,
+    lockdown_end: 93.0,  # 15 May 2020, Pangallo et al. (2024) Methods, Timeline
 }
 
 # Poledna et al. (2023) eq. 51, linearised
-poledna_spend = {
+government_spending = {
     Government.budget: Government.budget
     * (1 + gov_growth + Normal("eps", 0, gov_growth_sigma))
 }
-output, price = total(Firm.output), mean(Firm.price)
-growth = output / CentralBank.prev_output - 1
-inflation = price / CentralBank.prev_price - 1
+total_output, mean_price = total(Firm.output), mean(Firm.price)
+growth = total_output / CentralBank.prev_output - 1
+inflation = mean_price / CentralBank.prev_price - 1
 taylor = rho * CentralBank.policy_rate + (1 - rho) * (
     r_star + pi_star + xi_pi * (inflation - pi_star) + xi_gamma * growth
 )
 # Poledna et al. (2023) eq. 69, euro-area terms dropped
-poledna_rate = {
+taylor_rule = {
     CentralBank.policy_rate: sp.Max(taylor, 0),
-    CentralBank.prev_output: output,
-    CentralBank.prev_price: price,
+    CentralBank.prev_output: total_output,
+    CentralBank.prev_price: mean_price,
 }
-
-poledna_rules = [poledna_spend, poledna_rate]
 
 # Hommes et al. (2025) eq. 7, on the SAC forecasts (eq. 20), with no lower bound
 # (footnote 30)
-expected_growth = expect("SUM", "Firm", "output")
-expected_inflation = expect("AVG", "Firm", "price")
-gap = boc_xi_pi * (expected_inflation - pi_star) + boc_xi_gamma * expected_growth
-canvas_rate = {
+gap = boc_xi_pi * (expect("AVG", "Firm", "price") - pi_star) + boc_xi_gamma * expect(
+    "SUM", "Firm", "output"
+)
+forecast_taylor_rule = {
     CentralBank.policy_rate: boc_rho * CentralBank.policy_rate
     + (1 - boc_rho) * (boc_r_star + pi_star + gap)
 }
 
-canvas_rules = [canvas_rate]
+# Pangallo et al. (2024) Methods: the region counts its people's reported deaths,
+# yesterday's D_{t-1}; the lockdown holds from lockdown_start to lockdown_end, and
+# school closures and work from home from lockdown_start on
+reported = total(sp.Piecewise((1, sp.Eq(Person.state, REPORTED)), (0, True)))
+today = Region.t + 1
+region_day = {
+    Region.t: today,
+    Region.reported: reported,
+    Region.deaths: reported - Region.reported,
+    Region.lockdown: sp.Piecewise(
+        (1, (today >= lockdown_start) & (today < lockdown_end)), (0, True)
+    ),
+    Region.mandates: sp.Piecewise((1, today >= lockdown_start), (0, True)),
+}

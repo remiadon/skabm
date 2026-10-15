@@ -9,6 +9,7 @@ import numpy as np
 import polars as pl
 import pytest
 from maplib import Model
+from worlds import POLEDNA
 
 from skabm import template
 from skabm.behaviour.learning import consumed, expect, sac, signal_name
@@ -82,7 +83,7 @@ def test_forecasts_live_on_signal_nodes(params):
     households: no level, so no learner, and the expectation stays at the
     structural zero.  A cold refit restarts the world; a warm start continues it.
     """
-    sim = RDFSimulator(params=params, n_periods=4).fit(firms())
+    sim = RDFSimulator(POLEDNA, params=params, n_periods=4).fit(firms())
     forecasts = f"{_PREFIX} SELECT ?s ?f WHERE {{ ?s def:forecast ?f }}"
     written = sim.model_.query(forecasts)
     assert {iri.strip("<>").rsplit("#", 1)[-1] for iri in written["s"]} == {
@@ -154,10 +155,10 @@ def test_expectations_are_learned_end_to_end_from_an_empty_history(params, shock
         run = pl.concat(sim.fit_iter(firms()))
         return run.group_by("t", maintain_order=True).agg(pl.col("output").sum())
 
-    flat = output(RDFSimulator(params=params, n_periods=5))
+    flat = output(RDFSimulator(POLEDNA, params=params, n_periods=5))
     assert flat["output"].to_list() == [OPENING] * 5
 
-    sim = RDFSimulator(params=shocked, n_periods=10, random_seed=7)
+    sim = RDFSimulator(POLEDNA, params=shocked, n_periods=10, random_seed=7)
     levels = [OPENING, *output(sim)["output"]]
     published = sim.model_.query(
         f"{_PREFIX} SELECT ?f WHERE {{ ex:sig__SUM__Firm__output def:forecast ?f }}"

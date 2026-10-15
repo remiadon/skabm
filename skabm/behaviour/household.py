@@ -1,13 +1,8 @@
-"""Households, Poledna et al. (2023), ``poledna_rules``: two rules, run each step, in
-this order.
+"""Households: what they earn and what they spend.
 
-1. A household's income becomes the first that exists of its employer's w_bar; the
-parameter dividend_ratio times the larger of 0 and the profit of the firm it owns; the
-parameter benefit_replacement times the mean over firms of their w_bar.
-
-2. Its wealth becomes its wealth plus its income minus psi times its income times (1 +
-the expected growth of the total over households of their income), divided by (1 + the
-parameter vat_rate).
+- Income from a wage, else a dividend on the firm owned, else a benefit; consumption from
+  a propensity to consume out of expected income: Poledna et al. (2023), European
+  Economic Review 151, 104306, eqs. 40, 49, 50.
 """
 
 from __future__ import annotations
@@ -15,6 +10,7 @@ from __future__ import annotations
 import polars as pl
 import sympy as sp
 
+from skabm.behaviour import defaults
 from skabm.behaviour.learning import expect
 from skabm.dsl import Agents, coalesce, mean
 
@@ -23,18 +19,16 @@ dividend_ratio, benefit_replacement = sp.symbols("dividend_ratio benefit_replace
 vat_rate = sp.Symbol("vat_rate")
 
 PARAMETERS = {
-    dividend_ratio: 0.7768,  # θ^DIV, Poledna et al. (2023) Table 2
     benefit_replacement: 0.3586,  # θ^UB, Poledna et al. (2023) Table 2
-    vat_rate: 0.1529,  # τ^VAT, Poledna et al. (2023) Table 2
 }
 
 # Poledna et al. (2023) eq. 49
-income = coalesce(
+earned = coalesce(
     Household.employer.w_bar,
     dividend_ratio * sp.Max(Household.owns.profit, 0),
     benefit_replacement * mean(Firm.w_bar),
 )
-poledna_income = {Household.income: income}
+income_by_status = {Household.income: earned}
 # Poledna et al. (2023) eqs. 40, 50
 spent = (
     Household.psi
@@ -42,24 +36,50 @@ spent = (
     * (1 + expect("SUM", "Household", "income"))
     / (1 + vat_rate)
 )
-poledna_consume = {Household.wealth: Household.wealth + Household.income - spent}
+propensity_consumption = {Household.wealth: Household.wealth + Household.income - spent}
 
-poledna_rules = [poledna_income, poledna_consume]
 
 TOTAL_DEPOSITS = (
     222_933.2e6  # D^H, Poledna et al. (2023) Table 2; rescale to the population
 )
 
 
-def initial(households: pl.DataFrame, firms: pl.DataFrame, **params) -> pl.DataFrame:
+def ownership(
+    households: pl.DataFrame,
+    firms: pl.DataFrame,
+    ratio: float = 0.03,  # unsourced: investor share of households, Poledna et al. (2023) §3.2
+) -> pl.DataFrame:
+    """*households* with ``owns`` filled in: the firm in row j owned by the household in
+    row floor(j / ratio), unless the data already names the firm's owner or gives that
+    household a firm.
+
+    ponytail: one firm per household (``owns`` is a single link); with ratio > 1 the
+    later firms of a household stay unowned.
+    """
+    if "owns" not in households.columns:
+        households = households.with_columns(owns=pl.lit(None, pl.String))
+    taken = set(households["owns"].drop_nulls())
+    rows = households.height
+    pairs = {}
+    for j, owned in enumerate(firms["id"]):
+        i = int(j // ratio)
+        if owned not in taken and i < rows:
+            pairs.setdefault(i, owned)
+    assigned = pl.Series([pairs.get(i) for i in range(rows)], dtype=pl.String)
+    return households.with_columns(owns=pl.coalesce("owns", assigned))
+
+
+def opening_balance(
+    households: pl.DataFrame, firms: pl.DataFrame, **params
+) -> pl.DataFrame:
     """*households* with a starting income and wealth wherever the data has none.
 
-    Income is eq. 49 on the opening firms, the rule ``poledna_income`` computes each
-    step: the employer's wage, else the dividend on the owned firm's profit, else the
-    benefit.  Wealth is ``total_deposits`` shared in proportion to income (Section 5.2).
-    *params* are the simulator's, by name; the rest come from ``PARAMETERS``.
+    Income is Poledna et al. (2023) eq. 49 on the opening firms, as ``income_by_status`` computes it each step: the
+    employer's wage, else the dividend on the owned firm's profit, else the benefit.
+    Wealth is ``total_deposits`` shared in proportion to income (Section 5.2).  *params*
+    are the simulator's, by name; the rest come from ``behaviour.defaults()``.
     """
-    p = {"total_deposits": TOTAL_DEPOSITS, **{str(k): v for k, v in PARAMETERS.items()}}
+    p = {"total_deposits": TOTAL_DEPOSITS, **defaults()}
     p |= params
     frame = households
     for column in ("employer", "owns", "income", "wealth"):
@@ -82,12 +102,12 @@ def initial(households: pl.DataFrame, firms: pl.DataFrame, **params) -> pl.DataF
         on="owns",
         how="left",
     )
-    dividend = pl.when(pl.col("_profit").is_not_null()).then(
+    paid = pl.when(pl.col("_profit").is_not_null()).then(
         p["dividend_ratio"] * pl.max_horizontal("_profit", 0.0)
     )
     benefit = p["benefit_replacement"] * firms.select(column("w_bar").mean()).item()
     frame = frame.with_columns(
-        income=pl.coalesce("income", "_wage", dividend, pl.lit(benefit))
+        income=pl.coalesce("income", "_wage", paid, pl.lit(benefit))
     ).with_columns(
         wealth=pl.coalesce(
             "wealth", p["total_deposits"] * pl.col("income") / pl.col("income").sum()

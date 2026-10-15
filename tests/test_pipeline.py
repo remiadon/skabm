@@ -399,3 +399,19 @@ def test_mh_early_break_on_trivial_constraint(population):
             constraints=trivial, n_steps=100, seed=0
         ).fit(population)
     assert cal.best_energy_ == 0.0
+
+
+def test_a_derived_column_follows_its_anchor():
+    # weights as a polars Series, and a column that is an expression of another:
+    # how a per-industry coefficient rides along with the sampled industry
+    sectors = pl.Series(["manuf", "service"])
+    frame = make_dataset(
+        {
+            "sector": weighted_enum(SECTOR_ENUM, pl.Series([3, 1]), seed=300),
+            "alpha": pl.col("sector").replace_strict(sectors, [2.0, 5.0]),
+        },
+        n_agents=200,
+        seed=0,
+    )
+    assert frame.group_by("sector").agg(pl.col("alpha").n_unique())["alpha"].max() == 1
+    assert (frame["alpha"] == 2.0).mean() > 0.5  # manuf weighs 3 to 1

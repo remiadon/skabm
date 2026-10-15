@@ -20,7 +20,7 @@ Required parameters are what the rules read but never write: nothing in the
 model can produce them.  Quantities
 are ``xsd:double``, which maplib fills from any float width; an integer column
 is refused at map time rather than joining with nothing at run time.  Undeclared
-columns are refused too: drop them, or declare them with ``agent``.
+columns are refused too: drop them, or declare them with ``_agent``.
 """
 
 from __future__ import annotations
@@ -61,7 +61,7 @@ LINK = Link()
 # What each field *is*, per class: ``{class: {field: (dtype | Link, description)}}``.
 # The OTTR template knows names and types; this also knows where a link lands and
 # what a quantity means, which is what a reader, and ``skabm.dsl``, need.  Filled by
-# ``agent``, so an ad-hoc class is described too.
+# ``_agent``, so an ad-hoc class is described too.
 SCHEMA: dict[str, dict[str, tuple]] = {}
 
 _XSD = {
@@ -91,7 +91,7 @@ def _rdf_type(dtype) -> RDFType:
     return RDFType.Literal(_XSD.get(base, xsd.string))
 
 
-def agent(
+def _agent(
     klass: str,
     quantities: str = "",
     columns: dict | None = None,
@@ -125,7 +125,7 @@ def agent(
     return Template(EX.suf(klass), parameters, instances)
 
 
-firm = agent(
+firm = _agent(
     "Firm",
     "alpha margin size w_bar output price liquidity profit dividend delta tech_share "
     "flees_amount supply demand sales inventory gamma_d pi_d pi_c",
@@ -157,8 +157,8 @@ firm = agent(
     },
 )
 
-# CANVAS's production network (firm.canvas_rules): a sector is its good.
-sector = agent(
+# CANVAS's production network (behaviour.firm): a sector is its good.
+sector = _agent(
     "Sector",
     "price_index b_hh b_cf final_demand purchases demand price_weight output "
     "labour_cost material_cost capital_cost",
@@ -182,7 +182,7 @@ sector = agent(
         "capital_cost": "the capital price index over its good's price_index, minus 1",
     },
 )
-sector_input = agent(
+sector_input = _agent(
     "Input",
     "share",
     {"buyer": Link("Sector"), "supplier": Link("Sector")},
@@ -194,7 +194,7 @@ sector_input = agent(
     },
 )
 
-household = agent(
+household = _agent(
     "Household",
     "psi income wealth flees_amount",
     {"employer": Link("Firm"), "owns": Link("Firm"), "holds_at": Link("Bank")},
@@ -210,7 +210,7 @@ household = agent(
     },
 )
 
-government = agent(
+government = _agent(
     "Government",
     "budget tax_rate",
     {"purchase_sector": pl.String},
@@ -221,7 +221,7 @@ government = agent(
     },
 )
 
-central_bank = agent(
+central_bank = _agent(
     "CentralBank",
     "policy_rate inflation_target prev_output prev_price",
     doc={
@@ -232,7 +232,7 @@ central_bank = agent(
     },
 )
 
-foreign_firm = agent(
+foreign_firm = _agent(
     "ForeignFirm",
     "demand_size",
     {"source_industry": pl.String},
@@ -243,7 +243,7 @@ foreign_firm = agent(
     },
 )
 
-bank = agent(
+bank = _agent(
     "Bank",
     "deposit_share leverage capital_ratio distressed",
     required=("deposit_share", "leverage"),
@@ -255,7 +255,7 @@ bank = agent(
     },
 )
 
-cell = agent(
+cell = _agent(
     "Cell",
     "x y draw occupied resident rank",
     {"geometry": pl.String, "neighbor": Link("Cell", many=True)},
@@ -263,7 +263,7 @@ cell = agent(
         "x": "column on the grid",
         "y": "row on the grid",
         "geometry": "WKT point, for irregular spaces",
-        "neighbor": "the cells next to this one (residence.grid_neighbors, links)",
+        "neighbor": "the cells next to this one (space.moore_neighbors, links)",
         "draw": "uniform draw ranking the vacant cells this step",
         "occupied": "people living in the cell",
         "resident": "the group of the person living in the cell",
@@ -271,22 +271,113 @@ cell = agent(
     },
 )
 
-person = agent(
+person = _agent(
     "Person",
-    "group draw share_similar rank",
-    {"location": Link("Cell")},
+    "group draw share_similar rank "
+    "susceptibility symptomatic fatality wfh employed state exposure",
+    {
+        "location": Link("Cell"),
+        "home": Link("Place"),
+        "school": Link("Place"),
+        "community": Link("Place"),
+        "work": Link("Place"),
+        "industry": Link("Industry"),
+    },
     doc={
         "group": "the group the person belongs to",
         "location": "the cell the person lives in",
         "draw": "uniform draw ranking the people who move this step",
         "share_similar": "share of the neighbours in the same group",
         "rank": "position among the people who move, by draw",
+        "susceptibility": "relative chance of being infected by a contact, by age, chi",
+        "symptomatic": "probability that an infection shows symptoms, by age, p",
+        "fatality": "probability that a symptomatic infection ends in death, by age",
+        "wfh": "1 if the person's job can be done from home",
+        "employed": "1 if the person works this step",
+        "state": "0 susceptible, 1 latent, 2 pre-symptomatic, 3 symptomatic, "
+        "4 asymptomatic, 5 removed, 6 removed and to die, 7 dead, 8 death reported",
+        "exposure": "infectious contact weight met this step, summed over the layers",
+        "home": "the household the person lives in, as a place of contacts",
+        "school": "the school the person attends, as a place of contacts; children only",
+        "community": "the community the person meets people in",
+        "work": "the workplace the person meets colleagues in; workers only",
+        "industry": "the industry the person works in; workers only",
+    },
+)
+
+# Pangallo et al. (2024): a region, its industries, and the places where people meet.
+region = _agent(
+    "Region",
+    "t deaths reported lockdown mandates",
+    doc={
+        "t": "days since the simulation's first day",
+        "deaths": "deaths reported the day before, D_{t-1}",
+        "reported": "deaths reported so far among the region's people",
+        "lockdown": "1 while non-essential work is closed, else 0",
+        "mandates": "1 once schools close and work moves home, else 0",
+    },
+)
+industry = _agent(
+    "Industry",
+    "output0 inperson0 fromhome0 essential customer_facing community_weight "
+    "government0 other0 consumption0 inperson fromhome staff_inperson staff_fromhome "
+    "demand capacity output consumption",
+    required=(
+        "output0",
+        "inperson0",
+        "fromhome0",
+        "essential",
+        "customer_facing",
+        "community_weight",
+        "government0",
+        "other0",
+        "consumption0",
+    ),
+    doc={
+        "output0": "output before the pandemic, x_0, a year's worth",
+        "inperson0": "workers who cannot work from home, before the pandemic, l^P_0",
+        "fromhome0": "workers who can work from home, before the pandemic, l^H_0",
+        "essential": "share of in-person work the lockdown allows, ESS",
+        "customer_facing": "1 if consumers fear infection when buying from it, tau",
+        "community_weight": "contact weight at its places in the community layer",
+        "government0": "government demand before the pandemic, G^d_0",
+        "other0": "investment and net exports before the pandemic, f^d_0",
+        "consumption0": "households' demand before the pandemic, c^d_0",
+        "inperson": "in-person workers employed, l^P",
+        "fromhome": "from-home workers employed, l^H",
+        "staff_inperson": "people employed in person in it, counted one by one",
+        "staff_fromhome": "people employed from home in it, counted one by one",
+        "demand": "total demand for its output this step, d",
+        "capacity": "output its workforce can make this step, x^cap",
+        "output": "output this step, x",
+        "consumption": "households' demand for its output this step, c^d",
+    },
+)
+order = _agent(
+    "Order",
+    "coefficient",
+    {"buyer": Link("Industry"), "supplier": Link("Industry")},
+    required=("coefficient", "buyer", "supplier"),
+    doc={
+        "coefficient": "the supplier's output the buyer uses per unit of its output, A",
+        "buyer": "the industry ordering the input",
+        "supplier": "the industry making it",
+    },
+)
+place = _agent(
+    "Place",
+    "weight mass",
+    required=("weight",),
+    doc={
+        "weight": "contact weight between two people meeting here, kappa x omega / "
+        "<omega> (eq. 14)",
+        "mass": "infectiousness of the people here this step, summed",
     },
 )
 
 # Spatial evolutionary markets (skabm.behaviour.trader): traders on a lattice, the
 # market they trade in, and the days of data that drive it.
-trader = agent(
+trader = _agent(
     "Trader",
     "x y strategy demand",
     {"neighbor": Link("Trader", many=True), "market": Link("Market")},
@@ -295,12 +386,12 @@ trader = agent(
         "y": "row on the lattice",
         "strategy": "0 fundamentalist, 1 chartist (momentum), 2 noise trader",
         "demand": "what the trader asks for this step, as a share of the price",
-        "neighbor": "the eight traders around this one, on a torus (trader.torus_neighbors)",
+        "neighbor": "the eight traders around this one, on a torus (space.moore_neighbors, torus=True)",
         "market": "the market the trader trades in",
     },
 )
 
-market = agent(
+market = _agent(
     "Market",
     "t price fundamental ret momentum fitness_fund fitness_chart fitness_noise",
     doc={
@@ -315,7 +406,7 @@ market = agent(
     },
 )
 
-day = agent(
+day = _agent(
     "Day",
     "t fundamental ret",
     {"market": Link("Market")},
@@ -327,7 +418,7 @@ day = agent(
     },
 )
 
-occupation = agent(
+occupation = _agent(
     "Occupation",
     "demand_init demand_final target_demand employment unemployment vacancies "
     "separations openings applications app_norm job_finding "
@@ -352,7 +443,7 @@ occupation = agent(
     },
 )
 
-edge = agent(
+edge = _agent(
     "Edge",
     "weight flow",
     {"src": Link("Occupation"), "dst": Link("Occupation")},
@@ -365,12 +456,12 @@ edge = agent(
     },
 )
 
-clock = agent("Clock", "t", doc={"t": "time steps elapsed"})
+clock = _agent("Clock", "t", doc={"t": "time steps elapsed"})
 
-# Traffic (skabm.behaviour.traffic).  A Route's links are many per route, so they
+# Traffic (skabm.behaviour.commuter).  A Route's links are many per route, so they
 # are not a column: `via` maps a long (id, via) frame onto routes that
 # `route` already typed.
-link = agent(
+link = _agent(
     "Link",
     "length t0 capacity car busway flow time",
     {
@@ -396,7 +487,7 @@ link = agent(
         "area": "the areas the link touches (traffic.area_membership, template.links)",
     },
 )
-route = agent(
+route = _agent(
     "Route",
     "mode rank extra time open prob cum load",
     {"od": pl.String, "option": Link("Option"), "via": Link("Link", many=True)},
@@ -415,7 +506,7 @@ route = agent(
         "load": "commuters taking the route today",
     },
 )
-option = agent(
+option = _agent(
     "Option",
     "mode share0 s s0 share",
     {"od": pl.String},
@@ -429,7 +520,7 @@ option = agent(
         "od": "origin-destination pair",
     },
 )
-commuter = agent(
+commuter = _agent(
     "Commuter",
     "weight u time car bus bike walk",
     # a commuter is somebody's household member going to somebody's firm: the link is
@@ -450,7 +541,7 @@ commuter = agent(
         "household": "the household this commuter belongs to",
     },
 )
-area = agent(
+area = _agent(
     "Area",
     "vkt",
     {"name": pl.String, "geometry": pl.String},
@@ -490,6 +581,10 @@ TEMPLATES = {
         bank,
         cell,
         person,
+        region,
+        industry,
+        order,
+        place,
         trader,
         market,
         day,

@@ -1,4 +1,4 @@
-"""``skabm.behaviour.trader`` — Brock & Hommes (1998)'s adaptive belief system on a lattice.
+"""Brock & Hommes (1998)'s adaptive belief system on a lattice.
 
 Engine tests only: its parameter values come from an open-source implementation, not
 from the paper or any published calibration, so there is no model test until one exists.  They pin the lattice, the days of data, and
@@ -12,12 +12,21 @@ from maplib import Model
 from skabm import template
 from skabm.behaviour import trader
 from skabm.simulation import RDFSimulator
+from skabm.space import moore_neighbors
 from skabm.sparql import register_math, register_polars_random
+
+# one trading day, as the implementation's simulation.py runs it
+RULES = [
+    trader.market_day,
+    trader.strategy_demand,
+    trader.impact_price,
+    trader.logit_imitation,
+]
 
 
 def test_the_lattice_is_a_torus_of_eight_neighbours():
     traders = trader.lattice(4, seed=0)
-    around = trader.torus_neighbors(traders)
+    around = moore_neighbors(traders, torus=True)
     assert traders.height == 16 and set(traders["strategy"]) <= {0.0, 1.0, 2.0}
     counts = around.group_by("id").agg(n=pl.col("neighbor").n_unique())
     assert counts["n"].to_list() == [8] * 16
@@ -28,10 +37,10 @@ def test_the_lattice_is_a_torus_of_eight_neighbours():
 
 def test_days_carry_the_trend_and_the_log_returns():
     close = pl.Series(100 * np.exp(0.01 * np.arange(6)))  # exactly log-linear
-    days = trader.days(close)
+    days = trader.trading_days(close)
     assert np.allclose(days["fundamental"], close)
     assert np.allclose(days["ret"], [0.0] + [0.01] * 5)
-    assert trader.opening(close)["price"][0] == close[0]
+    assert trader.opening_market(close)["price"][0] == close[0]
 
 
 def test_without_price_impact_the_price_is_the_closes():
@@ -40,14 +49,15 @@ def test_without_price_impact_the_price_is_the_closes():
     )
     traders = trader.lattice(4, seed=0)
     world = Model()
-    world.map(template.market, trader.opening(close).with_iri())
-    world.map(template.day, trader.days(close).with_iri("market"))
+    world.map(template.market, trader.opening_market(close).with_iri())
+    world.map(template.day, trader.trading_days(close).with_iri("market"))
     world.map(template.trader, traders.with_iri("market"))
     world.map(
-        template.links("neighbor"), trader.torus_neighbors(traders).with_iri("neighbor")
+        template.links("neighbor"),
+        moore_neighbors(traders, torus=True).with_iri("neighbor"),
     )
     sim = RDFSimulator(
-        rules=trader.brock_hommes_rules,
+        rules=RULES,
         params={"price_impact": 0.0},
         udfs=(register_polars_random, register_math),
         n_periods=10,

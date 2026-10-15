@@ -1,0 +1,6 @@
+{
+  "name": "skabm",
+  "description": "Skills for skabm: write an agent-based model from a paper (skabm-core), and take a request to a working simulation with a Voilà app (skabm-simulation)",
+  "author": { "name": "Rémi Adon" },
+  "repository": "https://github.com/remiadon/skabm"
+}

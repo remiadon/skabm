@@ -1,15 +1,15 @@
 """Occupational mobility and automation on the RDFSimulator machinery — del
 Rio-Chanona et al. (2021), J. R. Soc. Interface 18:20200898.
 
-The model lives in skabm/behaviour/labour.py: occupations are the agents, the
+The model is `RULES` below, from skabm/behaviour/labour_market.py: occupations are the agents, the
 job-transition network A_ij is a reified `Edge` population, and a one-row
 `Clock` carries the calendar time the automation S-curve needs.  There is no
 calibration layer here — the network is synthetic and the occupation frame is
-seeded by `labour.occupations`.
+seeded by `labour_market.occupations`.
 
 The rules need `math:exp` (the urn-ball matching function and the S-curve are
 both transcendental), which arrives through the `udfs=` hyperparameter as
-`labour.LABOUR_UDFS`.
+`UDFS`.
 
 Covered: the two conservation identities that pin the transcription of eqs.
 13-17 (labour force constant, urn-ball hire count), convergence to a steady
@@ -24,16 +24,26 @@ import polars as pl
 import pytest
 from worlds import world
 
-from skabm.behaviour import labour
-from skabm.behaviour.labour import (
-    LABOUR_UDFS,
-    delrio_flow,
+from skabm.behaviour import labour_market
+from skabm.behaviour.labour_market import (
     mobility_network,
     occupations,
     reallocate_demand,
 )
 from skabm.simulation import RDFSimulator
-from skabm.sparql import _PREFIXES
+from skabm.sparql import _PREFIXES, register_math, register_polars_random
+
+# one step, the order of the paper's Methods; the rules call math:exp
+RULES = [
+    labour_market.clock,
+    labour_market.s_curve_target,
+    labour_market.separations_openings,
+    labour_market.applications,
+    labour_market.urn_ball_flow,
+    labour_market.job_finding,
+    labour_market.stock_flow_clearing,
+]
+UDFS = (register_polars_random, register_math)
 
 NEVER = 1e6  # shock_start far enough away that the S-curve stays dormant
 
@@ -68,9 +78,9 @@ def market(n: int = 8, employment: float = 1000.0, **overrides):
         )
     )
     sim = RDFSimulator(
-        rules=labour.delrio_rules,
+        rules=RULES,
         params={"shock_start": NEVER, **overrides.pop("params", {})},
-        udfs=LABOUR_UDFS,
+        udfs=UDFS,
         **overrides,
     )
     return sim, world(Occupation=occ, Edge=ring(n), Clock=clock())
@@ -131,9 +141,9 @@ def test_hires_match_the_urn_ball_count():
     # Eq. 16 summed over origin occupations collapses to v_j (1 - exp(-s_j/v_j)):
     # the number of j's vacancies that drew at least one applicant.  This pins
     # the whole matching function, the v_j^2 in the numerator included.
-    stop = labour.delrio_rules.index(delrio_flow) + 1  # halt before clearing,
+    stop = RULES.index(labour_market.urn_ball_flow) + 1  # halt before clearing,
     sim, graph = market(n=6, n_periods=1)  # so v and s still hold what f used
-    sim.set_params(rules=labour.delrio_rules[:stop])
+    sim.set_params(rules=RULES[:stop])
     sim.fit(graph)
     got = sim.model_.query(
         _PREFIXES
@@ -232,9 +242,9 @@ def shock_outcome(edges: pl.DataFrame, n: int) -> tuple[dict, dict]:
         pl.DataFrame({"id": [f"occ_{i}" for i in range(n)], "employment": [1000.0] * n})
     )
     sim = RDFSimulator(
-        rules=labour.delrio_rules,
+        rules=RULES,
         params={"shock_start": NEVER},
-        udfs=LABOUR_UDFS,
+        udfs=UDFS,
         n_periods=60,
     )
     *_, opening = sim.fit_iter(world(Occupation=occ, Edge=edges, Clock=clock()))

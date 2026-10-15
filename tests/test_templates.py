@@ -97,7 +97,7 @@ def test_an_undeclared_link_is_named_not_guessed():
     model = Model()
     model.map(template.firm, FIRMS)
     model.map(
-        template.agent("Auditor", columns={"audits": LINK}),
+        template._agent("Auditor", columns={"audits": LINK}),
         auditors.with_iri("audits"),
     )
     edge = model.query(
@@ -125,15 +125,18 @@ def test_every_template_field_says_what_it_is():
 
 def test_every_cited_value_is_read_and_has_one_value():
     """A module's PARAMETERS gives only what its rules read, and a name shared by
-    several modules (``vat_rate``, ``dividend_ratio``) has one value everywhere."""
+    several modules has one value everywhere."""
     for info in pkgutil.iter_modules(skabm.behaviour.__path__):
-        module = importlib.import_module(f"skabm.behaviour.{info.name}")
-        rules = [
-            rule
-            for value in vars(module).values()
-            for rule in (value if isinstance(value, list) else [value])
-            if is_rule(rule)
-        ]
-        cited = {str(k) for k in getattr(module, "PARAMETERS", {})}
-        assert cited <= set().union(*(_Rule(r).parameters() for r in rules)), info.name
+        check_cited(importlib.import_module(f"skabm.behaviour.{info.name}"))
     assert skabm.behaviour.defaults()  # raises on a name with two values
+
+
+def check_cited(module) -> None:
+    rules = [
+        rule
+        for value in vars(module).values()
+        for rule in (value if isinstance(value, list) else [value])
+        if is_rule(rule)
+    ]
+    cited = {str(k) for k in getattr(module, "PARAMETERS", {})}
+    assert cited <= set().union(*(_Rule(r).parameters() for r in rules)), module

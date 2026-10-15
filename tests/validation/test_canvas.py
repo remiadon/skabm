@@ -5,7 +5,7 @@ scenarios of Appendix A.2.4 (Fig. 10) through eqs. 39-42, that a firm never move
 and quantity together, and that a cheaper or larger firm is picked more (A.2.3).  The
 Taylor rule's coefficients are re-estimated every quarter and never reported (eq. 7), so
 it gets no model test: the rest runs without it.  Engine tests pin the SPARQL and JAX
-runs to each other and ``initial`` to a clearing opening quarter; their numbers are any.
+runs to each other and ``firm.opening_quarter`` to a clearing opening quarter; their numbers are any.
 """
 
 import jax
@@ -18,11 +18,25 @@ from skabm.behaviour import defaults, firm, macro
 from skabm.behaviour.learning import sac
 from skabm.dsl import arrays, jax_tick, sparql
 from skabm.simulation import RDFSimulator
+from skabm.sparql import register_math
 
 jax.config.update("jax_enable_x64", True)
 
-CANVAS = [*firm.canvas_rules, *macro.canvas_rules]
-WITHOUT_TAYLOR = firm.canvas_rules
+# one quarter, Appendix A's order; the rules call math:exp
+CANVAS = [
+    firm.price_quantity_signal,
+    firm.cost_push,
+    firm.heuristic_supply,
+    firm.sector_totals,
+    firm.sector_demand,
+    firm.first_pick_demand,
+    firm.inventory_sales,
+    firm.sector_price_index,
+    firm.sector_costs,
+    macro.forecast_taylor_rule,
+]
+UDFS = (register_math,)
+WITHOUT_TAYLOR = [r for r in CANVAS if r is not macro.forecast_taylor_rule]
 TAYLOR = {"boc_rho": 0.9, "boc_r_star": 0.005, "boc_xi_pi": 1.5, "boc_xi_gamma": 0.5}
 
 # One good is the whole basket, capital and input: the weights of Table 3's columns
@@ -71,10 +85,8 @@ MIXED = firms(
 
 def run(firm_frame, sectors, inputs, rules=WITHOUT_TAYLOR, ticks=1, **params):
     """Every agent after each tick, from *firm_frame* in its opening quarter."""
-    firm_frame, sectors = firm.canvas_initial(firm_frame, sectors, inputs)
-    sim = RDFSimulator(
-        rules=rules, params=params, n_periods=ticks, udfs=firm.CANVAS_UDFS
-    )
+    firm_frame, sectors = firm.opening_quarter(firm_frame, sectors, inputs)
+    sim = RDFSimulator(rules=rules, params=params, n_periods=ticks, udfs=UDFS)
     graph = world(Firm=firm_frame, Sector=sectors, Input=inputs)
     return pl.concat(sim.fit_iter(graph), how="diagonal").with_columns(
         id=pl.col("agent").str.extract(r"#(.*)>$")
@@ -92,7 +104,7 @@ def test_the_rules_default_to_the_papers_values():
         "pi_star": 0.005,  # π*, Table 4
     }
     with pytest.raises(KeyError, match="boc_r_star.*boc_rho.*boc_xi_gamma.*boc_xi_pi"):
-        sparql(macro.canvas_rate, defaults())
+        sparql(macro.forecast_taylor_rule, defaults())
 
 
 def test_the_four_scenarios_of_fig_10():
@@ -147,7 +159,7 @@ def test_table_3s_weights_price_the_opening_basket_at_one():
     none = pl.DataFrame(
         schema={"buyer": pl.String, "supplier": pl.String, "share": float}
     )
-    _, sectors = firm.canvas_initial(opening, sectors, none)
+    _, sectors = firm.opening_quarter(opening, sectors, none)
     assert sectors["labour_cost"].to_list() == pytest.approx([0.0] * 19, abs=1e-4)
     assert sectors["capital_cost"].to_list() == pytest.approx([0.0] * 19, abs=1e-12)
 
@@ -162,7 +174,7 @@ def test_the_opening_quarter_clears_every_sector():
     its firms make, so its first quarter's demand is its opening sales' value, and data
     it already has is kept."""
     kept = NETWORK.with_columns(final_demand=pl.Series([None, 7.0]))
-    opening, sectors = firm.canvas_initial(MIXED, kept, EDGES)
+    opening, sectors = firm.opening_quarter(MIXED, kept, EDGES)
     assert sectors.filter(pl.col("id") == "b")["final_demand"].item() == 7.0
     first = run(MIXED, NETWORK, EDGES).filter(pl.col("class") == "Sector").sort("id")
     made = opening.group_by("sector").agg((pl.col("price") * pl.col("output")).sum())
@@ -175,10 +187,8 @@ def test_sparql_and_jax_agree_on_canvas():
     """Every rule, the Taylor rule included, and the SAC learners, six quarters on the
     graph and in JAX from the same opening frames."""
     ticks = 6
-    opening, sectors = firm.canvas_initial(MIXED, NETWORK, EDGES)
-    sim = RDFSimulator(
-        rules=CANVAS, params=TAYLOR, n_periods=ticks, udfs=firm.CANVAS_UDFS
-    )
+    opening, sectors = firm.opening_quarter(MIXED, NETWORK, EDGES)
+    sim = RDFSimulator(rules=CANVAS, params=TAYLOR, n_periods=ticks, udfs=UDFS)
     graph = world(Firm=opening, Sector=sectors, Input=EDGES, CentralBank=BANK)
     *_, last = sim.fit_iter(graph)
     last = last.with_columns(id=pl.col("agent").str.extract(r"#(.*)>$"))

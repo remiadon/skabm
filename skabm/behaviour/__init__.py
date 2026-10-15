@@ -1,17 +1,12 @@
-"""
-The rule library, by agent type: ``firm``, ``household``, ``macro`` (government and
-central bank), ``bank``, ``labour``, ``residence``, ``traffic``, and ``learning``, the
-expectations they share.
+"""Agent behaviours, one module per type of agent (``firm``, ``household``, ``person``,
+``labour_market``, ``trader``, ``commuter``, ``bank``, ``macro``) and the expectations
+they share (``learning``).  A rule is named for the mechanism it implements and cites the
+source that introduced it; its ``PARAMETERS`` are that source's values.  The polars
+functions that build an agent's opening state sit with its rules.  A model is a list of
+rules, composed in a paper's validation test and on its page.
 
-A module is how one type of agent behaves, according to each source it cites. Its
-docstring specifies the rules; the code below it is the rules, as dicts (``skabm.dsl``),
-named after their source (``firm.poledna_produce``, ``firm.canvas_heuristic``) and listed
-per source in the order each step runs them (``firm.poledna_rules``,
-``firm.canvas_rules``), so a model takes one source's rules or mixes several.  Everything
-before the first step (links, derived populations, starting values) is data, built by
-the module's polars functions before mapping.  Each module's ``PARAMETERS`` gives every
-parameter its rules read that has a published value, next to its citation.
-``defaults()`` merges them, which is what ``RDFSimulator`` lays its ``params=`` over.
+``defaults()`` merges every module's ``PARAMETERS``, which is what ``RDFSimulator`` lays
+its ``params=`` over.
 """
 
 import importlib
@@ -21,7 +16,7 @@ from functools import cache
 
 @cache
 def defaults() -> dict:
-    """Every module's ``PARAMETERS``, by name; a name has one value across modules."""
+    """Every behaviour's ``PARAMETERS``, by name; a name has one value across modules."""
     cited = {
         (str(symbol), value)
         for info in pkgutil.iter_modules(__path__)
