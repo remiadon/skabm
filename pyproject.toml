@@ -9,7 +9,6 @@ description = "Agent-based models as SymPy rules, run on a knowledge graph or in
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "lonboard>=0.17.0",
     "maplib>=0.20.26",
     "numpy>=2.4.6",
     "polars>=1.42.1",
