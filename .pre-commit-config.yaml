@@ -74,6 +74,17 @@ repos:
         pass_filenames: false
         stages: [pre-push]
 
+      # mybinder.org builds main: on a push there, build what it builds (binder/check: the
+      # commit pushed, Python of runtime.txt, every page on a cold data cache). The
+      # notebooks hook above runs on warm caches, so it never sees a download fail.
+      - id: binder
+        name: binder build (push to main only)
+        entry: bash -c '[ "${PRE_COMMIT_REMOTE_BRANCH:-}" != refs/heads/main ] || binder/check "$PRE_COMMIT_TO_REF"'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
       # Reads .coverage, which only the full pre-push run writes — so the badge
       # tracks the last full suite rather than the current commit. testmon does
       # not clobber the file, so the number stays real; it just lags a push.

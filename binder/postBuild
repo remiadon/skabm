@@ -1,11 +1,20 @@
 #!/bin/bash
 # skabm with the pages' extra, then every page (a notebook built on skabm.player) executed
 # once: that sets it up without simulating, so whatever it downloads (Bayonne's roads and
-# census data) is in the image and a session doesn't refetch it.  A page that fails to
-# set up fails the build.
+# census data) is in the image and a session doesn't refetch it.  The image is one for
+# every page, so a page whose setup fails (a data server down) is reported and left to
+# fetch when a session opens, rather than failing the others' build; BINDER_STRICT=1
+# (binder/check) fails instead.
 set -euo pipefail
 pip install --no-cache-dir "${REPO_DIR}[voila]"
 cd "${REPO_DIR}/notebooks"
+failed=()
 for notebook in *.ipynb; do
-    if grep -q "skabm.player" "$notebook"; then jupyter execute "$notebook"; fi
+    if grep -q "skabm.player" "$notebook"; then
+        jupyter execute "$notebook" || failed+=("$notebook")
+    fi
 done
+if (( ${#failed[@]} )); then
+    echo "postBuild: ${failed[*]} did not set up; each fetches its data when a session opens" >&2
+    [[ -z "${BINDER_STRICT:-}" ]] || exit 1
+fi

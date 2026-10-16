@@ -1,0 +1,15 @@
+#!/bin/bash
+# What mybinder.org builds, without docker: a commit (HEAD by default) in a fresh clone, a
+# fresh Python of runtime.txt, and postBuild on a cold data cache, every page strict.
+# The pre-push hook runs it on a push to main (a few minutes, most of it downloads);
+# by hand: binder/check.  Not checked: the Binder image's conda base, its 2 GB cap
+# (CLAUDE.md, Showcase pages), and a session's own start.
+set -euo pipefail
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+git clone -q --no-hardlinks "$(git rev-parse --show-toplevel)" "$work"  # a clone, as Binder: setuptools-scm reads .git
+git -C "$work" checkout -q "$(git rev-parse "${1:-HEAD}")"  # the commit pushed, else HEAD
+uv venv -q --seed --python "$(sed 's/^python-//' "$work/binder/runtime.txt")" "$work/.venv"
+export VIRTUAL_ENV="$work/.venv" PATH="$work/.venv/bin:$PATH" REPO_DIR="$work" BINDER_STRICT=1
+"$work/binder/postBuild"
+echo "binder/check: every page set up from a cold cache"
