@@ -22,10 +22,12 @@ jobs:
           version=$(ls dist/*.whl | sed -E 's/.*skabm-([^-]+)-.*/\1/')
           test "v$version" = "$GITHUB_REF_NAME"
           uv run --isolated --no-project --with dist/*.whl python -c "import skabm.behaviour, skabm.space, skabm.simulation"
+      # Not --strict: plugin.json has no version on purpose, so the plugin follows the
+      # ref users pin (#v0.3.0), and that warning would fail the release.
       - name: The skills plugin and its marketplace validate
         run: |
-          npx -y @anthropic-ai/claude-code plugin validate --strict ./plugin
-          npx -y @anthropic-ai/claude-code plugin validate --strict .
+          npx -y @anthropic-ai/claude-code plugin validate ./plugin
+          npx -y @anthropic-ai/claude-code plugin validate .
       - uses: actions/upload-artifact@v4
         with:
           name: dist

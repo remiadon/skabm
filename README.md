@@ -49,7 +49,7 @@ uv run --extra voila voila notebooks
 | | |
 |---|---|
 | **Behaviour as equations** | a rule is a dict of SymPy expressions, `{Firm.price: Firm.price * (1 + inflation)}`. The same rule runs on the knowledge graph and, differentiably, in JAX |
-| **Rules from a paper** | the `skabm-core` skill takes a coding agent from a model section to cited, tested rules ([.claude/skills/skabm-core](.claude/skills/skabm-core/SKILL.md)); `skabm-simulation` takes it from a request to a Voilà app ([.claude/skills/skabm-simulation](.claude/skills/skabm-simulation/SKILL.md)) |
+| **Rules from a paper** | the `skabm-core` skill takes a coding agent from a model section to cited, tested rules ([plugin/skills/skabm-core](plugin/skills/skabm-core/SKILL.md)); `skabm-simulation` takes it from a request to a Voilà app ([plugin/skills/skabm-simulation](plugin/skills/skabm-simulation/SKILL.md)) |
 | **Observables in polars** | a run is every agent after every tick, one DataFrame, so any macro quantity, a Gini included, is a polars expression you write. Nothing is declared to the simulator |
 | **Populations from public data** | calibrators that fit agent rows to known joint facts while every marginal survives exactly |
 | **Citations built in** | each behaviour module carries its published parameter values next to their table and equation |
@@ -140,7 +140,7 @@ jax.grad(price_level)(0.02)   # 4 × 1.05 × 1.02³, the exact derivative
 ```
 
 `RDFSimulator([reprice], params={"inflation": 0.02})` runs it on the graph. The `skabm-core`
-skill ([.claude/skills/skabm-core](.claude/skills/skabm-core/SKILL.md)) takes a coding agent
+skill ([plugin/skills/skabm-core](plugin/skills/skabm-core/SKILL.md)) takes a coding agent
 from a paper's model section to such rules, cited and tested: CANVAS's (Hommes et al. 2025)
 came out of it.
 
